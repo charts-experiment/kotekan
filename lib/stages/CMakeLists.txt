@@ -36,6 +36,7 @@ add_library(
     recvSingleDishVDIF.cpp
     streamSingleDishVDIF.cpp
     accumulate.cpp
+    chartsAccumulate.cpp
     bufferStatus.cpp
     bufferSend.cpp
     bufferRecv.cpp
