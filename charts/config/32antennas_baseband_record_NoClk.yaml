@@ -97,6 +97,7 @@ baseband_readout:
   kotekan_stage: chartsBasebandReadout
   in_buf: network_capture_buf
   out_buf: baseband_output_buffer_0
+  freq_id: 0
   mask_buf: mask_buffer_zeros
   num_frames_buffer: buffer_depth - 10
   max_dump_samples: samples_per_data_set * capture_n_frames

@@ -12,7 +12,7 @@ num_elements: 64
 n_channels_per_packet: 168
 local_subbands_per_packet: 2
 
-buffer_depth: 110
+buffer_depth: 50
 baseband_buffer_depth: buffer_depth - 10
 
 spectra_per_dataset: 15360 # 50 ms of data (one frame)
@@ -20,8 +20,7 @@ bytes_per_dataset: n_channels_per_packet * local_subbands_per_packet * spectra_p
 
 # For basebandReadout
 samples_per_data_set: 15360
-capture_n_frames: 100
-
+capture_n_frames: 20
 
 
 # Main CHARTS Metadata Pool
@@ -67,17 +66,24 @@ mask_buffer_zeros_1:
   numa_node: 0
   metadata_pool: main_pool
 
-# baseband_output_buffer_0:
-#   kotekan_buffer: standard
-#   num_frames: baseband_buffer_depth
-#   frame_size: bytes_per_dataset * num_elements
-#   metadata_pool: baseband_pool
+baseband_output_buffer_0:
+  kotekan_buffer: standard
+  num_frames: baseband_buffer_depth
+  frame_size: bytes_per_dataset * num_elements
+  metadata_pool: baseband_pool
 
-# baseband_output_buffer_1:
-#   kotekan_buffer: standard
-#   num_frames: baseband_buffer_depth
-#   frame_size: bytes_per_dataset * num_elements
-#   metadata_pool: baseband_pool
+baseband_output_buffer_1:
+  kotekan_buffer: standard
+  num_frames: baseband_buffer_depth
+  frame_size: bytes_per_dataset * num_elements
+  metadata_pool: baseband_pool
+
+# Interleaves completed frames from the two readout streams for one writer.
+baseband_output_buffer_merged:
+  kotekan_buffer: standard
+  num_frames: baseband_buffer_depth * 2
+  frame_size: bytes_per_dataset * num_elements
+  metadata_pool: baseband_pool
 
 ##########################
 #### Pipeline Stages #####
@@ -127,64 +133,61 @@ zero_samples_1:
   sample_size: 21504
 
 
-# baseband_readout_0:
-#   kotekan_stage: chartsBasebandReadout
-#   in_buf: network_capture_buf_0
-#   out_buf: baseband_output_buffer_0
-#   mask_buf: mask_buffer_zeros_0
-#   num_frames_buffer: buffer_depth - 10
-#   max_dump_samples: samples_per_data_set * capture_n_frames
-
-# baseband_readout_1:
-#   kotekan_stage: chartsBasebandReadout
-#   in_buf: network_capture_buf_1
-#   out_buf: baseband_output_buffer_1
-#   mask_buf: mask_buffer_zeros_1
-#   num_frames_buffer: buffer_depth - 10
-#   max_dump_samples: samples_per_data_set * capture_n_frames
-
-
-# # Save baseband data
-# baseband_save_0:
-#   kotekan_stage: BasebandWriter
-#   samples_per_data_set: 5160960 # bytes_per_dataset 
-#   num_elements: 64 
-#   in_buf: baseband_output_buffer_0
-#   root_path: /data/32_test # Config (flag)
-#   dump_timeout: 1
-# ## Monitoring and debug stages ####
-
-# baseband_save_1:
-#   kotekan_stage: BasebandWriter
-#   samples_per_data_set: 5160960 # bytes_per_dataset 
-#   num_elements: 64 
-#   in_buf: baseband_output_buffer_1
-#   root_path: /data/32_test # Config (flag)
-#   dump_timeout: 1
-
-
-raw_file_write_0:
-  kotekan_stage: rawFileWrite
+baseband_readout_0:
+  kotekan_stage: chartsBasebandReadout
   in_buf: network_capture_buf_0
-  file_name: network_0
-  base_dir: /data/32_test
-  file_ext: bin
-  num_frames_per_file: 1
-  exit_after_n_files: 100
+  out_buf: baseband_output_buffer_0
+  freq_id: 0
+  mask_buf: mask_buffer_zeros_0
+  num_frames_buffer: buffer_depth - 10
+  max_dump_samples: samples_per_data_set * capture_n_frames
 
-raw_file_write_1:
-  kotekan_stage: rawFileWrite
+baseband_readout_1:
+  kotekan_stage: chartsBasebandReadout
   in_buf: network_capture_buf_1
-  file_name: network_1
-  base_dir: /data/32_test
-  file_ext: bin
-  num_frames_per_file: 1
-  exit_after_n_files: 100
-  
-# inspect_frame:
-#   kotekan_stage: restInspectFrame
-#   in_buf: network_capture_buf_0
+  out_buf: baseband_output_buffer_1
+  freq_id: 336
+  mask_buf: mask_buffer_zeros_1
+  num_frames_buffer: buffer_depth - 10
+  max_dump_samples: samples_per_data_set * capture_n_frames
 
-# inspect_frame_1:
-#   kotekan_stage: restInspectFrame
+
+# Merge the frequency blocks only after their readouts have attached distinct
+# BasebandMetadata::freq_id values.
+baseband_merge:
+  kotekan_stage: bufferMerge
+  timeout: 0.1
+  in_bufs:
+    - baseband_output_buffer_0
+    - baseband_output_buffer_1
+  out_buf: baseband_output_buffer_merged
+
+# Save both frequency blocks through one writer. It creates one file per
+# (event_id, freq_id), i.e. baseband_1_0 and baseband_1_336 for this test.
+baseband_save:
+  kotekan_stage: BasebandWriter
+  samples_per_data_set: 5160960 # bytes_per_dataset
+  num_elements: 64
+  in_buf: baseband_output_buffer_merged
+  root_path: /data/32_test # Config (flag)
+  dump_timeout: 1
+
+
+# raw_file_write_0:
+#   kotekan_stage: rawFileWrite
+#   in_buf: network_capture_buf_0
+#   file_name: network_0
+#   base_dir: /data/32_test
+#   file_ext: bin
+#   num_frames_per_file: 1
+#   exit_after_n_files: 100
+
+# raw_file_write_1:
+#   kotekan_stage: rawFileWrite
 #   in_buf: network_capture_buf_1
+#   file_name: network_1
+#   base_dir: /data/32_test
+#   file_ext: bin
+#   num_frames_per_file: 1
+#   exit_after_n_files: 100
+  

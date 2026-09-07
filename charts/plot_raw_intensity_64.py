@@ -406,7 +406,7 @@ def plot_spectra_grid(
         axis.plot(frequency_mhz, display[index], linewidth=0.65)
         axis.set_title(f"Antenna {antennas[index]}", fontsize=9)
         axis.grid(alpha=0.2)
-        axis.set_ylim(-20, 15)
+        axis.set_ylim(-10, 25)
     figure.suptitle(f"{statistic.capitalize()} intensity spectrum")
     figure.supxlabel("Frequency [MHz]")
     figure.supylabel("Intensity" if scale == "linear" else "Intensity [dB]")

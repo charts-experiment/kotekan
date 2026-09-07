@@ -1,0 +1,250 @@
+########################
+#### Global options ####
+########################
+type: config
+# Logging level can be one of:
+# OFF, ERROR, WARN, INFO, DEBUG, DEBUG2 (case insensitive)
+# Note DEBUG and DEBUG2 require a build with (-DCMAKE_BUILD_TYPE=Debug)
+log_level: info  
+cpu_affinity: [6, 7, 8, 9]
+
+num_elements: 64
+n_channels_per_packet: 168
+local_subbands_per_packet: 2
+
+buffer_depth: 20
+
+samples_per_data_set: 153600
+bytes_per_dataset: n_channels_per_packet * local_subbands_per_packet * samples_per_data_set # 50 ms of data
+
+# For Astron Correlator
+num_data_sets: 1 # Number of independent integrations within a single dataset
+block_size: 2
+num_blocks: 528 #(num_elements / block_size) * (num_elements / block_size + 1) / 2 #This is a kernel tuning parameter for a global work space dimension that sets data sizes fo  GPU work items.
+sizeof_int: 4
+data_format: "cuda_wmma"
+frame_arrival_period: samples_per_data_set / 300000.0 # Time between frame arrivals in seconds using sampling rate of 10/3 microsec
+num_local_freq: 336
+
+integration_frames: 20 # 10.24 s per accumulated output frame
+capture_n_frames: 168750
+
+
+# Main CHARTS Metadata Pool
+main_pool:
+  kotekan_metadata_pool: chartsMetadata
+  num_metadata_objects: buffer_depth*15
+
+
+# Input data buffers from the DPDK stage
+# Buffer to hold captured network packets
+network_capture_buf_0:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: bytes_per_dataset * num_elements # 322.560.000 
+  numa_node: 0
+  metadata_pool: main_pool
+  zero_new_frames: true
+
+mask_buffer_zeros_0:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: samples_per_data_set
+  numa_node: 0
+  metadata_pool: main_pool
+
+# Additional buffers for the second NIC
+network_capture_buf_1:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: bytes_per_dataset * num_elements # 322.560.000 
+  numa_node: 0
+  metadata_pool: main_pool
+  zero_new_frames: true
+
+mask_buffer_zeros_1:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: samples_per_data_set
+  numa_node: 0
+  metadata_pool: main_pool
+
+host_correlation_buffer_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: num_local_freq * num_blocks * (block_size*block_size) * 2 * num_data_sets * sizeof_int 
+    metadata_pool: main_pool
+
+host_correlation_buffer_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: num_local_freq * num_blocks * (block_size*block_size) * 2 * num_data_sets * sizeof_int 
+    metadata_pool: main_pool
+
+integrated_correlation_buffer:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: num_local_freq * num_blocks * (block_size*block_size) * 2 * num_data_sets * sizeof_int 
+    metadata_pool: main_pool
+
+
+integrated_correlation_buffer:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: num_local_freq * num_blocks * (block_size*block_size) * 2 * num_data_sets * sizeof_int 
+    metadata_pool: main_pool
+
+##########################
+#### Pipeline Stages #####
+##########################
+
+# DPDK Stage to capture network packets
+dpdk:
+  kotekan_stage: dpdkCore
+  lcore_cpu_map: [3, 5] # Use lcores 3 and 5 for DPDK processing
+  main_lcore_cpu: 4 # Use lcore 4 for the main DPDK thread
+  lcore_port_map: # Map lcores to network ports
+    - [0] # lcore 3 handles port 0
+    - [1] # lcore 5 handles port 1
+  max_rx_pkt_len: 9000
+  num_mbufs: 9600
+  mbuf_data_size: 9216
+
+  handlers:
+    - dpdk_handler: rfsocHandlerShuffle
+      out_buffer: network_capture_buf_0
+      alignment: 15360
+      mask_buf: mask_buffer_zeros_0
+      first_subband: 0
+      coarse_freq_start: 0
+      num_local_freq: 336
+
+    - dpdk_handler: rfsocHandlerShuffle
+      out_buffer: network_capture_buf_1
+      alignment: 15360
+      mask_buf: mask_buffer_zeros_1
+      first_subband: 2
+      coarse_freq_start: 336
+      num_local_freq: 336
+
+zero_samples:
+  kotekan_stage: zeroSamples
+  out_buf: network_capture_buf_0
+  lost_samples_buf: mask_buffer_zeros_0
+  zero_value: 0
+  sample_size: 21504
+
+zero_samples_1:
+  kotekan_stage: zeroSamples
+  out_buf: network_capture_buf_1
+  lost_samples_buf: mask_buffer_zeros_1
+  zero_value: 0
+  sample_size: 21504
+
+integrated_correlation_buffer_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: num_local_freq * num_blocks * (block_size*block_size) * 2 * num_data_sets * sizeof_int 
+    metadata_pool: main_pool
+
+integrated_correlation_buffer_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: num_local_freq * num_blocks * (block_size*block_size) * 2 * num_data_sets * sizeof_int 
+    metadata_pool: main_pool
+
+gpu:
+    profiling: true
+    kernel_path: "lib/cuda/kernels"
+    commands_0: &command_list_0
+    - name: cudaInputData
+      in_buf: host_voltage
+      gpu_mem: voltage_0
+    - name: cudaSyncInput
+    - name: cudaShuffleAstron
+      gpu_mem_voltage: voltage_0
+      gpu_mem_ordered_voltage: ordered_voltage_0
+    - name: cudaCorrelatorAstron
+      gpu_mem_voltage: ordered_voltage_0
+      gpu_mem_correlation_matrix: correlation_matrix_0
+    - name: cudaSyncOutput
+    - name: cudaOutputData
+      in_buf: host_voltage
+      gpu_mem: correlation_matrix_0
+      out_buf: host_correlation
+    commands_1: &command_list_1
+    - name: cudaInputData
+      in_buf: host_voltage
+      gpu_mem: voltage_1
+    - name: cudaSyncInput
+    - name: cudaShuffleAstron
+      gpu_mem_voltage: voltage_1
+      gpu_mem_ordered_voltage: ordered_voltage_1
+    - name: cudaCorrelatorAstron
+      gpu_mem_voltage: ordered_voltage_1
+      gpu_mem_correlation_matrix: correlation_matrix_1
+    - name: cudaSyncOutput
+    - name: cudaOutputData
+      in_buf: host_voltage
+      gpu_mem: correlation_matrix_1
+      out_buf: host_correlation
+    gpu_0:
+      kotekan_stage: cudaProcess
+      gpu_id: 0 
+      buffer_depth: 3
+      commands: *command_list_0
+      in_buffers: 
+        host_voltage: network_capture_buf_0
+      out_buffers:
+        host_correlation: host_correlation_buffer_0
+    
+    gpu_1:
+      kotekan_stage: cudaProcess
+      gpu_id: 0 
+      buffer_depth: 3
+      commands: *command_list_1
+      in_buffers: 
+        host_voltage: network_capture_buf_1
+      out_buffers:
+        host_correlation: host_correlation_buffer_1
+
+charts_accumulate_0:
+  kotekan_stage: chartsAccumulate
+  in_buf: host_correlation_buffer_0
+  out_buf: integrated_correlation_buffer_0
+  num_frames_to_accumulate: integration_frames
+
+charts_accumulate_1:
+  kotekan_stage: chartsAccumulate
+  in_buf: host_correlation_buffer_1
+  out_buf: integrated_correlation_buffer_1
+  num_frames_to_accumulate: integration_frames
+
+
+# Monitoring stages
+inspect_frame_0:
+  kotekan_stage: restInspectFrame
+  in_buf: host_correlation_buffer_0
+
+inspect_frame_1:
+  kotekan_stage: restInspectFrame
+  in_buf: host_correlation_buffer_1
+
+# File writing stages
+raw_file_write_0:
+  kotekan_stage: rawFileWrite
+  in_buf: integrated_correlation_buffer_0
+  file_name: corr_freq_0
+  base_dir: /data/corr/corr_24h_0709
+  file_ext: bin
+  num_frames_per_file: 1
+  exit_after_n_files: capture_n_frames / integration_frames
+
+raw_file_write_1:
+  kotekan_stage: rawFileWrite
+  in_buf: integrated_correlation_buffer_1
+  file_name: corr_freq_1
+  base_dir: /data/corr/corr_24h_0709
+  file_ext: bin
+  num_frames_per_file: 1
+  exit_after_n_files: capture_n_frames / integration_frames
