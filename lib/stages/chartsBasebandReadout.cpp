@@ -24,6 +24,7 @@ chartsBasebandReadout::chartsBasebandReadout(Config& config, const std::string& 
     _samples_per_data_set(config.get<int>(unique_name, "samples_per_data_set")),
     _num_elements(config.get<int>(unique_name, "num_elements")),
     _max_dump_samples(config.get_default<int64_t>(unique_name, "max_dump_samples", 1 << 20)),
+    _freq_id(config.get<uint64_t>(unique_name, "freq_id")),
 
     in_buf(get_buffer("in_buf")),
     out_buf(get_buffer("out_buf")),
@@ -300,11 +301,18 @@ bool chartsBasebandReadout::extract_data(const ChartsTriggerRequest& trigger,
                 }
 
                 out_meta->event_id = trigger.event_id;
+                out_meta->freq_id = _freq_id;
                 out_meta->time0_fpga = time0_fpga;
                 out_meta->event_start_fpga = trigger.start_fpga;
                 out_meta->event_end_fpga = trigger.start_fpga + trigger.length_fpga;
+                out_meta->time0_ctime = 0;
+                out_meta->time0_ctime_offset = 0;
+                out_meta->first_packet_recv_time = 0;
+                out_meta->valid_to = 0;
+                out_meta->fpga0_ns = 0;
                 out_meta->num_elements = _num_elements;
-                out_meta->frame_fpga_seq= frame_fpga_seq + in_start; // The FPGA seq of the first sample in this output frame
+                out_meta->reserved = -1;
+                out_meta->frame_fpga_seq = frame_fpga_seq + in_start;
             }
 
             const int64_t copy_len = std::min<int64_t>(in_end - in_start, out_remaining);
@@ -315,6 +323,7 @@ bool chartsBasebandReadout::extract_data(const ChartsTriggerRequest& trigger,
 
             in_start += copy_len;
             out_start += copy_len;
+            out_meta->valid_to = out_start;
             out_remaining -= copy_len;
 
             if (out_remaining == 0) {

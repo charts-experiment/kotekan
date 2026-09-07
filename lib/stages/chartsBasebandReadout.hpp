@@ -33,6 +33,7 @@ private:
     int _samples_per_data_set;   // specs per frame
     int _num_elements;
     int64_t _max_dump_samples;
+    uint64_t _freq_id;
     size_t _bytes_per_spec;
 
     // Buffers
