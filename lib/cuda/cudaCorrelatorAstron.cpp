@@ -42,7 +42,10 @@ cudaCorrelatorAstron::cudaCorrelatorAstron(Config& config, const std::string& un
         throw std::runtime_error("elements_per_thread_block must be one of 32, 48, 64 for TCCorrelator");
 
 
-    if (inst == 0) {
+    // Multiple cudaProcess stages may share a CUDA device (for example, one
+    // pipeline per frequency block). The compiled kernel is device-wide, so
+    // only the first command instance on that device should register it.
+    if (inst == 0 && !device.runtime_kernels.count("correlate")) {
         std::vector<std::string> opts = {
             "-arch=compute_86",
             "-lineinfo",
