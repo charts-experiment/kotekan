@@ -252,7 +252,9 @@ def write_vds(output_path, source_descriptors, streams, event_id, time0_fpga, fi
         h5_file.attrs["source_directory"] = os.path.relpath(
             source_descriptors[0]["path"].parent, output_path.parent
         )
-        start_time_us = (time0_fpga * 3 + first_fpga * 10) // 3
+        # rfsocHandlerShuffle stores time0_fpga as the absolute packet time in
+        # microseconds; frame_fpga_seq is only an ordering/alignment index.
+        start_time_us = time0_fpga
         h5_file.attrs["start_time_utc_us"] = start_time_us
         h5_file.attrs["start_time_utc"] = dt.datetime.fromtimestamp(
             start_time_us / 1_000_000, tz=dt.timezone.utc
@@ -296,9 +298,8 @@ def main():
         streams = [inspect_file(*raw_file, args) for raw_file in raw_files]
         event_id, time0_fpga, first_fpga, last_fpga = validate_streams(streams, args)
         total_samples = last_fpga - first_fpga
-        print(f"Event {event_id}: {len(streams)} streams, {total_samples} time samples")
+        start_time_us = time0_fpga
 
-        start_time_us = (time0_fpga * 3 + first_fpga * 10) // 3
         if args.output is None:
             timestamp = dt.datetime.fromtimestamp(
                 start_time_us / 1_000_000, tz=dt.timezone.utc

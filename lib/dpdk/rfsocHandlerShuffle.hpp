@@ -19,6 +19,8 @@
 #include <cstring>
 #include <fstream>
 #include <immintrin.h>
+#include <limits>
+#include <mutex>
 #include <vector>
 #include <string>
 #include <cstdint>
@@ -290,6 +292,48 @@ protected:
 
     bool align_first_packet(uint64_t spec);
 
+    /**
+     * Check startup alignment across all RFSoC shuffle handlers in this process.
+     * UINT64_MAX resets the shared state.
+     * Reset only during construction, before any packet processing starts.
+     * The first boundary is accepted; subsequent boundaries must match it.
+     */
+    inline bool check_cross_handler_alignment(uint64_t seq_num) {
+        static std::mutex alignment_mutex;
+        static uint64_t alignment_first_seq = std::numeric_limits<uint64_t>::max();
+        static uint64_t first_alignment = 0;
+        static uint64_t first_specs_per_frame = 0;
+        std::lock_guard<std::mutex> alignment_lock(alignment_mutex);
+
+        if (seq_num == std::numeric_limits<uint64_t>::max()) {
+            alignment_first_seq = std::numeric_limits<uint64_t>::max();
+            return true;
+        }
+
+        if (alignment_first_seq == std::numeric_limits<uint64_t>::max()) {
+            alignment_first_seq = seq_num;
+            first_alignment = alignment;
+            first_specs_per_frame = specs_per_frame;
+            DEBUG("rfsocHandlerShuffle: Port {:d} set startup alignment to {:d}", port, seq_num);
+            return true;
+        }
+
+        if (alignment != first_alignment || specs_per_frame != first_specs_per_frame) {
+            ERROR("rfsocHandlerShuffle: Port {:d} has alignment {:d} and spectra per frame {:d}, "
+                  "expected alignment {:d} and spectra per frame {:d}",
+                  port, alignment, specs_per_frame, first_alignment, first_specs_per_frame);
+            return false;
+        }
+
+        if (seq_num != alignment_first_seq) {
+            ERROR("rfsocHandlerShuffle: Port {:d} got startup alignment {:d}, expected {:d}",
+                  port, seq_num, alignment_first_seq);
+            return false;
+        }
+
+        return true;
+    }
+
     bool advance_frame(uint64_t new_seq, bool first_time=false);
 
     bool copy_packet(struct rte_mbuf* mbuf);
@@ -340,6 +384,11 @@ inline rfsocHandlerShuffle::rfsocHandlerShuffle(kotekan::Config& config, const s
         mask_buf->zero_frames();
 
         alignment = config.get_default<uint64_t>(unique_name, "alignment", 0);
+        if (alignment == 0) {
+            FATAL_ERROR("rfsocHandlerShuffle: Alignment parameter must be set and greater than zero.");
+        }
+        // dpdkCore constructs every handler before launching packet-processing threads.
+        check_cross_handler_alignment(std::numeric_limits<uint64_t>::max());
 
         // Number of frames to capture before stopping, 0 = unlimited
         capture_n_frames = config.get_default<uint64_t>(unique_name, "capture_n_frames", 0);
@@ -401,6 +450,9 @@ inline rfsocHandlerShuffle::rfsocHandlerShuffle(kotekan::Config& config, const s
         }
 
         specs_per_frame = (out_buf->frame_size) / bytes_per_spec; // how many specs fit in one frame
+        if (specs_per_frame == 0) {
+            FATAL_ERROR("rfsocHandlerShuffle: Output frame must contain at least one spectrum.");
+        }
         if (mask_buf->frame_size != specs_per_frame) {
             FATAL_ERROR(
                 "rfsocHandlerShuffle: Mask frame size {:d} must match spectra per frame {:d}.",
@@ -523,10 +575,9 @@ inline int rfsocHandlerShuffle::handle_packet(struct rte_mbuf* mbuf) {
     return 0;
 }
 
-// This function checks if the given sequence number is aligned with the specified alignment parameter.
-// If it is aligned, it initializes the first frame in the output buffer to start at the corresponding
-// spectrum and marks it as full. This allows the handler to start processing packets from a known alignment
-// point, which can be important for ensuring that frames are filled with complete spectra.
+// Select an alignment boundary and validate it against the other handlers before
+// opening the first output frame. Missing spectra before the received packet
+// remain flagged in the frame's mask.
 inline bool rfsocHandlerShuffle::align_first_packet(uint64_t spec) {
 
     if (alignment == 0){
@@ -534,12 +585,18 @@ inline bool rfsocHandlerShuffle::align_first_packet(uint64_t spec) {
     }
 
     if ((spec % alignment) <= 1000) {
-            INFO("rfsocHandlerShuffle: Aligned at spectrum {:d}", spec);
+            const uint64_t start_spec = spec - (spec % alignment);
+            INFO("rfsocHandlerShuffle: Port {:d} received spectrum {:d}, selected start spectrum {:d}",
+                 port, spec, start_spec);
+
+            if (!check_cross_handler_alignment(start_spec)) {
+                FATAL_ERROR("rfsocHandlerShuffle: Port {:d} failed startup alignment between handlers, "
+                            "closing kotekan!", port);
+                return false;
+            }
 
             last_seq = cur_seq;
             got_first_packet = true;
-
-            const uint64_t start_spec = spec - (spec % alignment);
 
             if (unlikely(!advance_frame(start_spec, true))) {
                 got_first_packet = false;
@@ -662,9 +719,12 @@ inline bool rfsocHandlerShuffle::copy_packet(struct rte_mbuf* mbuf) {
     // Location in specs relative to the start of the frame
     uint64_t spec_loc = spec_id - frame_start_spec;
 
-    if (spec_loc >= specs_per_frame) { // need to advance frame
-        if (!advance_frame(spec_id)) return false;
-        spec_loc = 0;
+    // Keep every frame on the original sequence grid, including completely
+    // missing frames. advance_frame finalizes their masks and enforces the
+    // capture limit before opening another frame.
+    while (spec_loc >= specs_per_frame) {
+        if (!advance_frame(frame_start_spec + specs_per_frame)) return false;
+        spec_loc = spec_id - frame_start_spec;
     }
 
     const uint32_t subband_slot = subband - first_subband;
