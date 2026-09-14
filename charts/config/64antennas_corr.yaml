@@ -29,6 +29,22 @@ num_local_freq: 336
 integration_frames: 20 # 10.24 s per accumulated output frame
 capture_n_frames: 168750
 
+# Save metadata for the run, including antenna positions and signal antennas
+run_metadata:
+  kotekan_stage: runMetadataWriter
+  base_dir: /data/corr/corr_24h_0914
+  num_antennas: num_elements
+  signal_antennas: [0, 4, 6, 8, 32]
+  position_overrides:
+    - antenna: 0
+      position: [-33.421225, -70.863797, 460.0]
+      note: "Antenna in test base"
+    - antenna: 8
+      position: [-33.421117, -70.863486, 460.0]
+      note: "CHORD antenna next to the container"
+    - antenna: 32 
+      position: [-33.421216667, -70.8637972223, 460.0]
+      note: "Antenna with custom base"
 
 # Main CHARTS Metadata Pool
 main_pool:
@@ -235,7 +251,7 @@ raw_file_write_0:
   kotekan_stage: rawFileWrite
   in_buf: integrated_correlation_buffer_0
   file_name: corr_freq_0
-  base_dir: /data/corr/corr_24h_0709
+  base_dir: /data/corr/corr_24h_0914
   file_ext: bin
   num_frames_per_file: 1
   exit_after_n_files: capture_n_frames / integration_frames
@@ -244,7 +260,7 @@ raw_file_write_1:
   kotekan_stage: rawFileWrite
   in_buf: integrated_correlation_buffer_1
   file_name: corr_freq_1
-  base_dir: /data/corr/corr_24h_0709
+  base_dir: /data/corr/corr_24h_0914
   file_ext: bin
   num_frames_per_file: 1
   exit_after_n_files: capture_n_frames / integration_frames

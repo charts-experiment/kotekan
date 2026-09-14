@@ -68,10 +68,15 @@ void Config::parse_file(const std::string& file_name) {
     try {
         std::ifstream config_file_stream(file_name);
         config_file_stream >> _json;
+        _config_file = file_name;
     } catch (std::exception const& ex) {
         WARN_NON_OO("Could not parse json file: {:s}, error: {:s}", file_name, ex.what());
         throw;
     }
+}
+
+const std::string& Config::get_config_file() const {
+    return _config_file;
 }
 
 void Config::update_config(json updates) {

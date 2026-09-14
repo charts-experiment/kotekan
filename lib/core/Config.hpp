@@ -245,6 +245,11 @@ public:
     const nlohmann::json& get_full_config_json() const;
 
     /**
+     * @brief Return the source file used to load this configuration, if any.
+     */
+    const std::string& get_config_file() const;
+
+    /**
      * @brief Dumps the config to INFO in JSON format.
      */
     void dump_config() const;
@@ -252,6 +257,9 @@ public:
 private:
     /// Internal json object
     nlohmann::json _json;
+
+    /// Source file supplied to parse_file().
+    std::string _config_file;
 
     /**
      * @brief Finds all values with key "name". Searches the given json.
