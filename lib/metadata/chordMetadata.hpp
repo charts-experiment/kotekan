@@ -265,6 +265,9 @@ public:
 
     int get_nfreq() const {
         std::lock_guard<std::mutex> lock(this->lock);
+        if (!metadata.contains(jsonMetadata::COARSE_FREQ)) {
+            return 0;
+        }
         return static_cast<int>(metadata.at(jsonMetadata::COARSE_FREQ).size());
     }
 
@@ -282,6 +285,9 @@ public:
 
     std::vector<int> get_coarse_freq() const {
         std::lock_guard<std::mutex> lock(this->lock);
+        if (!metadata.contains(jsonMetadata::COARSE_FREQ)) {
+            return {};
+        }
         return metadata.at(jsonMetadata::COARSE_FREQ).template get<std::vector<int>>();
     }
 

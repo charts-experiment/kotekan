@@ -1,0 +1,71 @@
+# ==============================================================================
+# CHARTS 128-Antenna (2 Polarizations) In-Kotekan F-Engine Simulator Pipeline
+# ==============================================================================
+# Simulates physical baseband voltages for CHARTS 128-dish dual-pol array:
+# - Layout: 128 physical dishes arranged in 16x8 grid (dx = dy = 0.6 m)
+# - 2 polarizations (Pol X and Pol Y) per dish -> 256 total voltage streams
+# - Interleaved polarization layout: [D0_X, D0_Y, D1_X, D1_Y, ..., D127_X, D127_Y]
+# - Both polarizations share identical spatial coordinates & geometric wavefront delay,
+#   with independent receiver thermal noise on each polarization feed.
+# ==============================================================================
+
+type: config
+log_level: info
+
+cpu_affinity: [0, 1, 2, 3, 4, 5, 6, 7]
+
+num_elements: 256
+num_local_freq: 336
+samples_per_data_set: 1536
+num_frames: 1
+buffer_depth: 4
+
+main_pool:
+  kotekan_metadata_pool: chordMetadata
+  num_metadata_objects: 16
+
+# Baseband buffer: [time][freq][element] (int4x2_t, 1 byte per complex sample)
+network_capture_buf:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: samples_per_data_set * num_local_freq * num_elements # 132,120,576 bytes
+  numa_node: 0
+  metadata_pool: main_pool
+  zero_new_frames: true
+  mlock_frames: false
+
+fengine_sim:
+  kotekan_stage: chartsFEngineSim
+  out_buf: network_capture_buf
+  scenario: "vela"
+  num_elements: 256
+  num_polarizations: 2
+  pol_layout: "interleaved"
+  grid_x: 16
+  grid_y: 8
+  spacing_m: 0.6
+  site_lat_deg: -33.4211146
+  num_local_freq: 336
+  freq_start_mhz: 300.0
+  delta_freq_mhz: 0.3
+  delta_time_us: 3.333333333333
+  samples_per_data_set: 1536
+  num_frames: 1
+  use_noise: true
+  noise_sigma_min: 0.40
+  noise_sigma_max: 0.70
+  pol_x_amp: 1.0
+  pol_y_amp: 1.0
+  saturate: false
+  seed: 42
+
+write_baseband:
+  kotekan_stage: rawFileWrite
+  in_buf: network_capture_buf
+  base_dir: ./dumps/baseband
+  file_name: baseband_128ant_2pol_sim
+  file_ext: bin
+  num_frames_per_file: 1
+  exit_after_n_files: 1
+  prefix_hostname: false
+  skip_zero_frames: false
