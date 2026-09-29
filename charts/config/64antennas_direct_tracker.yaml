@@ -1,0 +1,314 @@
+# ==============================================================================
+# CHARTS 64-Antenna Live DPDK Ingest & Real-Time GPU DIRECT Beam Tracker Pipeline
+# ==============================================================================
+# Built from charts/config/64antennas_record.yaml and charts/config/64antennas_corr.yaml.
+# - Ingests 64 antennas across dual 100GbE/25GbE NIC ports (subbands 0..1 and 2..3).
+# - Retains rfsocHandlerShuffle and zeroSamples stages for lost-packet mitigation.
+# - Replaces correlation / baseband disk recording with real-time GPU Direct Beamformer:
+#     * cudaDirectBeamTrackerCommand: Zero-window precalculated steering weights
+#       with fused 4-beam warp tiling (beam_tile_size=4).
+# - Outputs complex voltages (float2) for up to max_beams concurrent sky directions.
+# ==============================================================================
+
+type: config
+log_level: info
+
+# CPU Thread Affinity (isolates Kotekan host pipeline from DPDK lcores [3, 4, 5])
+cpu_affinity: [6, 7, 8, 9]
+
+# ------------------------------------------------------------------------------
+# Array Dimensions & Sampling Parameters
+# ------------------------------------------------------------------------------
+num_elements: 64                  # 64 Antennas (8x8 physical grid or custom layout)
+n_channels_per_packet: 168        # RFSoC packet channel packing
+local_subbands_per_packet: 2      # 2 subbands per NIC port
+num_local_freq: 336               # 168 * 2 = 336 coarse channels per NIC stream (672 total)
+
+# Timing & Frame Arrival (RFSoC 300 MSPS PFB -> 10/3 us per sample)
+sample_period_s: 3.333333333333e-6
+
+# Frame Batch: 15,360 samples = 51.2 ms per frame
+# (Matches rfsocHandlerShuffle alignment: 15360 and divides cleanly by time_chunk_size: 256 into 60 chunks)
+samples_per_data_set: 15360
+frame_arrival_period: samples_per_data_set * sample_period_s
+bytes_per_dataset: n_channels_per_packet * local_subbands_per_packet * samples_per_data_set
+capture_n_frames: 168750          # Continuous streaming duration (~2.4 hours)
+
+# Memory & Buffer Management
+buffer_depth: 20                  # Host RAM frame queue depth (~6.6 GB total queue per NIC)
+gpu_buffer_depth: 3               # GPU VRAM frame queue depth (~1.0 GB VRAM per GPU stream)
+
+# Array Geometry & Beam Setup
+spacing_m: 0.6                    # Physical antenna spacing in meters
+max_beams: 2                      # Concurrent beam slots (0..1)
+initial_active_beams: 2           # Active beams on startup (Galactic Center & Vela)
+sizeof_complex_float: 8           # float2 (4-byte real + 4-byte imag) per formed beam sample
+
+# ------------------------------------------------------------------------------
+# Metadata Pool
+# ------------------------------------------------------------------------------
+main_pool:
+  kotekan_metadata_pool: chartsMetadata
+  num_metadata_objects: buffer_depth * 15
+
+# ------------------------------------------------------------------------------
+# Host Buffer Definitions
+# ------------------------------------------------------------------------------
+# Raw voltage capture buffer for Stream 0 (Port 0: coarse frequencies 0..335)
+network_capture_buf_0:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: bytes_per_dataset * num_elements # ~330.3 MB per frame
+  numa_node: 0
+  metadata_pool: main_pool
+  zero_new_frames: true
+  mlock_frames: false
+
+mask_buffer_zeros_0:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: samples_per_data_set
+  numa_node: 0
+  metadata_pool: main_pool
+
+# Raw voltage capture buffer for Stream 1 (Port 1: coarse frequencies 336..671)
+network_capture_buf_1:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: bytes_per_dataset * num_elements # ~330.3 MB per frame
+  numa_node: 0
+  metadata_pool: main_pool
+  zero_new_frames: true
+  mlock_frames: false
+
+mask_buffer_zeros_1:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: samples_per_data_set
+  numa_node: 0
+  metadata_pool: main_pool
+
+# Output Formed Beams Buffer for Stream 0 [time][freq][max_beams] of float2
+host_formed_beams_buffer_0:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float # ~82.58 MB
+  numa_node: 0
+  metadata_pool: main_pool
+  zero_new_frames: true
+  mlock_frames: false
+
+# Output Formed Beams Buffer for Stream 1 [time][freq][max_beams] of float2
+host_formed_beams_buffer_1:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float # ~82.58 MB
+  numa_node: 0
+  metadata_pool: main_pool
+  zero_new_frames: true
+  mlock_frames: false
+
+# ------------------------------------------------------------------------------
+# Network Ingest Stage: DPDK Core (Dual Port, Exact match to 64antennas_corr.yaml)
+# ------------------------------------------------------------------------------
+dpdk:
+  kotekan_stage: dpdkCore
+  lcore_cpu_map: [3, 5]            # Worker lcores 3 and 5 for ports 0 and 1
+  main_lcore_cpu: 4                # Main DPDK coordinator thread
+  lcore_port_map:
+    - [0]                          # lcore 3 handles NIC port 0
+    - [1]                          # lcore 5 handles NIC port 1
+  max_rx_pkt_len: 9000
+  num_mbufs: 9600
+  mbuf_data_size: 9216
+
+  handlers:
+    - dpdk_handler: rfsocHandlerShuffle
+      out_buffer: network_capture_buf_0
+      alignment: 15360
+      mask_buf: mask_buffer_zeros_0
+      first_subband: 0
+      coarse_freq_start: 0
+      num_local_freq: 336
+
+    - dpdk_handler: rfsocHandlerShuffle
+      out_buffer: network_capture_buf_1
+      alignment: 15360
+      mask_buf: mask_buffer_zeros_1
+      first_subband: 2
+      coarse_freq_start: 336
+      num_local_freq: 336
+
+# ------------------------------------------------------------------------------
+# Dropped Packet Zeroing Stages
+# ------------------------------------------------------------------------------
+zero_samples_0:
+  kotekan_stage: zeroSamples
+  out_buf: network_capture_buf_0
+  lost_samples_buf: mask_buffer_zeros_0
+  zero_value: 0
+  sample_size: 21504               # num_elements (64) * num_local_freq (336)
+
+zero_samples_1:
+  kotekan_stage: zeroSamples
+  out_buf: network_capture_buf_1
+  lost_samples_buf: mask_buffer_zeros_1
+  zero_value: 0
+  sample_size: 21504               # num_elements (64) * num_local_freq (336)
+
+# ------------------------------------------------------------------------------
+# GPU Direct Multi-Beam Tracker Stages
+# ------------------------------------------------------------------------------
+gpu:
+  profiling: false
+
+  # Command Pipeline for Stream 0 (Frequencies 0..335, 300.0 - 400.5 MHz)
+  commands_0: &command_list_0
+    - name: cudaInputData
+      in_buf: host_voltage
+      gpu_mem: voltage_0
+    - name: cudaSyncInput
+
+    # Real-Time Automatic Dead & Saturated Antenna Detection & Dynamic Masking
+    - name: cudaAntennaMaskCommand
+      gpu_mem_voltage: voltage_0
+      num_elements: 64
+      num_local_freq: 336
+      samples_per_data_set: 15360
+      buffer_depth: 3
+      auto_detect_enabled: true
+      blank_voltages_enabled: false
+      dead_power_threshold: 0.50
+      sat_power_threshold: 80.0
+      clip_fraction_threshold: 0.15
+      revival_frames: 5
+
+    # Direct Fused Multi-Beam Tracker Kernel
+    - name: cudaDirectBeamTrackerCommand
+      gpu_mem_voltage: voltage_0
+      gpu_mem_formed_beams: formed_beams_0
+      num_elements: 64
+      num_local_freq: 336
+      samples_per_data_set: 15360
+      spacing_m: 0.6
+      max_beams: 2
+      initial_active_beams: 2
+      buffer_depth: 3
+      time_chunk_size: 256
+      time_unroll: 4
+      beam_tile_size: 4            # Fuses beams in warp registers; cuts VRAM bandwidth by 4x
+      enable_cuda_graph: false     # Direct launch takes <3 us; graphs unnecessary and unsafe in multi-threaded stages
+      enable_grid_mode: false
+      grid_step: 0.02
+      # Carén Observatory Site Coordinates
+      site_lat_deg: -33.4211146
+      site_lon_deg: -70.8634710
+      site_alt_m: 458.0
+      # Frequency band for Stream 0
+      freq_start_hz: 300000000.0   # 300.0 MHz base
+      freq_step_hz: 300000.0       # 300 kHz channel spacing
+      # Beam 0: Galactic Center (Sgr A*)
+      source_ra_deg: 266.4168
+      source_dec_deg: -29.0078
+      # Beam 1: Vela Pulsar (PSR B0833-45)
+      source_ra_deg_1: 128.8361
+      source_dec_deg_1: -45.1764
+
+    - name: cudaSyncOutput
+    - name: cudaOutputData
+      in_buf: host_voltage
+      gpu_mem: formed_beams_0
+      out_buf: host_formed_beams
+
+  # Command Pipeline for Stream 1 (Frequencies 336..671, 400.8 - 501.3 MHz)
+  commands_1: &command_list_1
+    - name: cudaInputData
+      in_buf: host_voltage
+      gpu_mem: voltage_1
+    - name: cudaSyncInput
+
+    # Real-Time Automatic Dead & Saturated Antenna Detection & Dynamic Masking
+    - name: cudaAntennaMaskCommand
+      gpu_mem_voltage: voltage_1
+      num_elements: 64
+      num_local_freq: 336
+      samples_per_data_set: 15360
+      buffer_depth: 3
+      auto_detect_enabled: true
+      blank_voltages_enabled: false
+      dead_power_threshold: 0.50
+      sat_power_threshold: 80.0
+      clip_fraction_threshold: 0.15
+      revival_frames: 5
+
+    # Direct Fused Multi-Beam Tracker Kernel
+    - name: cudaDirectBeamTrackerCommand
+      gpu_mem_voltage: voltage_1
+      gpu_mem_formed_beams: formed_beams_1
+      num_elements: 64
+      num_local_freq: 336
+      samples_per_data_set: 15360
+      spacing_m: 0.6
+      max_beams: 2
+      initial_active_beams: 2
+      buffer_depth: 3
+      time_chunk_size: 256
+      time_unroll: 4
+      beam_tile_size: 4
+      enable_cuda_graph: false
+      enable_grid_mode: false
+      grid_step: 0.02
+      # Carén Observatory Site Coordinates
+      site_lat_deg: -33.4211146
+      site_lon_deg: -70.8634710
+      site_alt_m: 458.0
+      # Frequency band for Stream 1 (starts at 300 MHz + 336 * 300 kHz = 400.8 MHz)
+      freq_start_hz: 400800000.0   # 400.8 MHz base
+      freq_step_hz: 300000.0
+      # Beam 0: Galactic Center (Sgr A*)
+      source_ra_deg: 266.4168
+      source_dec_deg: -29.0078
+      # Beam 1: Vela Pulsar (PSR B0833-45)
+      source_ra_deg_1: 128.8361
+      source_dec_deg_1: -45.1764
+
+    - name: cudaSyncOutput
+    - name: cudaOutputData
+      in_buf: host_voltage
+      gpu_mem: formed_beams_1
+      out_buf: host_formed_beams
+
+  # GPU Processors: can target GPU 0 (or split across gpu_id 0 and 1 on dual-GPU nodes)
+  gpu_0:
+    kotekan_stage: cudaProcess
+    gpu_id: 0
+    buffer_depth: 3
+    commands: *command_list_0
+    in_buffers:
+      host_voltage: network_capture_buf_0
+    out_buffers:
+      host_formed_beams: host_formed_beams_buffer_0
+
+  gpu_1:
+    kotekan_stage: cudaProcess
+    gpu_id: 0
+    buffer_depth: 3
+    commands: *command_list_1
+    in_buffers:
+      host_voltage: network_capture_buf_1
+    out_buffers:
+      host_formed_beams: host_formed_beams_buffer_1
+
+# ------------------------------------------------------------------------------
+# Monitoring & Sinks
+# ------------------------------------------------------------------------------
+# Live REST inspection endpoints for waterfall telemetry & beam health snapshots
+inspect_beams_0:
+  kotekan_stage: restInspectFrame
+  in_buf: host_formed_beams_buffer_0
+  len: 4194304                     # 4 MB snapshot for dashboard telemetry
+
+inspect_beams_1:
+  kotekan_stage: restInspectFrame
+  in_buf: host_formed_beams_buffer_1
+  len: 4194304                     # 4 MB snapshot for dashboard telemetry
