@@ -1,0 +1,69 @@
+# ==============================================================================
+# CHARTS 64-Antenna In-Kotekan F-Engine Simulator Pipeline
+# ==============================================================================
+# Simulates physical baseband voltages for CHARTS 64-dish array (8x8 grid, 0.6m):
+# - Astrometric celestial delay tracking (Vela, Sun, Sgr A*, Cen A, Crab, Zenith)
+# - Dispersed FRB pulses (cold plasma DM sweep) and LEO satellite RFI
+# - Independent per-antenna thermal noise and configurable bad/saturated elements
+# - Streams int4x2_t complex voltages with chordMetadata directly to downstream stages
+# ==============================================================================
+
+type: config
+log_level: info
+
+cpu_affinity: [0, 1, 2, 3]
+
+num_elements: 64
+num_local_freq: 336
+samples_per_data_set: 1536
+num_frames: 1
+buffer_depth: 4
+
+main_pool:
+  kotekan_metadata_pool: chordMetadata
+  num_metadata_objects: 16
+
+# Baseband buffer: [time][freq][element] (int4x2_t, 1 byte per complex sample)
+network_capture_buf:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: samples_per_data_set * num_local_freq * num_elements # 33,030,144 bytes
+  numa_node: 0
+  metadata_pool: main_pool
+  zero_new_frames: true
+  mlock_frames: false
+
+fengine_sim:
+  kotekan_stage: chartsFEngineSim
+  out_buf: network_capture_buf
+  scenario: "vela"
+  num_elements: 64
+  num_polarizations: 1
+  grid_x: 8
+  grid_y: 8
+  spacing_m: 0.6
+  site_lat_deg: -33.4211146
+  num_local_freq: 336
+  freq_start_mhz: 300.0
+  delta_freq_mhz: 0.3
+  delta_time_us: 3.333333333333
+  samples_per_data_set: 1536
+  num_frames: 1
+  use_noise: true
+  noise_sigma_min: 0.40
+  noise_sigma_max: 0.70
+  saturate: false
+  saturated_antennas: [7, 23, 42, 55]
+  saturation_factor: 12.0
+  seed: 42
+
+write_baseband:
+  kotekan_stage: rawFileWrite
+  in_buf: network_capture_buf
+  base_dir: ./dumps/baseband
+  file_name: baseband_64ant_sim
+  file_ext: bin
+  num_frames_per_file: 1
+  exit_after_n_files: 1
+  prefix_hostname: false
+  skip_zero_frames: false

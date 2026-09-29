@@ -1,0 +1,69 @@
+# ==============================================================================
+# CHARTS 256-Antenna (1 Polarization) In-Kotekan F-Engine Simulator Pipeline
+# ==============================================================================
+# Simulates physical baseband voltages for CHARTS 256-dish array:
+# - Layout: 16x16 square grid (dx = dy = 0.6 m), 1 polarization per dish
+# - 256 independent spatial positions and delay tracks
+# - Dispersed transient sweep (FRB DM = 300 pc/cm^3)
+# ==============================================================================
+
+type: config
+log_level: info
+
+cpu_affinity: [0, 1, 2, 3, 4, 5, 6, 7]
+
+num_elements: 256
+num_local_freq: 336
+samples_per_data_set: 1536
+num_frames: 1
+buffer_depth: 4
+
+main_pool:
+  kotekan_metadata_pool: chordMetadata
+  num_metadata_objects: 16
+
+# Baseband buffer: [time][freq][element] (int4x2_t, 1 byte per complex sample)
+network_capture_buf:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: samples_per_data_set * num_local_freq * num_elements # 132,120,576 bytes
+  numa_node: 0
+  metadata_pool: main_pool
+  zero_new_frames: true
+  mlock_frames: false
+
+fengine_sim:
+  kotekan_stage: chartsFEngineSim
+  out_buf: network_capture_buf
+  scenario: "frb"
+  num_elements: 256
+  num_polarizations: 1
+  grid_x: 16
+  grid_y: 16
+  spacing_m: 0.6
+  site_lat_deg: -33.4211146
+  num_local_freq: 336
+  freq_start_mhz: 300.0
+  delta_freq_mhz: 0.3
+  delta_time_us: 3.333333333333
+  samples_per_data_set: 1536
+  num_frames: 1
+  use_noise: true
+  noise_sigma_min: 0.40
+  noise_sigma_max: 0.70
+  pulse_dm: 300.0
+  pulse_width_s: 0.001
+  pulse_center_fraction: 0.4
+  saturate: false
+  seed: 42
+
+write_baseband:
+  kotekan_stage: rawFileWrite
+  in_buf: network_capture_buf
+  base_dir: ./dumps/baseband
+  file_name: baseband_256ant_1pol_sim
+  file_ext: bin
+  num_frames_per_file: 1
+  exit_after_n_files: 1
+  prefix_hostname: false
+  skip_zero_frames: false
