@@ -18,7 +18,52 @@ docs/sphinx/html/*
 .ccache/*
 .cache/*
 scratch/*
+scratch_charts_sim/*
 Manifest*.toml
 *.log
 *.conda
 *.venv
+
+# Generated figures and plots (preserve official Sphinx documentation)
+*.png
+*.jpg
+*.jpeg
+*.svg
+!docs/sphinx/**
+
+# Benchmark & simulation results, reports, and logs
+*.csv
+*.err
+slurm-*.out
+slurm_*.out
+direct_vs_v5_*.out
+direct_vs_v5_*.err
+tracker_benchmark_comparison.json
+*.json
+test_charts/*_report.json
+test_charts/*_report.md
+test_charts/tracker_benchmark_report.md
+
+# Compiled benchmark and test binaries
+test_charts/benchmark_pipeline_stages
+test_charts/benchmark_kotekan_cuda_tracker_v5
+test_charts/benchmark_direct_beam_tracker
+test_charts/benchmark_tracker_v5_vs_direct
+test_charts/test_beam_tracker_suite
+test_charts/test_chaos_engineering
+
+# Scientific data files (preserve unit test fixtures)
+*.h5
+*.hdf5
+*.fits
+*.bin
+*.dat
+!tests/boost/testdata/**
+test_charts/data/*
+!test_charts/data/.gitkeep
+
+# Python cache & environment
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
