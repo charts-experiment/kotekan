@@ -64,6 +64,7 @@ class SimulationConfig:
     kotekan_bin: Optional[Path] = None
     workers: int = 4
     dry_run: bool = False
+    writer: str = "raw_bin"            # 'raw_bin' | 'hdf5'
 
     # Visualizations & Video
     generate_plots: bool = True

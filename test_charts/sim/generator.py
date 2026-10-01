@@ -40,6 +40,13 @@ from .constants import (
 from .astro import datetime_to_lst_hours, parse_observation_time
 from .noise_model import AnalogChainParams, ChartsNoiseModel
 from .presets import SimulationConfig
+from .writer import (
+    BasebandWriter,
+    RawBinWriter,
+    WindowMetadata,
+    create_writer,
+    pack_int4x2,
+)
 
 
 @dataclass
@@ -422,20 +429,20 @@ def render_and_write_frame(job: Dict[str, Any]) -> Tuple[int, int, float, float,
         max_power_val = max(max_power_val, float(np.max(pwr_chunk)))
         total_clipped += int(np.sum(np.abs(v_real) > 7.5)) + int(np.sum(np.abs(v_imag) > 7.5))
 
-        r_quant = np.clip(np.round(v_real), -7, 7).astype(np.int8)
-        i_quant = np.clip(np.round(v_imag), -7, 7).astype(np.int8)
+        packed_frame[c0:c1] = pack_int4x2(v_real + 1j * v_imag)
 
-        r_nibble = (r_quant & 0x0F).astype(np.uint8)
-        i_nibble = ((i_quant & 0x0F) << 4).astype(np.uint8)
-
-        packed_frame[c0:c1] = r_nibble | i_nibble
-
-    with open(out_file_path, "wb") as f:
-        np.uint32(0).tofile(f)
-        packed_frame.tofile(f)
+    writer = job.get("writer")
+    if writer is not None and job.get("write_directly", True):
+        writer.write_frame(out_idx, packed_frame)
+    elif out_file_path and job.get("write_directly", True):
+        with open(out_file_path, "wb") as f:
+            np.uint32(0).tofile(f)
+            packed_frame.tofile(f)
 
     mean_power = total_power_sum / (samples_per_frame * num_freq * num_ant)
     clip_frac = total_clipped / total_elements
+    if job.get("return_voltages", False):
+        return out_idx, frame_idx, mean_power, max_power_val, clip_frac, packed_frame
     return out_idx, frame_idx, mean_power, max_power_val, clip_frac
 
 
@@ -495,10 +502,24 @@ def compute_analytic_lightcurve(
     return t_points, p_total
 
 
-def generate_simulation_window(config: SimulationConfig) -> Dict[str, Any]:
+def generate_simulation_window(
+    config: SimulationConfig,
+    writer: Optional[BasebandWriter] = None,
+) -> Dict[str, Any]:
     """Master generator function creating baseband frames, HDF5 metadata, and event JSON."""
     target_dir = Path(config.scratch_dir) / config.window_name
     target_dir.mkdir(parents=True, exist_ok=True)
+
+    if writer is None:
+        writer_type = getattr(config, "writer", "raw_bin")
+        writer = create_writer(
+            writer_type=writer_type,
+            target_dir=target_dir,
+            window_name=config.window_name,
+            samples_per_frame=config.samples_per_frame,
+            num_freq=config.num_freq,
+            num_elements=config.antennas,
+        )
 
     obs_time_val = getattr(config, "start_time", None) or config.utc_hour
     dt_start = parse_observation_time(obs_time_val)
@@ -577,6 +598,7 @@ def generate_simulation_window(config: SimulationConfig) -> Dict[str, Any]:
     print(f" Workers                 : {config.workers}")
     print("=" * 76)
 
+    write_directly = isinstance(writer, RawBinWriter)
     jobs = []
     for out_idx, frame_idx in enumerate(written_indices):
         t_start_s = frame_idx * frame_duration_s
@@ -592,6 +614,9 @@ def generate_simulation_window(config: SimulationConfig) -> Dict[str, Any]:
             "out_idx": out_idx,
             "frame_idx": frame_idx,
             "out_file_path": str(out_bin_file),
+            "writer": writer if write_directly else None,
+            "write_directly": write_directly,
+            "return_voltages": not write_directly,
             "num_antennas": config.antennas,
             "num_freq": config.num_freq,
             "samples_per_frame": config.samples_per_frame,
@@ -614,14 +639,24 @@ def generate_simulation_window(config: SimulationConfig) -> Dict[str, Any]:
     if pool_workers > 1:
         with mp.Pool(processes=pool_workers, maxtasksperchild=100) as pool:
             for res in pool.imap_unordered(render_and_write_frame, jobs, chunksize=1):
-                stats_list.append(res)
+                if len(res) == 6:
+                    out_idx_res, f_idx, mpwr, maxpwr, cfrac, pframe = res
+                    writer.write_frame(out_idx_res, pframe)
+                    stats_list.append((out_idx_res, f_idx, mpwr, maxpwr, cfrac))
+                else:
+                    stats_list.append(res)
                 if len(stats_list) % max(1, num_written // 10) == 0 or len(stats_list) == num_written:
                     pct = (len(stats_list) / num_written) * 100.0
                     print(f"  Progress: {len(stats_list):4d}/{num_written} frames ({pct:.1f}%)", flush=True)
     else:
         for idx, job in enumerate(jobs):
             res = render_and_write_frame(job)
-            stats_list.append(res)
+            if len(res) == 6:
+                out_idx_res, f_idx, mpwr, maxpwr, cfrac, pframe = res
+                writer.write_frame(out_idx_res, pframe)
+                stats_list.append((out_idx_res, f_idx, mpwr, maxpwr, cfrac))
+            else:
+                stats_list.append(res)
             if (idx + 1) % max(1, num_written // 5) == 0 or (idx + 1) == num_written:
                 pct = ((idx + 1) / num_written) * 100.0
                 print(f"  Progress: {idx + 1:4d}/{num_written} frames ({pct:.1f}%)", flush=True)
@@ -642,12 +677,6 @@ def generate_simulation_window(config: SimulationConfig) -> Dict[str, Any]:
         cadence_hz=10.0,
     )
 
-    meta_h5_path = target_dir / f"{config.window_name}_meta.h5"
-    events_json_path = target_dir / f"{config.window_name}_events.json"
-
-    with open(events_json_path, "w", encoding="utf-8") as f:
-        json.dump([ev.to_dict() for ev in events], f, indent=2)
-
     written_frames_arr = np.array(written_indices, dtype=np.int32)
     written_out_arr = np.arange(num_written, dtype=np.int32)
     written_timestamps_s = written_frames_arr.astype(np.float64) * frame_duration_s
@@ -656,35 +685,38 @@ def generate_simulation_window(config: SimulationConfig) -> Dict[str, Any]:
     max_powers_arr = np.array([s[3] for s in stats_list], dtype=np.float32)
     clip_fracs_arr = np.array([s[4] for s in stats_list], dtype=np.float32)
 
-    with h5py.File(meta_h5_path, "w") as h5:
-        h5.attrs["utc_start"] = dt_start.isoformat()
-        h5.attrs["duration_s"] = config.duration_s
-        h5.attrs["antennas"] = config.antennas
-        h5.attrs["num_freq"] = config.num_freq
-        h5.attrs["samples_per_frame"] = config.samples_per_frame
-        h5.attrs["frame_duration_s"] = frame_duration_s
-        h5.attrs["sun_elevation_deg"] = sun_el
-        h5.attrs["sun_is_up"] = sun_is_up
-        h5.attrs["total_physical_frames"] = total_window_frames
-        h5.attrs["num_written_frames"] = num_written
+    meta = WindowMetadata(
+        window_name=config.window_name,
+        target_dir=target_dir,
+        utc_start=dt_start.isoformat(),
+        duration_s=config.duration_s,
+        antennas=config.antennas,
+        num_freq=config.num_freq,
+        samples_per_frame=config.samples_per_frame,
+        frame_duration_s=frame_duration_s,
+        frequencies_mhz=freqs_hz / 1e6,
+        antenna_pos_x_m=pos_x,
+        antenna_pos_y_m=pos_y,
+        sun_elevation_deg=sun_el,
+        sun_is_up=sun_is_up,
+        total_physical_frames=total_window_frames,
+        num_written_frames=num_written,
+        antenna_sigma_base=sigma_ant,
+        bandpass_shape=bandpass,
+        physical_frame_indices=written_frames_arr,
+        output_file_indices=written_out_arr,
+        timestamps_s=written_timestamps_s,
+        mean_powers_lsb2=mean_powers_arr,
+        max_powers_lsb2=max_powers_arr,
+        clip_fractions=clip_fracs_arr,
+        lightcurve_time_s=lc_t,
+        lightcurve_power=lc_power,
+        events=[ev.to_dict() for ev in events],
+    )
 
-        h5.create_dataset("frequencies_mhz", data=freqs_hz / 1e6)
-        h5.create_dataset("antenna_pos_x_m", data=pos_x)
-        h5.create_dataset("antenna_pos_y_m", data=pos_y)
-        h5.create_dataset("antenna_sigma_base", data=sigma_ant)
-        h5.create_dataset("bandpass_shape", data=bandpass)
-
-        frames_grp = h5.create_group("frames")
-        frames_grp.create_dataset("physical_frame_index", data=written_frames_arr)
-        frames_grp.create_dataset("output_file_index", data=written_out_arr)
-        frames_grp.create_dataset("timestamp_s", data=written_timestamps_s)
-        frames_grp.create_dataset("mean_power_lsb2", data=mean_powers_arr)
-        frames_grp.create_dataset("max_power_lsb2", data=max_powers_arr)
-        frames_grp.create_dataset("clip_fraction", data=clip_fracs_arr)
-
-        lc_grp = h5.create_group("lightcurve")
-        lc_grp.create_dataset("time_s", data=lc_t)
-        lc_grp.create_dataset("power_analytic", data=lc_power)
+    meta_h5_path = writer.write_metadata(meta)
+    manifest = writer.finalize()
+    events_json_path = target_dir / f"{config.window_name}_events.json"
 
     return {
         "target_dir": target_dir,
@@ -695,4 +727,6 @@ def generate_simulation_window(config: SimulationConfig) -> Dict[str, Any]:
         "duration_s": config.duration_s,
         "gen_time_s": t_gen_s,
         "events": events,
+        "manifest": manifest,
+        "writer": writer,
     }

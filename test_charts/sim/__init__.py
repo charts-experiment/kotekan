@@ -54,6 +54,18 @@ from .visualizer import (
     plot_correlator_waterfalls,
     plot_tracker_waterfall,
 )
+from .writer import (
+    BasebandWriter,
+    HDF5Writer,
+    RawBinWriter,
+    WindowMetadata,
+    create_writer,
+    fiducial_5d_to_kotekan,
+    kotekan_to_fiducial_5d,
+    pack_int4x2,
+    read_raw_bin_frame,
+    unpack_int4x2,
+)
 
 __all__ = [
     "C_LIGHT",
@@ -92,4 +104,14 @@ __all__ = [
     "find_kotekan_binary",
     "get_default_scratch_dir",
     "get_default_workers",
+    "BasebandWriter",
+    "RawBinWriter",
+    "HDF5Writer",
+    "WindowMetadata",
+    "pack_int4x2",
+    "unpack_int4x2",
+    "read_raw_bin_frame",
+    "create_writer",
+    "fiducial_5d_to_kotekan",
+    "kotekan_to_fiducial_5d",
 ]

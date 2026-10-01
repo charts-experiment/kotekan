@@ -73,6 +73,12 @@ from sim.visualizer import (
     plot_correlator_waterfalls,
     plot_tracker_waterfall,
 )
+from sim.writer import (
+    BasebandWriter,
+    HDF5Writer,
+    RawBinWriter,
+    create_writer,
+)
 
 
 def run_pipeline(cfg: SimulationConfig) -> int:
@@ -306,8 +312,26 @@ def main():
     gen_parser.add_argument("--num-events", type=int, default=2, help="Number of injected transients")
     gen_parser.add_argument("--save-reference", type=str, default=None, help="Save to reference library under tag")
     gen_parser.add_argument("--scratch-dir", type=str, default="./scratch_charts_sim", help="Target output directory")
+    gen_parser.add_argument("--writer", type=str, default="raw_bin", choices=["raw_bin", "hdf5"], help="Baseband writer format ('raw_bin' or 'hdf5')")
 
-    # 3. Reference Library subcommand
+    # 3. Write Baseband subcommand (Standalone baseband serialization without Kotekan pipeline)
+    wb_parser = subparsers.add_parser("write-baseband", help="Write simulated baseband data to disk without running Kotekan pipeline")
+    wb_parser.add_argument("--preset", type=str, default="quick", choices=["quick", "1min", "5min"], help="Preset profile")
+    wb_parser.add_argument("--profile", type=str, default="day", choices=["day", "night"], help="Day or Night profile")
+    wb_parser.add_argument("--writer", type=str, default="raw_bin", choices=["raw_bin", "hdf5"], help="Baseband writer format ('raw_bin' or 'hdf5')")
+    wb_parser.add_argument("--duration-s", type=float, default=None, help="Custom duration (seconds)")
+    wb_parser.add_argument("--antennas", type=int, default=None, help="Number of antennas (e.g. 32, 64, or 256)")
+    wb_parser.add_argument("--num-freq", type=int, default=None, help="Frequency channels")
+    wb_parser.add_argument("--samples-per-frame", type=int, default=None, help="Samples per frame")
+    wb_parser.add_argument("--window-name", type=str, default=None, help="Custom window name")
+    wb_parser.add_argument("--start-time", type=str, default=None, help="Observation start time (ISO 8601, 'now', or 'HH:MM')")
+    wb_parser.add_argument("--beam-targets", type=str, default=None, help="Injected celestial sources (e.g. 'Crab;Vela' or 'auto')")
+    wb_parser.add_argument("--num-events", type=int, default=None, help="Number of injected transients")
+    wb_parser.add_argument("--scratch-dir", type=str, default="./scratch_charts_sim", help="Target output directory")
+    wb_parser.add_argument("--save-reference", type=str, default=None, help="Save to reference library under tag")
+    wb_parser.add_argument("--workers", type=int, default=None, help="Parallel worker threads")
+
+    # 4. Reference Library subcommand
     ref_parser = subparsers.add_parser("reference", help="Manage reference baseband library")
     ref_parser.add_argument("action", choices=["list", "info"], help="Action: 'list' or 'info'")
     ref_parser.add_argument("--tag", type=str, default=None, help="Reference window tag for 'info'")
@@ -405,6 +429,8 @@ def main():
                 cfg.initial_lst_hours = datetime_to_lst_hours(dt)
             if args.beam_targets:
                 cfg.beam_targets = args.beam_targets
+            if hasattr(args, "writer") and args.writer:
+                cfg.writer = args.writer
 
             ref_tag = None
             if args.save_reference:
@@ -425,6 +451,67 @@ def main():
                     num_freq=cfg.num_freq,
                     samples_per_frame=cfg.samples_per_frame,
                 )
+
+    elif args.command == "write-baseband":
+        cfg = get_preset_config(
+            preset=args.preset,
+            profile=args.profile,
+            antennas=args.antennas,
+            num_freq=args.num_freq,
+        )
+        if args.duration_s is not None:
+            cfg.duration_s = args.duration_s
+        if args.samples_per_frame is not None:
+            cfg.samples_per_frame = args.samples_per_frame
+        if args.window_name is not None:
+            cfg.window_name = args.window_name
+        if args.start_time is not None:
+            cfg.start_time = args.start_time
+            dt = parse_observation_time(args.start_time)
+            cfg.initial_lst_hours = datetime_to_lst_hours(dt)
+        if args.beam_targets is not None:
+            cfg.beam_targets = args.beam_targets
+        if args.num_events is not None:
+            cfg.num_events = args.num_events
+        if args.scratch_dir is not None:
+            cfg.scratch_dir = Path(args.scratch_dir)
+        if args.workers is not None:
+            cfg.workers = args.workers
+        cfg.writer = args.writer
+
+        print("=" * 80)
+        print(f" CHARTS WRITE-BASEBAND: PRESET={cfg.preset.upper()} PROFILE={cfg.profile.upper()} WRITER={cfg.writer.upper()}")
+        print("=" * 80)
+        print(f" Target Directory   : {Path(cfg.scratch_dir) / cfg.window_name}")
+        print(f" Antennas           : {cfg.antennas}")
+        print(f" Frequency Channels : {cfg.num_freq}")
+        print(f" Duration           : {cfg.duration_s:.1f} s")
+        print(f" Backend Writer     : {cfg.writer}")
+        print("=" * 80)
+
+        res = generate_simulation_window(cfg)
+        print("\n" + "=" * 80)
+        print(f"[SUCCESS] Baseband data written cleanly via {args.writer} writer:")
+        print(f"  * Window Name     : {res['window_name']}")
+        print(f"  * Output Dir      : {res['target_dir']}")
+        print(f"  * Frames Written  : {res['num_written']}")
+        print(f"  * Duration        : {res['duration_s']:.2f} s")
+        print(f"  * Generation Time : {res['gen_time_s']:.2f} s")
+        if "manifest" in res:
+            print(f"  * Manifest Saved  : {res['target_dir'] / 'window_manifest.json'}")
+        print("=" * 80)
+
+        if args.save_reference:
+            save_as_reference_window(
+                src_window_dir=res["target_dir"],
+                tag=args.save_reference,
+                description=f"CHARTS Baseband Window ({cfg.antennas} Ant, {cfg.num_freq} Chans)",
+                obs_time=cfg.start_time,
+                duration_s=cfg.duration_s,
+                antennas=cfg.antennas,
+                num_freq=cfg.num_freq,
+                samples_per_frame=cfg.samples_per_frame,
+            )
 
     elif args.command == "reference":
         if args.action == "list":
