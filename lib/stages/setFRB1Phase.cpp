@@ -1,22 +1,35 @@
-#include "Config.hpp"
-#include "Stage.hpp"
-#include "StageFactory.hpp"
-#include "buffer.hpp"
-#include "bufferContainer.hpp"
-#include "chordMetadata.hpp"
-#include "kotekanLogging.hpp"
+#include "Config.hpp"   // for Config
+#include "DataType.hpp" // for float16_t
+#include "NDArray.hpp"
+#include "Stage.hpp"              // for Stage
+#include "StageFactory.hpp"       // for REGISTER_KOTEKAN_STAGE
+#include "buffer.hpp"             // for Buffer
+#include "bufferContainer.hpp"    // for bufferContainer
+#include "chordMetadata.hpp"      // for chordMetadata, get_chord_metadata
+#include "frb1IntensityBound.hpp" // for frb1_intensity_bound, frb1_intensity_limit
+#include "kotekanLogging.hpp"     // for DEBUG, FATAL_ERROR
 
-#include <cassert>
-#include <cstdint>
-#include <string>
-#include <unistd.h>
-#include <vector>
+#include "fmt.hpp" // for compile_string_to_view, format
+
+#include <cassert>    // for assert
+#include <cmath>      // for sqrt
+#include <complex>    // for complex
+#include <cstddef>    // for ptrdiff_t
+#include <functional> // for function
+#include <memory>     // for allocator, __shared_ptr_access, shared_ptr
+#include <string>     // for basic_string, string
+#include <unistd.h>   // for sleep
+#include <vector>     // for vector
 
 class setFRB1Phase : public kotekan::Stage {
     // Telescope layout
     const int num_components = config.get<int>(unique_name, "num_components");
-    const int num_dishes_x = config.get<int>(unique_name, "num_dishes_x");
-    const int num_dishes_y = config.get<int>(unique_name, "num_dishes_y");
+    const int num_dishes_x = Telescope::instance().get_grid_size_x();
+    const int num_dishes_y = Telescope::instance().get_grid_size_y();
+    // See calcFRB2Weights.cpp
+    const bool frb1_swap_MN = config.get_default<bool>(unique_name, "frb1_swap_MN", false);
+    const int num_dishes_M = frb1_swap_MN ? num_dishes_y : num_dishes_x;
+    const int num_dishes_N = frb1_swap_MN ? num_dishes_x : num_dishes_y;
     const int num_polarizations = config.get<int>(unique_name, "num_polarizations");
 
     const std::vector<int> frequency_channels =
@@ -27,7 +40,8 @@ class setFRB1Phase : public kotekan::Stage {
     const int upchan_max_channel = config.get<int>(unique_name, "upchan_max_channel");
     const int upchan_num_channels = upchan_max_channel - upchan_min_channel;
     const int upchan_max_num_channels = config.get<int>(unique_name, "upchan_max_num_channels");
-    const float frb1_input_scale = config.get<double>(unique_name, "frb1_input_scale");
+    // The FRB1 kernels normalize the weights themselves, so this should be about 1
+    const float frb1_input_scale = config.get_default<double>(unique_name, "frb1_input_scale", 1);
 
     Buffer* const frb1_phase_buffer;
 
@@ -68,17 +82,18 @@ public:
         // Check buffer size
         assert(frb1_phase_buffer->frame_size
                == sizeof(float16_t) * upchan_max_num_channels * upchan_factor * num_polarizations
-                      * num_dishes_y * num_dishes_x * num_components);
+                      * num_dishes_N * num_dishes_M * num_components);
 
         // Set metadata
-        frb1_phase_buffer->allocate_ndarray_frame_desc<float16_t, 5>(
+        frb1_phase_buffer->require_frame_desc(kotekan::NDArray<float16_t, 5>::describe(
             "W",
-            {upchan_max_num_channels * upchan_factor, num_polarizations, num_dishes_y, num_dishes_x,
+            {upchan_max_num_channels * upchan_factor, num_polarizations, num_dishes_N, num_dishes_M,
              num_components},
-            {"F", "P", "dishN", "dishM", "C"});
+            {"Fbar", "P", "dishN", "dishM", "C"}, {1, 1, 1, 1, 1}));
         frb1_phase_buffer->allocate_new_metadata_object(frame_id);
         const auto& frb1_phase_meta = get_chord_metadata(frb1_phase_buffer->get_metadata(frame_id));
-        frb1_phase_meta->set_from_frame_desc(frb1_phase_buffer->get_ndarray_frame_desc());
+        frb1_phase_meta->set_from_frame_desc(
+            frb1_phase_buffer->get_frame_desc<kotekan::GenericNDArray>());
         frb1_phase_meta->set_fpga_seq_num(0);           // ???
         frb1_phase_meta->set_time_downsampling_fpga(1); // ???
         std::vector<int> coarse_freq(upchan_num_channels * upchan_factor);
@@ -97,15 +112,15 @@ public:
         frb1_phase_meta->set_freq_upchan_index(freq_upchan_index);
 
         // Set buffer
-        const std::ptrdiff_t str_dish_x = 1;
-        const std::ptrdiff_t str_dish_y = str_dish_x * num_dishes_x;
-        const std::ptrdiff_t str_polr = str_dish_y * num_dishes_y;
+        const std::ptrdiff_t str_dish_M = 1;
+        const std::ptrdiff_t str_dish_N = str_dish_M * num_dishes_M;
+        const std::ptrdiff_t str_polr = str_dish_N * num_dishes_N;
         const std::ptrdiff_t str_freq = str_polr * num_polarizations;
         for (int freq = 0; freq < upchan_max_num_channels * upchan_factor; ++freq) {
             for (int polr = 0; polr < num_polarizations; ++polr) {
-                for (int dish_y = 0; dish_y < num_dishes_y; ++dish_y) {
-                    for (int dish_x = 0; dish_x < num_dishes_x; ++dish_x) {
-                        const std::ptrdiff_t idx = str_dish_x * dish_x + str_dish_y * dish_y
+                for (int dish_N = 0; dish_N < num_dishes_N; ++dish_N) {
+                    for (int dish_M = 0; dish_M < num_dishes_M; ++dish_M) {
+                        const std::ptrdiff_t idx = str_dish_M * dish_M + str_dish_N * dish_N
                                                    + str_polr * polr + str_freq * freq;
                         assert(idx >= 0
                                && idx < std::ptrdiff_t(frb1_phase_buffer->frame_size
@@ -116,6 +131,21 @@ public:
                     }
                 }
             }
+        }
+
+        // Ensure that the FRB1 kernel cannot overflow for these weights. (The unused
+        // frequencies have NaN weights and are skipped.)
+        for (int freq = 0; freq < upchan_num_channels * upchan_factor; ++freq) {
+            const double bound = kotekan::frb1_intensity_bound(
+                reinterpret_cast<const float16_t*>(&frb1_phase_frame[str_freq * freq]),
+                num_polarizations, num_dishes_M, num_dishes_N);
+            if (bound > kotekan::frb1_intensity_limit)
+                FATAL_ERROR(
+                    "The FRB1 weights can overflow Float16: frequency {:d} has a worst-case "
+                    "intensity of {:g}, above the limit {:g}. Reduce frb1_input_scale by at "
+                    "least a factor {:.3g}.",
+                    freq, bound, kotekan::frb1_intensity_limit,
+                    std::sqrt(bound / kotekan::frb1_intensity_limit));
         }
 
         // Mark buffers as full

@@ -62,7 +62,12 @@ public:
     void register_consumer(const std::string& name) override;
     void register_producer(const std::string& name) override;
 
+    void print_buffer_status() override;
     void print_full_status() override;
+
+    std::vector<std::string> dot_label_lines(const kotekan::GraphOptions& options) override;
+
+    kotekan::BufferState dot_buffer_state() override;
 
     /**
      * @brief Waits until the given number of elements are free to be

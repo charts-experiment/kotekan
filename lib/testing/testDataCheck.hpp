@@ -22,7 +22,6 @@
 #include <functional>  // for bind
 #include <limits>      // for numeric_limits
 #include <memory>      // for shared_ptr, __shared_ptr_access
-#include <string.h>    // for strncmp
 #include <string>      // for allocator, basic_string, operator!=, string
 #include <type_traits> // for enable_if
 #include <vector>      // for vector
@@ -32,7 +31,7 @@
     do {                                                                                           \
         DEBUG2("Checking meta field {:s}", #FIELD);                                                \
         if ((META1)->FIELD != (META2)->FIELD) {                                                    \
-            ERROR("metadata {:s}[{:d}] {:s} != {:s}[{:d}] {:s}; values: {:d} {:d}", (BUF_NAME1),   \
+            ERROR("metadata {:s}[{:d}] {:s} != {:s}[{:d}] {:s}; values: {} {}", (BUF_NAME1),       \
                   (FRAME_ID1), #FIELD, (BUF_NAME2), (FRAME_ID2), #FIELD, (META1)->FIELD,           \
                   (META2)->FIELD);                                                                 \
             (ERR_COUNT)++;                                                                         \
@@ -43,7 +42,12 @@
                               FRAME_ID2)                                                           \
     do {                                                                                           \
         DEBUG2("Checking meta field {:s}", #FIELD);                                                \
-        if ((META1)->get_##FIELD() != (META2)->get_##FIELD()) {                                    \
+        if ((META1)->has_##FIELD() != (META2)->has_##FIELD()) {                                    \
+            ERROR("metadata {:s}[{:d}] {:s} != {:s}[{:d}] {:s}; exists: {} {}", (BUF_NAME1),       \
+                  (FRAME_ID1), #FIELD, (BUF_NAME2), (FRAME_ID2), #FIELD, (META1)->has_##FIELD(),   \
+                  (META2)->has_##FIELD());                                                         \
+            (ERR_COUNT)++;                                                                         \
+        } else if ((META1)->has_##FIELD() && ((META1)->get_##FIELD() != (META2)->get_##FIELD())) { \
             ERROR("metadata {:s}[{:d}] {:s} != {:s}[{:d}] {:s}; values: {:d} {:d}", (BUF_NAME1),   \
                   (FRAME_ID1), #FIELD, (BUF_NAME2), (FRAME_ID2), #FIELD, (META1)->get_##FIELD(),   \
                   (META2)->get_##FIELD());                                                         \
@@ -55,7 +59,13 @@
                                    BUF_NAME2, FRAME_ID2)                                           \
     do {                                                                                           \
         DEBUG2("Checking meta field {:s}", #FIELD);                                                \
-        if ((META1)->get_##FIELD().id != (META2)->get_##FIELD().id) {                              \
+        if ((META1)->has_##FIELD() != (META2)->has_##FIELD()) {                                    \
+            ERROR("metadata {:s}[{:d}] {:s} != {:s}[{:d}] {:s}; exists: {} {}", (BUF_NAME1),       \
+                  (FRAME_ID1), #FIELD, (BUF_NAME2), (FRAME_ID2), #FIELD, (META1)->has_##FIELD(),   \
+                  (META2)->has_##FIELD());                                                         \
+            (ERR_COUNT)++;                                                                         \
+        } else if ((META1)->has_##FIELD()                                                          \
+                   && ((META1)->get_##FIELD().id != (META2)->get_##FIELD().id)) {                  \
             ERROR("metadata {:s}[{:d}] {:s} != {:s}[{:d}] {:s}; values: {:d} {:d}", (BUF_NAME1),   \
                   (FRAME_ID1), #FIELD, (BUF_NAME2), (FRAME_ID2), #FIELD,                           \
                   (META1)->get_##FIELD().id, (META2)->get_##FIELD().id);                           \
@@ -67,13 +77,21 @@
                             FRAME_ID2)                                                             \
     do {                                                                                           \
         DEBUG2("Checking meta field {:s}", #FIELD);                                                \
-        for (int meta_idx = 0; meta_idx < (LEN); meta_idx++) {                                     \
-            if ((META1)->get_##FIELD()[meta_idx] != (META2)->get_##FIELD()[meta_idx]) {            \
-                ERROR(                                                                             \
-                    "metadata {:s}[{:d}] {:s}[{:d}] != {:s}[{:d}] {:s}[{:d}]; values: {:d} {:d}",  \
-                    (BUF_NAME1), (FRAME_ID1), #FIELD, meta_idx, (BUF_NAME2), (FRAME_ID2), #FIELD,  \
-                    meta_idx, (META1)->get_##FIELD()[meta_idx], (META2)->get_##FIELD()[meta_idx]); \
-                (ERR_COUNT)++;                                                                     \
+        if ((META1)->has_##FIELD() != (META2)->has_##FIELD()) {                                    \
+            ERROR("metadata {:s}[{:d}] {:s} != {:s}[{:d}] {:s}; exists: {} {}", (BUF_NAME1),       \
+                  (FRAME_ID1), #FIELD, (BUF_NAME2), (FRAME_ID2), #FIELD, (META1)->has_##FIELD(),   \
+                  (META2)->has_##FIELD());                                                         \
+            (ERR_COUNT)++;                                                                         \
+        } else if ((META1)->has_##FIELD()) {                                                       \
+            for (int meta_idx = 0; meta_idx < (LEN); meta_idx++) {                                 \
+                if ((META1)->get_##FIELD()[meta_idx] != (META2)->get_##FIELD()[meta_idx]) {        \
+                    ERROR("metadata {:s}[{:d}] {:s}[{:d}] != {:s}[{:d}] {:s}[{:d}]; values: {:d} " \
+                          "{:d}",                                                                  \
+                          (BUF_NAME1), (FRAME_ID1), #FIELD, meta_idx, (BUF_NAME2), (FRAME_ID2),    \
+                          #FIELD, meta_idx, (META1)->get_##FIELD()[meta_idx],                      \
+                          (META2)->get_##FIELD()[meta_idx]);                                       \
+                    (ERR_COUNT)++;                                                                 \
+                }                                                                                  \
             }                                                                                      \
         }                                                                                          \
     } while (0)
@@ -97,26 +115,16 @@
                               FRAME_ID2)                                                           \
     do {                                                                                           \
         DEBUG2("Checking meta field {:s}", #FIELD);                                                \
-        if ((META1)->get_##FIELD() != (META2)->get_##FIELD()) {                                    \
+        if ((META1)->has_##FIELD() != (META2)->has_##FIELD()) {                                    \
+            ERROR("metadata {:s}[{:d}] {:s} != {:s}[{:d}] {:s}; exists: {} {}", (BUF_NAME1),       \
+                  (FRAME_ID1), #FIELD, (BUF_NAME2), (FRAME_ID2), #FIELD, (META1)->has_##FIELD(),   \
+                  (META2)->has_##FIELD());                                                         \
+            (ERR_COUNT)++;                                                                         \
+        } else if ((META1)->has_##FIELD() && ((META1)->get_##FIELD() != (META2)->get_##FIELD())) { \
             ERROR("metadata {:s}[{:d}] {:s} != {:s}[{:d}] {:s}; values: {:s} {:s}", (BUF_NAME1),   \
                   (FRAME_ID1), #FIELD, (BUF_NAME2), (FRAME_ID2), #FIELD, (META1)->get_##FIELD(),   \
                   (META2)->get_##FIELD());                                                         \
             (ERR_COUNT)++;                                                                         \
-        }                                                                                          \
-    } while (0)
-
-#define CHECK_META_ARR1_CSTR_DIRECT(FIELD, ARR_LEN, STR_LEN, META1, META2, ERR_COUNT, BUF_NAME1,   \
-                                    FRAME_ID1, BUF_NAME2, FRAME_ID2)                               \
-    do {                                                                                           \
-        DEBUG2("Checking meta field {:s}", #FIELD);                                                \
-        for (int meta_idx = 0; meta_idx < (ARR_LEN); meta_idx++) {                                 \
-            if (strncmp((META1)->FIELD[meta_idx], (META2)->FIELD[meta_idx], (STR_LEN))) {          \
-                ERROR(                                                                             \
-                    "metadata {:s}[{:d}] {:s}[{:d}] != {:s}[{:d}] {:s}[{:d}]; values: {:s} {:s}",  \
-                    (BUF_NAME1), (FRAME_ID1), #FIELD, meta_idx, (BUF_NAME2), (FRAME_ID2), #FIELD,  \
-                    meta_idx, (META1)->FIELD[meta_idx], (META2)->FIELD[meta_idx]);                 \
-                (ERR_COUNT)++;                                                                     \
-            }                                                                                      \
         }                                                                                          \
     } while (0)
 
@@ -133,6 +141,7 @@ private:
     Buffer* second_buf;
     int num_frames_to_test;
     int max_num_errors_logged;
+    int max_num_errors_allowed;
     double epsilon;
     bool trigger_exit_on_pass;
     bool check_metadata;
@@ -157,6 +166,12 @@ testDataCheck<A_Type>::testDataCheck(kotekan::Config& config, const std::string&
 
     num_frames_to_test = config.get_default<int32_t>(unique_name, "num_frames_to_test", 0);
     max_num_errors_logged = config.get_default<int32_t>(unique_name, "max_num_errors_logged", 100);
+    // How many differing elements still count as a pass. The default, 0, demands exact
+    // equality. Raise it when comparing a float16 GPU kernel against a float32 CPU reference:
+    // the two round differently, so a sample sitting within half a quantization step of a
+    // boundary can legitimately land on either side. Keep it far below the point where a real
+    // algorithmic difference -- a wrong sign, a shifted channel -- would hide under it.
+    max_num_errors_allowed = config.get_default<int32_t>(unique_name, "max_num_errors_allowed", 0);
     epsilon = config.get_default<double>(unique_name, "epsilon",
                                          std::numeric_limits<A_Type>::epsilon() * (A_Type)5.0);
     trigger_exit_on_pass = config.get_default<bool>(unique_name, "trigger_exit_on_pass", true);
@@ -318,7 +333,12 @@ void testDataCheck<A_Type>::main_thread() {
             }
         }
 
-        if (num_errors == 0) {
+        if (num_errors <= max_num_errors_allowed) {
+            if (num_errors > 0)
+                INFO("The buffers {:s}[{:d}] and {:s}[{:d}] differ in {:d} of {:d} elements, "
+                     "within the {:d} allowed.",
+                     first_buf->buffer_name, first_buf_id, second_buf->buffer_name, second_buf_id,
+                     num_errors, num_elements, max_num_errors_allowed);
             INFO("The buffers {:s}[{:d}] and {:s}[{:d}] contained values that were equal.",
                  first_buf->buffer_name, first_buf_id, second_buf->buffer_name, second_buf_id);
             if (use_almost_equal) {
@@ -331,8 +351,10 @@ void testDataCheck<A_Type>::main_thread() {
                      rel_diff / std::max((uint32_t)1, num_nonzero));
             }
         } else {
-            INFO("The buffers {:s}[{:d}] and {:s}[{:d}] contained values that were NOT equal!",
-                 first_buf->buffer_name, first_buf_id, second_buf->buffer_name, second_buf_id);
+            INFO("The buffers {:s}[{:d}] and {:s}[{:d}] contained values that were NOT equal! "
+                 "{:d} of {:d} elements differ, more than the {:d} allowed.",
+                 first_buf->buffer_name, first_buf_id, second_buf->buffer_name, second_buf_id,
+                 num_errors, num_elements, max_num_errors_allowed);
             INFO("Test failed, exiting.");
             TEST_FAILED();
         }
@@ -347,7 +369,7 @@ void testDataCheck<A_Type>::main_thread() {
 
         if (num_frames_to_test == frames) {
 
-            if (num_errors == 0) {
+            if (num_errors <= max_num_errors_allowed) {
                 if (trigger_exit_on_pass) {
                     INFO("Test passed, exiting.");
                     // Unregister to allow the pipeline to continue, unless I'm the last
@@ -362,7 +384,7 @@ void testDataCheck<A_Type>::main_thread() {
             }
         } // frames
 
-        if (num_errors > 0) {
+        if (num_errors > max_num_errors_allowed) {
             break;
         }
     }
@@ -406,7 +428,7 @@ int testDataCheck<A_Type>::check_chord_metadata(const std::shared_ptr<const chor
     CHECK_META_SCALAR_INT(frame_counter, meta1, meta2, num_errors, first_buf->buffer_name,
                           first_buf_id, second_buf->buffer_name, second_buf_id);
     */
-    // char name[CHORD_META_MAX_DIMNAME]; // "E", "J", "I", etc
+    // char name[CHORD_META_MAX_NAME]; // "E", "J", "I", etc
     CHECK_META_SCALAR_STR(name, meta1, meta2, num_errors, first_buf->buffer_name, first_buf_id,
                           second_buf->buffer_name, second_buf_id);
     // kotekan::DataType type;
@@ -436,9 +458,19 @@ int testDataCheck<A_Type>::check_chord_metadata(const std::shared_ptr<const chor
                                first_buf_id, second_buf->buffer_name, second_buf_id);
 
     // char dim_name[CHORD_META_MAX_DIM][CHORD_META_MAX_DIMNAME]; // "F", "T", "D", etc
-    CHECK_META_ARR1_CSTR_DIRECT(dim_name, num_dim, CHORD_META_MAX_DIMNAME, meta1, meta2, num_errors,
-                                first_buf->buffer_name, first_buf_id, second_buf->buffer_name,
-                                second_buf_id);
+    DEBUG2("Checking meta field {:s}", "dim_name");
+    for (int meta_idx = 0; meta_idx < num_dim; meta_idx++) {
+        // The fields are not NUL-terminated; get_dimension_name() bounds the length
+        const std::string dim_name1 = meta1->get_dimension_name(meta_idx);
+        const std::string dim_name2 = meta2->get_dimension_name(meta_idx);
+        if (dim_name1 != dim_name2) {
+            ERROR("metadata {:s}[{:d}] {:s}[{:d}] != {:s}[{:d}] {:s}[{:d}]; values: {:s} {:s}",
+                  first_buf->buffer_name, first_buf_id, "dim_name", meta_idx,
+                  second_buf->buffer_name, second_buf_id, "dim_name", meta_idx, dim_name1,
+                  dim_name2);
+            num_errors++;
+        }
+    }
 
     // int64_t stride[CHORD_META_MAX_DIM];
     CHECK_META_ARR1_INT_DIRECT(stride, num_dim, meta1, meta2, num_errors, first_buf->buffer_name,
@@ -467,20 +499,6 @@ int testDataCheck<A_Type>::check_chord_metadata(const std::shared_ptr<const chor
                         first_buf->buffer_name, first_buf_id, second_buf->buffer_name,
                         second_buf_id);
 
-    // int ndishes;                                  // number of dishes
-    CHECK_META_SCALAR_INT_DIRECT(ndishes, meta1, meta2, num_errors, first_buf->buffer_name,
-                                 first_buf_id, second_buf->buffer_name, second_buf_id);
-
-    // int n_dish_locations_ew, n_dish_locations_ns; // number of possible dish locations
-    CHECK_META_SCALAR_INT_DIRECT(n_dish_locations_ew, meta1, meta2, num_errors,
-                                 first_buf->buffer_name, first_buf_id, second_buf->buffer_name,
-                                 second_buf_id);
-    CHECK_META_SCALAR_INT_DIRECT(n_dish_locations_ns, meta1, meta2, num_errors,
-                                 first_buf->buffer_name, first_buf_id, second_buf->buffer_name,
-                                 second_buf_id);
-
-    // TODO: int* dish_index; // [non-owning pointer] dish index for a possible dish location, or -1
-
     return num_errors;
 }
 
@@ -501,41 +519,31 @@ int testDataCheck<A_Type>::check_N2_metadata(const std::shared_ptr<const N2Metad
     }
 
     // Timing fields
-    if (meta1->fpga_start_tick != meta2->fpga_start_tick) {
-        ERROR(
-            "metadata {:s}[{:d}] fpga_start_tick != {:s}[{:d}] fpga_start_tick; values: {:d} {:d}",
-            first_buf->buffer_name, first_buf_id, second_buf->buffer_name, second_buf_id,
-            meta1->fpga_start_tick, meta2->fpga_start_tick);
-        num_errors++;
-    }
-    if (meta1->frame_start_time_ns != meta2->frame_start_time_ns) {
-        ERROR("metadata {:s}[{:d}] frame_start_time_ns != {:s}[{:d}] frame_start_time_ns; "
-              "values: {:d} {:d}",
-              first_buf->buffer_name, first_buf_id, second_buf->buffer_name, second_buf_id,
-              meta1->frame_start_time_ns, meta2->frame_start_time_ns);
-        num_errors++;
-    }
-    if (meta1->frame_length_fpga_ticks != meta2->frame_length_fpga_ticks) {
-        ERROR("metadata {:s}[{:d}] frame_length_fpga_ticks != {:s}[{:d}] frame_length_fpga_ticks; "
-              "values: {:d} {:d}",
-              first_buf->buffer_name, first_buf_id, second_buf->buffer_name, second_buf_id,
-              meta1->frame_length_fpga_ticks, meta2->frame_length_fpga_ticks);
-        num_errors++;
-    }
-    if (meta1->n_valid_fpga_ticks != meta2->n_valid_fpga_ticks) {
-        ERROR("metadata {:s}[{:d}] n_valid_fpga_ticks != {:s}[{:d}] n_valid_fpga_ticks; values: "
-              "{:d} {:d}",
-              first_buf->buffer_name, first_buf_id, second_buf->buffer_name, second_buf_id,
-              meta1->n_valid_fpga_ticks, meta2->n_valid_fpga_ticks);
-        num_errors++;
-    }
-    if (meta1->n_rfi_fpga_ticks != meta2->n_rfi_fpga_ticks) {
-        ERROR("metadata {:s}[{:d}] n_rfi_fpga_ticks != {:s}[{:d}] n_rfi_fpga_ticks; values: {:d} "
-              "{:d}",
-              first_buf->buffer_name, first_buf_id, second_buf->buffer_name, second_buf_id,
-              meta1->n_rfi_fpga_ticks, meta2->n_rfi_fpga_ticks);
-        num_errors++;
-    }
+    CHECK_META_SCALAR_INT_DIRECT(abs_time_idx, meta1, meta2, num_errors, first_buf->buffer_name,
+                                 first_buf_id, second_buf->buffer_name, second_buf_id);
+    CHECK_META_SCALAR_INT_DIRECT(fpga_start_tick, meta1, meta2, num_errors, first_buf->buffer_name,
+                                 first_buf_id, second_buf->buffer_name, second_buf_id);
+    CHECK_META_SCALAR_INT_DIRECT(frame_start_time_ns, meta1, meta2, num_errors,
+                                 first_buf->buffer_name, first_buf_id, second_buf->buffer_name,
+                                 second_buf_id);
+    CHECK_META_SCALAR_INT_DIRECT(frame_length_fpga_ticks, meta1, meta2, num_errors,
+                                 first_buf->buffer_name,
+
+                                 first_buf_id, second_buf->buffer_name, second_buf_id);
+    CHECK_META_SCALAR_INT_DIRECT(n_valid_fpga_ticks, meta1, meta2, num_errors,
+                                 first_buf->buffer_name,
+
+                                 first_buf_id, second_buf->buffer_name, second_buf_id);
+    CHECK_META_SCALAR_INT_DIRECT(n_rfi_fpga_ticks, meta1, meta2, num_errors, first_buf->buffer_name,
+
+                                 first_buf_id, second_buf->buffer_name, second_buf_id);
+    CHECK_META_SCALAR_INT_DIRECT(n_rfi_only_fpga_ticks, meta1, meta2, num_errors,
+                                 first_buf->buffer_name,
+
+                                 first_buf_id, second_buf->buffer_name, second_buf_id);
+    CHECK_META_SCALAR_INT_DIRECT(n_pl_fpga_ticks, meta1, meta2, num_errors, first_buf->buffer_name,
+
+                                 first_buf_id, second_buf->buffer_name, second_buf_id);
 
     return num_errors;
 }

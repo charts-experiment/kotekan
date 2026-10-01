@@ -1,6 +1,8 @@
 #include "bufferRecv.hpp"
 
 #include "Config.hpp"            // for Config
+#include "NDArray.hpp"           // for GenericNDArray, Config
+#include "PipelineGraph.hpp"     // for PipelineGraph, GraphNode
 #include "StageFactory.hpp"      // for REGISTER_KOTEKAN_STAGE
 #include "Symbol.hpp"            // for Symbol
 #include "buffer.hpp"            // for Buffer, buffer_free, buffer_malloc
@@ -9,13 +11,13 @@
 #include "configTracker.hpp"     // for ConfigTracker
 #include "metadata.hpp"          // for metadataObject, metadataPool
 #include "prometheusMetrics.hpp" // for Gauge, Metrics, Counter, MetricFamily
-#include "restServer.hpp"        // for PORT_REST_SERVER, connectionInstance
+#include "restServer.hpp"        // for restServer, PORT_REST_SERVER, connectionInstance
 #include "util.h"                // for string_tail
 #include "visUtil.hpp"           // for current_time, regex_split
 
 #include "fmt.hpp" // for compile_string_to_view, format, format_string, fmt
 
-#include <algorithm>       // for copy, max, find, equal
+#include <algorithm>       // for find
 #include <arpa/inet.h>     // for htons, inet_ntop, ntohs
 #include <assert.h>        // for assert
 #include <cstring>         // for strerror
@@ -44,6 +46,7 @@ using kotekan::bufferContainer;
 using kotekan::Config;
 using kotekan::ConfigTracker;
 using kotekan::connectionInstance;
+using kotekan::restServer;
 using kotekan::Stage;
 using kotekan::prometheus::Metrics;
 
@@ -52,16 +55,37 @@ REGISTER_KOTEKAN_STAGE(bufferRecv);
 bufferRecv::bufferRecv(Config& config, const std::string& unique_name,
                        bufferContainer& buffer_container) :
     Stage(config, unique_name, buffer_container, std::bind(&bufferRecv::main_thread, this)),
-    use_config_tracker(config.get_default<bool>(unique_name, "use_config_tracker", true)),
     dropped_frame_counter(
         Metrics::instance().add_counter("kotekan_buffer_recv_dropped_frame_total", unique_name)),
     transfer_time_seconds(Metrics::instance().add_gauge("kotekan_buffer_recv_transfer_time_seconds",
                                                         unique_name, {"source"})) {
 
+    // Default to the tracker's enabled state (set at startup, before stages).
+    // A stage may opt out, but cannot opt in when the tracker is off, so the
+    // configured value is ANDed with the tracker state.
+    const bool ct_enabled = ConfigTracker::instance().is_enabled();
+    use_config_tracker =
+        config.get_default<bool>(unique_name, "use_config_tracker", ct_enabled) && ct_enabled;
+    use_frame_desc = config.get_default<bool>(unique_name, "use_frame_desc", false);
+
     listen_port = config.get_default<uint32_t>(unique_name, "listen_port", 11024);
     num_threads = config.get_default<uint32_t>(unique_name, "num_threads", 1);
     connection_timeout = config.get_default<int>(unique_name, "connection_timeout", 60);
     drop_frames = config.get_default<bool>(unique_name, "drop_frames", true);
+
+    // Which REST port to reach a sender on for config-tracker fetches. The
+    // local configTracker does not have this information, so we need to know the
+    // port the instances were launched with (--bind-address). The REST server
+    // reports 0 before it is started, so fall back to the compile-time port
+    // rather than failing.
+    const uint16_t local_rest_port = restServer::instance().port();
+    const int upstream_rest_port_int =
+        config.get_default<int>(unique_name, "upstream_rest_port",
+                                local_rest_port != 0 ? local_rest_port : PORT_REST_SERVER);
+    if (upstream_rest_port_int <= 0 || upstream_rest_port_int > 65535) {
+        FATAL_ERROR("Invalid upstream_rest_port: {:d}", upstream_rest_port_int);
+    }
+    default_upstream_rest_port = static_cast<uint16_t>(upstream_rest_port_int);
 
     // Optional per-connection upstream REST port overrides for a given host (list of "host:port"
     // strings)
@@ -110,17 +134,29 @@ void bufferRecv::read_callback(evutil_socket_t fd, short what, void* arg) {
 void bufferRecv::worker_thread() {
     connInstance* instance;
     DEBUG2("Starting worker thread");
-    while (!stop_thread) {
+    // Two stop flags, and both matter: `stop_thread` is the pipeline shutting
+    // down, `worker_stop_thread` is this pool being torn down on its own (a
+    // failed main_thread setup), which happens while the stage is still
+    // nominally running.
+    while (!stop_thread && !worker_stop_thread) {
         {
             std::unique_lock<mutex> lock(work_queue_lock);
-            work_cv.wait(lock, [&] { return (!work_queue.empty() || stop_thread); });
-            if (stop_thread)
+            work_cv.wait(
+                lock, [&] { return (!work_queue.empty() || stop_thread || worker_stop_thread); });
+            if (stop_thread || worker_stop_thread)
                 return;
             instance = work_queue.front();
             work_queue.pop_front();
         }
         DEBUG2("Starting worker thread job, queue depth: {:d}", work_queue.size());
-        instance->internal_read_callback();
+        try {
+            instance->internal_read_callback();
+        } catch (const FatalError& e) {
+            // FATAL_ERROR already called exit_kotekan; end this worker and let
+            // the shutdown it started proceed (same handling as Stage::start).
+            ERROR("bufferRecv worker thread caught FatalError: {:s}; shutting down.", e.what());
+            return;
+        }
     }
 }
 
@@ -184,7 +220,7 @@ void bufferRecv::internal_accept_connection(evutil_socket_t listener, short even
 
     // New connection instance
     // Resolve per-connection upstream REST port (override by client IP if configured)
-    uint16_t conn_upstream_rest_port = PORT_REST_SERVER;
+    uint16_t conn_upstream_rest_port = default_upstream_rest_port;
     auto it_override = upstream_rest_port_overrides.find(std::string(ip_str));
     if (it_override != upstream_rest_port_overrides.end()) {
         conn_upstream_rest_port = it_override->second;
@@ -192,9 +228,9 @@ void bufferRecv::internal_accept_connection(evutil_socket_t listener, short even
               ip_str);
     }
 
-    connInstance* instance =
-        new connInstance(accept_args->unique_name, accept_args->buf, accept_args->buffer_recv,
-                         ip_str, port, read_timeout, use_config_tracker, conn_upstream_rest_port);
+    connInstance* instance = new connInstance(
+        accept_args->unique_name, accept_args->buf, accept_args->buffer_recv, ip_str, port,
+        read_timeout, use_config_tracker, use_frame_desc, conn_upstream_rest_port);
 
     // Setup logging for the instance object.
     instance->set_log_prefix(accept_args->unique_name + "/instance");
@@ -205,6 +241,11 @@ void bufferRecv::internal_accept_connection(evutil_socket_t listener, short even
 
     instance->event_read = event_read;
     instance->fd = fd;
+
+    {
+        std::lock_guard<mutex> lock(instance_list_lock);
+        instance_list.push_back(instance);
+    }
 
     event_add(instance->event_read, &read_timeout);
 }
@@ -246,25 +287,10 @@ void bufferRecv::main_thread() {
         return;
     }
     base = event_base_new_with_config(ev_config);
+    event_config_free(ev_config);
     if (!base) {
         FATAL_ERROR("Failed to create libevent base");
         return;
-    }
-
-    // Create worker threads:
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    for (auto& i : config.get<std::vector<int>>(unique_name, "cpu_affinity"))
-        CPU_SET(i, &cpuset);
-
-    for (uint32_t i = 0; i < num_threads; ++i) {
-        thread_pool.push_back(thread(&bufferRecv::worker_thread, std::ref(*this)));
-        pthread_setaffinity_np(thread_pool.back().native_handle(), sizeof(cpu_set_t), &cpuset);
-#ifndef MAC_OSX
-        std::string short_name =
-            string_tail(fmt::format(fmt("{:s}/worker_thread/{:d}"), unique_name, i), 15);
-        pthread_setname_np(thread_pool.back().native_handle(), short_name.c_str());
-#endif
     }
 
     server_addr.sin_family = AF_INET;
@@ -275,9 +301,11 @@ void bufferRecv::main_thread() {
     listener = socket(AF_INET, SOCK_STREAM, 0);
     evutil_make_socket_nonblocking(listener);
 
-    // This makes is possible to reuse the same socket even if it goes into TIME_WAIT
-    // Used by gossec
-    if (!drop_frames) {
+    // Bind even when connections from a previous run are still in TIME_WAIT;
+    // otherwise a restart within that window fails with EADDRINUSE on a port
+    // nothing is listening on. SO_REUSEADDR on a listener only permits rebinding
+    // over TIME_WAIT -- two live listeners sharing a port would need SO_REUSEPORT.
+    {
         int reuse = 1;
         if (setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(int)) < 0) {
             ERROR("Could not set SO_REUSEADDR on socket");
@@ -287,13 +315,17 @@ void bufferRecv::main_thread() {
     }
 
     if (bind(listener, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        FATAL_ERROR("Failed to bind to socket 0.0.0.0:{:d}, error: {:d} ({:s})", listen_port, errno,
-                    strerror(errno));
+        const int bind_errno = errno;
+        close(listener);
+        FATAL_ERROR("Failed to bind to socket 0.0.0.0:{:d}, error: {:d} ({:s})", listen_port,
+                    bind_errno, strerror(bind_errno));
         return;
     }
 
     if (listen(listener, 256) < 0) {
-        FATAL_ERROR("Failed to open listener {:d} ({:s})", errno, strerror(errno));
+        const int listen_errno = errno;
+        close(listener);
+        FATAL_ERROR("Failed to open listener {:d} ({:s})", listen_errno, strerror(listen_errno));
         return;
     }
 
@@ -320,17 +352,59 @@ void bufferRecv::main_thread() {
     interval.tv_usec = 100000;
     event_add(timer_event, &interval);
 
+    // Create the worker threads last, once nothing between here and the loop
+    // can throw, leaving the workers stuck waiting. Nothing reaches the workers
+    // until the loop runs anyway.
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    for (auto& i : config.get<std::vector<int>>(unique_name, "cpu_affinity"))
+        CPU_SET(i, &cpuset);
+
+    for (uint32_t i = 0; i < num_threads; ++i) {
+        thread_pool.push_back(thread(&bufferRecv::worker_thread, std::ref(*this)));
+        pthread_setaffinity_np(thread_pool.back().native_handle(), sizeof(cpu_set_t), &cpuset);
+#ifndef MAC_OSX
+        std::string short_name =
+            string_tail(fmt::format(fmt("{:s}/worker_thread/{:d}"), unique_name, i), 15);
+        pthread_setname_np(thread_pool.back().native_handle(), short_name.c_str());
+#endif
+    }
+
     // The libevent main loop.
     event_base_dispatch(base);
 
-    // Join all the worker threads
-    worker_stop_thread = true;
+    // Join all the worker threads before touching the connection instances they
+    // read from. Setting the flag under the queue lock keeps a worker on its
+    // way into work_cv.wait() from missing the notify.
+    {
+        std::lock_guard<mutex> lock(work_queue_lock);
+        worker_stop_thread = true;
+    }
     work_cv.notify_all();
     for (thread& t : thread_pool) {
         if (t.joinable()) {
             t.join();
         }
     }
+
+    // Delete connection instances still open; they are otherwise only
+    // deleted on connection close or errors.
+    while (true) {
+        connInstance* instance;
+        {
+            std::lock_guard<mutex> lock(instance_list_lock);
+            if (instance_list.empty())
+                break;
+            instance = instance_list.front();
+        }
+        // The destructor removes the instance from instance_list.
+        delete instance;
+    }
+
+    event_free(listener_event);
+    event_free(timer_event);
+    event_base_free(base);
+    close(listener);
 }
 
 int bufferRecv::get_next_frame() {
@@ -348,22 +422,23 @@ int bufferRecv::get_next_frame() {
     return last_frame_id;
 }
 
-std::string bufferRecv::dot_string(const std::string& prefix) const {
-    std::string dot = Stage::dot_string(prefix);
-    std::string source = fmt::format("Port: {:d}", listen_port);
-    dot += fmt::format("{:s}\"{:s}\" [shape=doubleoctagon style=filled,color=lightblue]", prefix,
-                       source);
-    dot += fmt::format("{:s}\"{:s}\" -> \"{:s}\"", prefix, source, get_unique_name());
-
-    return dot;
+void bufferRecv::add_graph_details(kotekan::PipelineGraph& graph) const {
+    // Node id is derived from the stage, not from the port, so that two stages
+    // listening on the same port number stay distinct nodes.
+    const std::string source_id = fmt::format("{:s}/source", get_unique_name());
+    graph.add_node(source_id)
+        .add_line(fmt::format(fmt("port {:d}"), listen_port))
+        .set_category(kotekan::GraphCategory::Endpoint);
+    graph.add_edge(source_id, get_unique_name());
 }
 
 connInstance::connInstance(const std::string& producer_name, Buffer* buf, bufferRecv* buffer_recv,
                            const std::string& client_ip, int port, struct timeval read_timeout,
-                           bool use_config_tracker, uint16_t upstream_rest_port) :
+                           bool use_config_tracker, bool use_frame_desc,
+                           uint16_t upstream_rest_port) :
     producer_name(producer_name), buf(buf), buffer_recv(buffer_recv), client_ip(client_ip),
     port(port), read_timeout(read_timeout), use_config_tracker(use_config_tracker),
-    upstream_rest_port(upstream_rest_port) {
+    use_frame_desc(use_frame_desc), upstream_rest_port(upstream_rest_port) {
 
     frame_space = buffer_malloc(buf->aligned_frame_size, buf->numa_node, buf->use_hugepages,
                                 buf->mlock_frames, false);
@@ -377,6 +452,14 @@ connInstance::connInstance(const std::string& producer_name, Buffer* buf, buffer
 
 connInstance::~connInstance() {
     DEBUG("Closing FD");
+    {
+        std::lock_guard<std::mutex> lock(buffer_recv->instance_list_lock);
+        auto it =
+            std::find(buffer_recv->instance_list.begin(), buffer_recv->instance_list.end(), this);
+        if (it != buffer_recv->instance_list.end()) {
+            buffer_recv->instance_list.erase(it);
+        }
+    }
     close(fd);
     event_free(event_read);
     buffer_free(frame_space, buf->aligned_frame_size, buf->use_hugepages);
@@ -478,10 +561,78 @@ void connInstance::internal_read_callback() {
                         ConfigTracker::instance().getUpstreamConfigs(client_ip, upstream_rest_port);
                     }
 
-                    state = connState::metadata;
+                    state = (use_frame_desc && !frame_desc_read) ? connState::frame_desc_size
+                                                                 : connState::metadata;
                     bytes_read = 0;
                 }
 
+            } break;
+            case connState::frame_desc_size: {
+                // Sent once per connection (independent of the config tracker),
+                // only when use_frame_desc is set on both ends: a 4-byte JSON
+                // length (0 if the sender had no descriptor) then the payload.
+                n = read(fd, ((int8_t*)&frame_desc_size) + bytes_read,
+                         sizeof(frame_desc_size) - bytes_read);
+                if (n <= 0) {
+                    handle_error("reading frame_desc size", errno, n);
+                    return;
+                }
+                bytes_read += n;
+                if (bytes_read >= sizeof(frame_desc_size)) {
+                    assert(bytes_read == sizeof(frame_desc_size));
+                    // Reject an implausibly large size before allocating/reading it.
+                    // The largest legitimate descriptor is an N2 subset product_list
+                    // for the biggest array we support: num_elements up to 2048 is a
+                    // full upper triangle of ~2.1M products at ~12 JSON bytes each,
+                    // i.e. ~24 MiB. 64 MiB leaves headroom; a size past it means a
+                    // mismatched/hostile peer sending contaminated control data, so
+                    // shut down (as the malformed-descriptor case below).
+                    constexpr uint32_t MAX_FRAME_DESC_SIZE = 64u << 20; // 64 MiB
+                    if (frame_desc_size > MAX_FRAME_DESC_SIZE) {
+                        FATAL_ERROR("Received frame_desc size ({:d}) exceeds maximum ({:d}) from "
+                                    "{:s} (sender/receiver use_frame_desc mismatch or corrupt "
+                                    "stream?)",
+                                    frame_desc_size, MAX_FRAME_DESC_SIZE, client_ip);
+                    }
+                    bytes_read = 0;
+                    if (frame_desc_size == 0) {
+                        frame_desc_read = true;
+                        state = connState::metadata;
+                    } else {
+                        frame_desc_space.resize(frame_desc_size);
+                        state = connState::frame_desc;
+                    }
+                }
+            } break;
+            case connState::frame_desc: {
+                n = read(fd, frame_desc_space.data() + bytes_read, frame_desc_size - bytes_read);
+                if (n <= 0) {
+                    handle_error("reading frame_desc", errno, n);
+                    return;
+                }
+                bytes_read += n;
+                if (bytes_read >= frame_desc_size) {
+                    assert(bytes_read == frame_desc_size);
+                    // Parse and reconcile before the frame/drop decision. A
+                    // malformed descriptor is contaminated control data, so we
+                    // shut down (FATAL) rather than swallow it; a real
+                    // config-vs-received mismatch is fatal in ensure_frame_desc.
+                    // Catch parse/deserialize errors and raise FATAL_ERROR so the
+                    // failure gets a controlled shutdown, not a bare exception.
+                    std::shared_ptr<const kotekan::FrameDesc> recv_desc;
+                    try {
+                        const auto j =
+                            nlohmann::json::parse(frame_desc_space.begin(), frame_desc_space.end());
+                        recv_desc = kotekan::FrameDesc::from_json(j);
+                    } catch (const std::exception& e) {
+                        FATAL_ERROR("Failed to deserialize frame descriptor from {:s}: {:s}",
+                                    client_ip, e.what());
+                    }
+                    buf->ensure_frame_desc(recv_desc);
+                    frame_desc_read = true;
+                    state = connState::metadata;
+                    bytes_read = 0;
+                }
             } break;
             case connState::metadata:
                 n = read(fd, (void*)(metadata_space + bytes_read),
@@ -545,22 +696,29 @@ void connInstance::internal_read_callback() {
                 if (metadata)
                     metadata->set_from_bytes((char*)metadata_space, buf_frame_header.metadata_size);
 
-                // TODO: actuall transfer the NDArray information
+                // Reconstruct a descriptor from the received chordMetadata on every
+                // frame, complementing the once-per-connection wire descriptor read
+                // when use_frame_desc is set (which also covers metadata types, like
+                // N2, that carry no structural fields).
                 auto chord = std::dynamic_pointer_cast<chordMetadata>(metadata);
                 if (chord) {
                     /* new style array description */
-                    std::vector<ptrdiff_t> dimensions(chord->dim, chord->dim + chord->dims);
+                    std::vector<std::ptrdiff_t> dimensions(chord->dim, chord->dim + chord->dims);
                     std::vector<kotekan::Symbol> dimnames(chord->dims);
                     for (size_t d = 0; d < dimnames.size(); ++d) {
-                        dimnames.at(d) =
-                            std::string(chord->dim_name[d],
-                                        strnlen(chord->dim_name[d], sizeof(chord->dim_name[d])));
+                        dimnames.at(d) = chord->get_dimension_name(d);
                     }
+                    std::vector<std::ptrdiff_t> dimscalings(chord->dim_scaling,
+                                                            chord->dim_scaling + chord->dims);
 
-                    buf->allocate_ndarray_frame_desc(chord->type, chord->get_name(), dimensions,
-                                                     dimnames);
+                    // The frame descriptor is discovered from the received frame,
+                    // so ensure_frame_desc: attach it when the receive buffer is
+                    // undeclared (e.g. `standard`), or validate the received shape
+                    // against the buffer's declared descriptor when it has one.
+                    buf->ensure_frame_desc(kotekan::GenericNDArray::describe(
+                        chord->type, chord->get_name(), dimensions, dimnames, dimscalings));
                     /* test that things are consistent */
-                    chord->check_frame_desc(buf->get_ndarray_frame_desc());
+                    chord->check_frame_desc(buf->get_frame_desc<kotekan::GenericNDArray>());
                 }
 
                 buf->mark_frame_full(producer_name, frame_id);

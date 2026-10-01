@@ -4,20 +4,34 @@
  *  - cudaFRBBeamReformer : public cudaCommand
  */
 
-#include "Config.hpp" // for Config
-#include "NDArrayBuffer.hpp"
-#include "NDArrayRingBuffer.hpp"
-#include "cudaCommand.hpp" // for cudaCommand, REGISTER_CUDA_COMMAND
-#include "div.hpp"
+#include "Config.hpp"              // for Config
+#include "DataType.hpp"            // for float16_t
+#include "NDArray.hpp"             // for NDArray
+#include "NDArrayBuffer.hpp"       // for NDArrayBuffer, buffer_type_t
+#include "NDArrayRingBuffer.hpp"   // for NDArrayRingBuffer, read_descriptor_t, extent_t
+#include "Symbol.hpp"              // for Symbol
+#include "bufferContainer.hpp"     // for bufferContainer
+#include "chordMetadata.hpp"       // for chordMetadata
+#include "cudaCommand.hpp"         // for cudaCommand, cudaPipelineState, REGISTER_CUDA_COMMAND
+#include "cudaDeviceInterface.hpp" // for cudaDeviceInterface
+#include "cuda_fp16.h"             // for __half
+#include "div.hpp"                 // for mod
+#include "gpuCommand.hpp"          // for gpuCommandType
+#include "kotekanLogging.hpp"      // for DEBUG, ERROR, FATAL_ERROR
 
-#include <array>
-#include <cassert>
-#include <cstdlib>
-//#include <cublas_api.h>   // for cublasContext, cublasHandle_t
+#include "fmt.hpp" // for compile_string_to_view
+
+#include <array>          // for array
+#include <cassert>        // for assert
+#include <cstddef>        // for ptrdiff_t
+#include <cstdlib>        // for abort
+#include <cublas_api.h>   // for cublasGetStatusString, CUBLAS_STATUS_SUCCESS, cublasH...
 #include <cublas_v2.h>    // for cublasCreate, cublasDestroy, cublasSetStream
-#include <driver_types.h> // for cudaEvent_t
-#include <string>
-#include <vector>
+#include <driver_types.h> // for cudaEvent_t, CUevent_st, CUstream_st
+#include <functional>     // for function
+#include <memory>         // for shared_ptr, __shared_ptr_access
+#include <string>         // for basic_string, allocator, operator==, string
+#include <vector>         // for vector
 
 using kotekan::mod;
 
@@ -30,6 +44,13 @@ using kotekan::mod;
  * The weights matrix for the beam locations uses the correct math but
  * with a lot of placeholder assumptions.  This will need to get
  * revisited in post-MVP development.
+ *
+ * @conf  accumulate_float32  Bool (default true). Accumulate the matrix product in float32
+ *                            (`cublasGemmStridedBatchedEx` with `CUBLAS_COMPUTE_32F`) instead
+ *                            of float16 (`cublasHgemmStridedBatched`). Inputs and outputs are
+ *                            float16 either way. The product sums over all
+ *                            `frb1_num_beams_P * frb1_num_beams_Q` input beams (4096 for CHIME),
+ *                            and float32 accumulation of this sum is about 10x more accurate.
  */
 class cudaFRBBeamReformer : public cudaCommand {
 public:
@@ -44,6 +65,9 @@ public:
 
 private:
     const bool poison_buffers;
+    const bool accumulate_float32;
+
+    const int frb_downsampling_factor;
 
     const int frb1_max_num_times;
     const int frb1_max_num_frequencies;
@@ -66,8 +90,6 @@ private:
     NDArrayBuffer<float16_t, 4> frb2_beams_buffer;
 
     cublasHandle_t handle;
-
-    bool did_set_metadata;
 };
 
 REGISTER_CUDA_COMMAND(cudaFRBBeamReformer);
@@ -79,6 +101,9 @@ cudaFRBBeamReformer::cudaFRBBeamReformer(kotekan::Config& config, const std::str
                 "cudaFRBBeamReformer"),
 
     poison_buffers(config.get_default<bool>(unique_name, "poison_buffers", false)),
+    accumulate_float32(config.get_default<bool>(unique_name, "accumulate_float32", true)),
+
+    frb_downsampling_factor(config.get<int>(unique_name, "frb_downsampling_factor")),
 
     frb1_max_num_times(config.get<int>(unique_name, "frb1_max_num_times")),
     frb1_max_num_frequencies(config.get<int>(unique_name, "frb1_max_num_frequencies")),
@@ -96,18 +121,18 @@ cudaFRBBeamReformer::cudaFRBBeamReformer(kotekan::Config& config, const std::str
     frb2_weights_buffer(frb2_weights_name, "W2",
                         std::array<std::ptrdiff_t, 4>{frb2_num_frequencies, frb2_num_beams,
                                                       frb1_num_beams_Q, frb1_num_beams_P},
-                        std::array<std::string, 4>{"Fbar", "R", "beamQ", "beamP"}, *this,
-                        buffer_type_t::do_once),
+                        std::array<std::string, 4>{"Fbar", "R", "beamQ", "beamP"}, {1, 1, 1, 1},
+                        *this, buffer_type_t::do_once),
     frb1_beams_buffer(frb1_beams_name, "I",
                       std::array<std::ptrdiff_t, 4>{frb1_max_num_times, frb1_max_num_frequencies,
                                                     frb1_num_beams_Q, frb1_num_beams_P},
-                      std::array<std::string, 4>{"Ttilde", "Fbar", "beamQ", "beamP"}, *this),
+                      std::array<std::string, 4>{"Ttilde", "Fbar", "beamQ", "beamP"},
+                      {frb_downsampling_factor, 1, 1, 1}, *this),
     frb2_beams_buffer(
         frb2_beams_name, "I2",
         std::array<std::ptrdiff_t, 4>{1, frb2_num_beams, frb2_num_frequencies, frb2_num_times},
-        std::array<std::string, 4>{"Ttildehi256", "R", "Fbar", "Ttildelo256"}, *this),
-
-    did_set_metadata(false)
+        std::array<std::string, 4>{"Ttildehi256", "R", "Fbar", "Ttildelo256"},
+        {frb_downsampling_factor * frb2_num_times, 1, 1, frb_downsampling_factor}, *this)
 
 {
     frb2_weights_buffer.register_consumer();
@@ -167,18 +192,10 @@ cudaEvent_t cudaFRBBeamReformer::execute(cudaPipelineState& /*pipestate*/,
     frb2_weights_buffer.check_metadata();
     frb1_beams_buffer.check_metadata();
 
-    if (!did_set_metadata) {
-        did_set_metadata = true;
-        // Set metadata
-        const std::shared_ptr<const chordMetadata> frb1_beams_meta =
-            frb1_beams_buffer.get_metadata();
-        frb2_beams_buffer.set_metadata(frb1_beams_meta);
-        const std::shared_ptr<chordMetadata> frb2_beams_meta = frb2_beams_buffer.get_metadata();
-        frb2_beams_meta->set_time_downsampling_fpga(frb1_beams_meta->get_time_downsampling_fpga());
-        frb2_beams_meta->set_coarse_freq(frb1_beams_meta->get_coarse_freq());
-        frb2_beams_meta->set_freq_upchan_factor(frb1_beams_meta->get_freq_upchan_factor());
-        frb2_beams_meta->set_freq_upchan_index(frb1_beams_meta->get_freq_upchan_index());
-    }
+    // `frb2_beams_buffer` is not a ring buffer, so every frame gets its own metadata object
+    // (`NDArrayBuffer::set_metadata` takes a fresh one from the pool): `fpga_seq_num` below is
+    // frame-dependent, and frames already downstream still reference their own objects.
+    frb2_beams_buffer.set_metadata(frb1_beams_buffer.get_metadata());
     frb2_beams_buffer.check_metadata();
 
     const std::ptrdiff_t frb1_beams_offset = frb1_beams_buffer.get_read_valid().begin();
@@ -190,12 +207,28 @@ cudaEvent_t cudaFRBBeamReformer::execute(cudaPipelineState& /*pipestate*/,
                     "frb2_num_times={}, and frb1_beams_stride={}. These would result in a "
                     "wrap-around in the ringbuffer which is not implemented.",
                     frb1_beams_offset, frb1_beams_extent, frb2_num_times, frb1_beams_stride);
-        std::abort();
     }
 
     // Since we do not use a ring buffer we need to set `meta->fpga_seq_num`
+    auto frb1_beams_meta =
+        std::dynamic_pointer_cast<chordMetadata>(frb1_beams_buffer.get_metadata());
+    assert(frb1_beams_meta);
     const std::shared_ptr<chordMetadata> frb2_beams_meta = frb2_beams_buffer.get_metadata();
-    frb2_beams_meta->set_fpga_seq_num(frb1_beams_offset);
+    // `frb1_beams_offset` counts elements of the input's dimension 0 (`Ttilde`), so it has to be
+    // scaled by the *input's* `time_downsampling_fpga`, which by convention is that dimension's
+    // scaling.
+    assert(frb1_beams_meta->get_time_downsampling_fpga()
+           == frb1_beams_buffer.get_ndarray().dimscaling(0));
+    frb2_beams_meta->set_fpga_seq_num(frb1_beams_meta->get_fpga_seq_num()
+                                      + frb1_beams_offset
+                                            * frb1_beams_meta->get_time_downsampling_fpga());
+    // The output splits the time direction into a slow `Ttildehi256` (dimension 0, extent 1) and
+    // a fast `Ttildelo256`. `time_downsampling_fpga` describes dimension 0, i.e. the whole frame,
+    // so it is that dimension's scaling and not the one inherited from the input. (`set_metadata`
+    // copies `time_downsampling_fpga` verbatim; only the array description is taken from the
+    // output's own ndarray.)
+    frb2_beams_meta->set_time_downsampling_fpga(
+        static_cast<int>(frb2_beams_buffer.get_ndarray().dimscaling(0)));
 
     if (poison_buffers)
         frb2_beams_buffer.set_to_poison(0xff); // 0xffff is a NaN16
@@ -258,7 +291,6 @@ cudaEvent_t cudaFRBBeamReformer::execute(cudaPipelineState& /*pipestate*/,
     const int K = frb1_num_beams_P * frb1_num_beams_Q; // input beams
 
     // Matrix A
-    const float16_t alpha = 1;
     const float16_t* A = frb1_beams_buffer.get_ndarray().data()
                          + frb1_beams_stride * mod(frb1_beams_offset, frb1_beams_extent);
     assert(std::string(frb1_beams_buffer.get_ndarray().get_dimname(0)) == "Ttilde");
@@ -274,7 +306,6 @@ cudaEvent_t cudaFRBBeamReformer::execute(cudaPipelineState& /*pipestate*/,
     const std::ptrdiff_t strideB = frb2_weights_buffer.get_ndarray().get_stride(0); // frequency
 
     // Matrix C
-    const float16_t beta = 0;
     float16_t* C = frb2_beams_buffer.get_ndarray().data();
     assert(std::string(frb2_beams_buffer.get_ndarray().get_dimname(1)) == "R");
     const int ldC = frb2_beams_buffer.get_ndarray().get_stride(1); // output beams
@@ -293,17 +324,33 @@ cudaEvent_t cudaFRBBeamReformer::execute(cudaPipelineState& /*pipestate*/,
     //                     const T* beta,
     //                     T* C, int ldC, int strideC,
     //                     int batchCount)
+    // GemmStridedBatchedEx takes the same arguments, plus the data type of each matrix and the
+    // compute type. `alpha` and `beta` then have the compute type.
     DEBUG("M={} N={} K={} A={} ldA={} strideA={} B={} ldB={} strideB={} C={} ldC={} strideC={} "
-          "batchCount={}",
+          "batchCount={} accumulate_float32={}",
           M, N, K, (const void*)A, ldA, strideA, (const void*)B, ldB, strideB, (void*)C, ldC,
-          strideC, batchCount);
-    cublasStatus_t stat =
-        cublasHgemmStridedBatched(handle, transA, transB, M, N, K, &alpha, A, ldA, strideA, B, ldB,
-                                  strideB, &beta, C, ldC, strideC, batchCount);
-    if (stat != CUBLAS_STATUS_SUCCESS) {
-        ERROR("Error at {:s}:{:d}: cublasHgemmStridedBatched: {:s}", __FILE__, __LINE__,
-              cublasGetStatusString(stat));
-        std::abort();
+          strideC, batchCount, accumulate_float32);
+    if (accumulate_float32) {
+        const float alpha = 1;
+        const float beta = 0;
+        cublasStatus_t stat = cublasGemmStridedBatchedEx(
+            handle, transA, transB, M, N, K, &alpha, A, CUDA_R_16F, ldA, strideA, B, CUDA_R_16F,
+            ldB, strideB, &beta, C, CUDA_R_16F, ldC, strideC, batchCount, CUBLAS_COMPUTE_32F,
+            CUBLAS_GEMM_DEFAULT);
+        if (stat != CUBLAS_STATUS_SUCCESS) {
+            FATAL_ERROR("Error at {:s}:{:d}: cublasGemmStridedBatchedEx: {:s}", __FILE__, __LINE__,
+                        cublasGetStatusString(stat));
+        }
+    } else {
+        const float16_t alpha = 1;
+        const float16_t beta = 0;
+        cublasStatus_t stat =
+            cublasHgemmStridedBatched(handle, transA, transB, M, N, K, &alpha, A, ldA, strideA, B,
+                                      ldB, strideB, &beta, C, ldC, strideC, batchCount);
+        if (stat != CUBLAS_STATUS_SUCCESS) {
+            FATAL_ERROR("Error at {:s}:{:d}: cublasHgemmStridedBatched: {:s}", __FILE__, __LINE__,
+                        cublasGetStatusString(stat));
+        }
     }
 
     if (poison_buffers)

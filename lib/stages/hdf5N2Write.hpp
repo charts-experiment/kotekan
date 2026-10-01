@@ -1,30 +1,31 @@
 #ifndef KOTEKAN_STAGES_HDF5_N2_WRITE_HPP
 #define KOTEKAN_STAGES_HDF5_N2_WRITE_HPP
 
-#include "Config.hpp"
-#include "N2Metadata.hpp"
-#include "Stage.hpp"
-#include "Telescope.hpp"
-#include "buffer.hpp"
-#include "bufferContainer.hpp"
-#include "errors.h"
-#include "hdf5Files.hpp"
-#include "kotekanLogging.hpp"
-#include "prometheusMetrics.hpp"
+#include "Config.hpp"            // for Config
+#include "N2Layout.hpp"          // for N2Layout
+#include "Stage.hpp"             // for Stage
+#include "Telescope.hpp"         // for ElementOrder
+#include "buffer.hpp"            // for Buffer
+#include "bufferContainer.hpp"   // for bufferContainer
+#include "prometheusMetrics.hpp" // for Gauge, MetricFamily, Counter
 
-#include "fmt.hpp"
-
-#include <N2FrameView.hpp>
-#include <N2Metadata.hpp>
-#include <N2Util.hpp>
-#include <cassert>
-#include <filesystem>
-#include <highfive/H5File.hpp>
-#include <map>
-#include <memory>
-#include <optional>
-#include <string>
-#include <vector>
+#include <H5public.h>                  // for hsize_t
+#include <N2FrameView.hpp>             // for N2FrameView
+#include <N2Util.hpp>                  // for cfloat
+#include <atomic>                      // for atomic
+#include <cstdint>                     // for uint64_t, int64_t, int32_t, uint16_t, uint8_t
+#include <highfive/H5DataType.hpp>     // for DataType
+#include <highfive/H5File.hpp>         // for File
+#include <highfive/H5PropertyList.hpp> // for DataSetCreateProps
+#include <map>                         // for map
+#include <memory>                      // for unique_ptr
+#include <mutex>                       // for mutex
+#include <optional>                    // for optional, nullopt
+#include <stddef.h>                    // for size_t
+#include <string>                      // for string, basic_string
+#include <thread>                      // for thread
+#include <utility>                     // for pair
+#include <vector>                      // for vector
 
 /**
  * @class N2FileData
@@ -45,14 +46,16 @@
  *   num_file_t, num_elements, num_prod, num_ev, num_freq, n2_layout, telescope
  *   geometry (origin, orientations, dish maps), EOP tables, num_file_f.
  * - Index maps: /index_map/freq (MHz + width per file frequency), /index_map/prod,
- *   /index_map/grid_x_idx, /index_map/grid_y_idx, /index_map/feed_pos_disp_m,
- *   /index_map/coelev_disp_deg, /index_map/type, /index_map/dish_positions_in_grid_coords.
- * - Per-(f, p, t)/(f, t) datasets: /vis, /eval, /evec, /erms, /gain, /frames_added;
- *   vis_weight, flags, frac_lost, and frac_rfi live at the root (CHORD) or under
+ *   per-element input tables over the frame's elements (/index_map/dish_idx, pol,
+ *   grid_x_idx, grid_y_idx, feed_pos_disp_m, coelev_disp_deg, type, label), and
+ *   /index_map/dish_positions_in_grid_coords per dish.
+ * - Per-(f, p, t)/(f, t) datasets: /vis, /eval, /evec, /erms, /gain, /radiometer_chi2,
+ * /frames_added; vis_weight, flags, frac_lost, and frac_rfi live at the root (CHORD) or under
  *   /flags/{vis_weight, flags, frac_lost, frac_rfi} when file_mode == CHIME.
  * - Per-time metadata: /fpga_start_tick, /frame_length_fpga_ticks,
  *   /time_center_ut1_ns, /bin_ut1_ns, /bin_start_ERA_deg, /bin_end_ERA_deg,
- *   /bin_start_LAST, /bin_end_LAST.
+ *   /bin_start_ERAL, /bin_end_ERAL, /rfi_frame_excision_enabled, /rfi_frame_excision_num,
+ *   /rfi_frame_excision_threshold, /rfi_frame_excision_fraction.
  * - /config_json grows on flush with snapshots from configTracker.
  *
  * @par Chunking and compression
@@ -67,18 +70,14 @@
 class N2FileData {
 public:
     enum FileMode { CHORD, CHIME };
-    struct DigitalGains {
-        std::vector<std::uint16_t> gains_lin;
-        std::vector<std::uint16_t> gains_log;
-        std::string full_filepath;
-    };
 
     // Structural information and fixed sizes
-    const size_t num_elements; // number of inputs / elements
-    const size_t num_prod;     // number of products
-    const size_t num_ev;       // number of eigenvectors/values
-    const size_t num_file_f;   // number of frequencies
-    const size_t num_file_t;   // frames ("time" dimension)
+    const size_t num_elements;      // number of inputs / elements
+    const size_t num_prod;          // number of products
+    const size_t num_ev;            // number of eigenvectors/values
+    const ElementOrder input_order; // element ordering on input frameviews.
+    const size_t num_file_f;        // number of frequencies
+    const size_t num_file_t;        // frames ("time" dimension)
 
     // file bookkeeping owned by this object
     const FileMode file_mode;       // CHORD or CHIME (or other?)-type file
@@ -92,35 +91,56 @@ public:
     const uint64_t abs_file_idx;    // absolute file index (abs_time_idx / num_file_t)
     const std::string base_dir;     // base output directory (without /.partial)
     const std::string
-        gains_base_directory; // Base directory for gains. If empty/absent, gains are not written.
+        baseband_gain_file;             // Path to gains HDF5 file. If empty, gains are not written.
+    const int baseband_gain_update_idx; // update_time index (-1 = latest)
     const std::string partial_filepath; // working on-disk location
     const N2Layout n2_layout;           // visibility (N2) layout
 
     double last_update_wall_s;               // last frame receipt
     std::unique_ptr<HighFive::File> h5_file; // Working on-disk HDF5 file handle
+    std::optional<size_t> gains_file_hash =
+        std::nullopt; // hash of gains file contents at copy time
 
 protected:
     // Datasets to be stored until ready to write
-    // f = freq, p = prod, e = eigen, i = input, t = time
-    std::vector<N2::cfloat> vis;   // (f, p, t)
-    std::vector<float> vis_weight; // (f, p, t)
-    std::vector<float> eval;       // (f, e, t)
-    std::vector<N2::cfloat> evec;  // (f, e, i, t)
-    std::vector<float> erms;       // (f, t)
-    std::vector<N2::cfloat> gain;  // (f, i, t)
-    std::vector<float> frac_lost;  // (f, t) ; uses n_valid_fpga_ticks
-    std::vector<float> frac_rfi;   // (f, t) ; uses n_rfi_fpga_ticks
-    std::vector<float> flags;      // (f, i, t)
+    // f = freq, p = prod, e = eigen, i = input, t = time, k = threshold, pp = pol_prod
+    std::vector<N2::cfloat> vis;               // (f, p, t)
+    std::vector<float> vis_weight;             // (f, p, t)
+    std::vector<float> eval;                   // (f, e, t)
+    std::vector<N2::cfloat> evec;              // (f, e, i, t)
+    std::vector<float> erms;                   // (f, t)
+    std::vector<N2::cfloat> gain;              // (f, i, t)
+    std::vector<uint64_t> valid_fpga_count;    // (f, t)
+    std::vector<uint64_t> rfi_fpga_count;      // (f, t)
+    std::vector<uint64_t> rfi_only_fpga_count; // (f, t)
+    std::vector<uint64_t> pl_fpga_count;       // (f, t)
+    std::vector<float> frac_lost;              // (f, t) ; uses n_valid_fpga_ticks
+    std::vector<float> frac_rfi;               // (f, t) ; uses n_rfi_fpga_ticks
+    std::vector<float> frac_rfi_only;          // (f, t) ; uses n_rfi_only_fpga_ticks
+    std::vector<float> frac_pl;                // (f, t) ; uses n_pl_fpga_ticks
+    std::vector<float> flags;                  // (f, i, t)
+    std::vector<float> radiometer_chi2;        // (f, t, pp)
 
     // t-dependent metadata
-    std::vector<uint64_t> fpga_start_tick;         // (t)
-    std::vector<uint64_t> frame_length_fpga_ticks; // (t)
-    std::vector<int64_t> time_center_ut1;          // (t)
-    std::vector<int64_t> bin_ut1;                  // (t)
-    std::vector<double> bin_start_ERA_deg;         // (t)
-    std::vector<double> bin_end_ERA_deg;           // (t)
-    std::vector<double> bin_start_LAST;            // (t)
-    std::vector<double> bin_end_LAST;              // (t)
+    std::vector<uint64_t> fpga_start_tick;           // (t)
+    std::vector<uint64_t> frame_length_fpga_ticks;   // (t)
+    std::vector<uint64_t> bin_abs_index;             // (t)
+    std::vector<int64_t> time_center_t_inst_ns;      // (t)
+    std::vector<int64_t> time_center_ut1_ns;         // (t)
+    std::vector<int64_t> bin_t_inst_ns;              // (t)
+    std::vector<int64_t> bin_ut1_ns;                 // (t)
+    std::vector<double> bin_delta_ut1_inst;          // (t)
+    std::vector<double> bin_era_deg;                 // (t)
+    std::vector<double> bin_xp_as;                   // (t)
+    std::vector<double> bin_yp_as;                   // (t)
+    std::vector<double> bin_start_ERA_deg;           // (t)
+    std::vector<double> bin_end_ERA_deg;             // (t)
+    std::vector<double> bin_start_ERAL_deg;          // (t)
+    std::vector<double> bin_end_ERAL_deg;            // (t)
+    std::vector<bool> rfi_frame_excision_enabled;    // (t)
+    std::vector<int32_t> rfi_frame_excision_num;     // (t)
+    std::vector<float> rfi_frame_excision_threshold; // (t, k)
+    std::vector<float> rfi_frame_excision_fraction;  // (t, k)
 
     // Tracking what (f, t) pairs have been added
     std::vector<uint8_t> added_ft; // size = num_file_f * num_file_t
@@ -138,13 +158,8 @@ private:
                                const std::vector<std::string>& dim_names,
                                const HighFive::DataType& dtype,
                                HighFive::DataSetCreateProps props) const;
-
-    /// Load digital gains from files in given directory
-    ///
-    /// !TODO: switch to API when it exists.
-    /// Need to validate these gains are actualy what the F-engine is using, e.g. query fpga_master.
-    ///
-    std::optional<N2FileData::DigitalGains> _get_digital_gains() const;
+    /// Dataset creation properties carrying this file's compression filters.
+    HighFive::DataSetCreateProps _compressed_props() const;
 
     /// Open/create/init datasets in h5 file
     std::unique_ptr<HighFive::File> _open_or_create_file(const std::string& filepath,
@@ -156,10 +171,12 @@ public:
     enum class AddFrameStatus { Success, OutOfBounds, Duplicate, MetadataMismatch };
 
     N2FileData(FileMode file_mode_, uint64_t num_file_t_, const N2FrameView& fv,
-               const double open_wall_s_, const uint64_t abs_file_idx_, const size_t blocksize_f_,
+               const double open_wall_s_, const uint64_t abs_file_idx_,
+               const ElementOrder input_order_, const size_t blocksize_f_,
                const size_t blocksize_p_, const size_t blocksize_t_, const std::string compression_,
                const size_t compression_level_, const bool use_bitshuffle_,
-               const std::string base_dir_, const std::string gains_base_directory_);
+               const std::string base_dir_, const std::string baseband_gain_file_,
+               const int baseband_gain_update_idx_ = -1);
 
     /**
      * @brief Add a frame of data at the computed time index.
@@ -183,6 +200,25 @@ public:
     /// Although errors are logged, no further action is taken by this class, and
     /// an attempt is made to write data regardless.
     bool flush_to_disk();
+
+    /// The [start, end) FPGA tick span of the frames added so far; {0, 0} when none.
+    std::pair<std::uint64_t, std::uint64_t> fpga_tick_span() const;
+
+    /// The /bad_feed_mask group, see hdf5N2Write's in_bad_feed_mask_buf. Its stream axis is fixed
+    /// when the group is created; mask rows are appended as the file's time bins arrive.
+    bool bad_feed_mask_started = false;
+    std::vector<std::int32_t> bad_feed_mask_stream_ids; // first coarse freq of each stream column
+    std::uint64_t bad_feed_mask_next_seq = 0;           // first grid sample not yet appended
+    /// Mask streams as (first coarse freq, all coarse freqs).
+    using BfMaskStreams = std::vector<std::pair<std::int32_t, std::vector<std::int32_t>>>;
+    /// Create /bad_feed_mask for `streams`, masks being `num_pol` x `num_dish` elements.
+    void create_bad_feed_mask(const BfMaskStreams& streams, std::size_t num_pol,
+                              std::size_t num_dish);
+    /// Append mask rows: one FPGA seq per row, masks flattened as (row, stream, pol, dish).
+    void append_bad_feed_mask(const std::vector<std::uint64_t>& seqs,
+                              const std::vector<std::int8_t>& masks);
+    /// The science frequency ids with at least one frame in this file.
+    std::vector<std::int32_t> freq_ids_with_frames() const;
 
     /// Close the associated dataset handle if open.
     void close();
@@ -252,12 +288,26 @@ public:
  * @buffer in_buf  Input visibility buffer
  *     @buffer_format VisBuffer
  *     @buffer_metadata N2Metadata
+ * @buffer in_bad_feed_mask_buf  Optional bad feed mask streams as applied by the X-engine: one
+ *     frame per correlation frame per X-engine half, stamped with the FPGA seq of the
+ *     first sample it was applied to, the samples per frame (time_downsampling_fpga) and
+ *     the coarse frequencies of the half that applied it, which identify the stream.
+ *     Taken in on a dedicated thread. Each output file gets a /bad_feed_mask group: one row per
+ *     mask frame over the file's FPGA tick span, one column per stream, -1 where a
+ *     stream's frame did not arrive, and the streams' frequency lists. Every frequency
+ *     with data in a file must belong to a stream, or the stage stops. Without this input
+ *     no /bad_feed_mask group is written.
+ *     @buffer_format NDArray int8 [1, num_polarizations, num_dishes]
+ *     @buffer_metadata chordMetadata
  *
  * @par Configuration
  * @conf in_buf                   String. N2 buffer supplying frames (`buffer_type` must be "N2").
+ * @conf in_bad_feed_mask_buf           String. Optional; see the buffer description above.
  * @conf base_dir                 String. Output directory (absolute or relative to the process
- *                                working directory where kotekan was invoked); `<base_dir>` and
- *                                `<base_dir>/.partial` are created.
+ *                                working directory where kotekan was invoked). An acquisition
+ *                                subdirectory `acq_YYYYMMDD_HHMMSS_NNNNNNNNN` is appended
+ *                                automatically at startup; `<base_dir>/<acq>/` and
+ *                                `<base_dir>/<acq>/.partial` are created.
  * @conf num_file_t               UInt. Number of time frames per file (`t_index = abs_time_idx %
  *num_file_t`).
  * @conf blocksize_f              UInt. Chunk cap for the frequency dimension (default: 16).
@@ -268,8 +318,22 @@ public:
  * @conf compression_level        UInt. Codec level (0 picks 4 for deflate, 9 for bitshuffle).
  * @conf use_bitshuffle           Bool. Enable bitshuffle with the selected backend codec (default:
  *                                false).
+ * @conf baseband_gain_file       String. Path to the digital gains HDF5 file. If empty (default),
+ *                                gains are not written. Mutually exclusive with
+ *                                `baseband_gain_host_info`.
+ * @conf baseband_gain_host_info  String. Absolute config path (e.g. `/fpga_controller`) to a block
+ *                                that exposes `host`, `port`, and an optional `gains_endpoint`
+ *                                (default `/get-current-gain-file`). At startup the gains HDF5
+ *                                file is fetched once over plain HTTP from
+ *                                `http://<host>:<port><gains_endpoint>` into
+ *                                `<base_dir>/.partial/baseband_gains.h5` and then used as if it
+ *                                had been provided via `baseband_gain_file`. Mutually exclusive
+ *                                with `baseband_gain_file`.
+ * @conf baseband_gain_update_idx Int. Index along the update_time axis to read from the gains
+ *                                file (-1 = latest, default: -1).
  * @conf late_frame_grace_seconds UInt. Grace period in seconds for late frames (default: 60).
  * @conf max_frames               Int. Stop writing after this many frames (-1 = unlimited).
+ * @conf input_order              ElementOrder. The element order of input buffer.
  *
  * @par Metrics
  * @metric kotekan_hdf5N2Write_write_time_seconds        Duration to write the last flush
@@ -285,6 +349,12 @@ public:
  * @metric kotekan_hdf5N2Write_finalize_failures_total   Counter of finalize failures {reason}
  * @metric kotekan_hdf5N2Write_unfinalized_file          Gauge=1 for files left partial/quarantined
  *                                {abs_file_idx, partial_path}
+ * @metric kotekan_hdf5N2Write_bad_feed_mask_frames_total      Bad feed mask frames received
+ *{stream}
+ * @metric kotekan_hdf5N2Write_bad_feed_mask_missing_frames_total Gaps in a mask stream's seqs
+ *{stream}
+ * @metric kotekan_hdf5N2Write_bad_feed_mask_late_frames_total Mask frames that arrived after their
+ *                                row was written, recorded as not received {stream}
  *
  * @par Example
  * @code{.yaml}
@@ -305,6 +375,9 @@ public:
  *
  * @note N2FileData documents the per-file layout, chunking, and compression details.
  * @note User-level documentation lives in docs/sphinx/user/processes/hdf5N2Write.rst.
+ * @note The on-disk file format is documented in detail in
+ *       docs/sphinx/user/file_formats/n2_vis_hdf5.rst. Any change to the datasets
+ *       or attributes written by this stage should be reflected there.
  **/
 class hdf5N2Write : public kotekan::Stage {
 
@@ -317,8 +390,18 @@ public:
 
 private:
     // Config settings (initialized from Config in constructor)
-    const std::string _base_dir;             /// Base directory to write files into
-    const std::string _gains_base_directory; /// Base directory for digital gains files
+    const std::string _base_dir; /// Base directory to write files into
+    /// Path to digital gains HDF5 file. Set either directly from config or, if
+    /// `baseband_gain_host_info` is configured, populated at startup after the
+    /// file is fetched into `<base_dir>/.partial/baseband_gains.h5`.
+    std::string _baseband_gain_file;
+    /// Resolved host/port/path for the gains-file HTTP fetch. All empty / 0 when
+    /// `baseband_gain_host_info` was not set. Filled in by the constructor body
+    /// from the referenced fpga-controller block.
+    std::string _baseband_gain_host;
+    std::uint16_t _baseband_gain_port = 0;
+    std::string _baseband_gain_endpoint;
+    const int _baseband_gain_update_idx; /// update_time index (-1 = latest)
     const std::uint64_t _num_file_t; /// Number of incoming time frames per file, as indexed by the
                                      /// absolute frame index
     const std::string _compression;
@@ -328,10 +411,50 @@ private:
     const std::uint64_t _blocksize_p;
     const std::uint64_t _blocksize_t;
     const std::uint64_t
-        _late_frame_grace_seconds; /// Grace period in seconds for late frames (default: 60)
-    const int _max_frames;         /// Stop writing after this many frames (-1 = unlimited)
+        _late_frame_grace_seconds;   /// Grace period in seconds for late frames (default: 60)
+    const int _max_frames;           /// Stop writing after this many frames (-1 = unlimited)
+    const ElementOrder _input_order; /// The element ordering in input buffers.
 
     Buffer* const _buffer;
+    /// Optional bad feed mask stream; null when unwired.
+    Buffer* const _bad_feed_mask_buf;
+    /// Mask frame shape: [1, num_pol, num_dish] elements.
+    std::size_t _bad_feed_mask_row_len = 0;
+    std::size_t _bad_feed_mask_num_pol = 0;
+    std::size_t _bad_feed_mask_num_dish = 0;
+
+    /// One X-engine mask stream (a NUMA half), identified by the coarse frequencies its
+    /// masks were applied to.
+    struct BfMaskStream {
+        std::vector<std::int32_t> coarse_freq;
+        /// Masks (1 == good) by the FPGA seq of the first sample they were applied to, kept
+        /// until every open file that needs them has taken them.
+        std::map<std::uint64_t, std::vector<std::int8_t>> samples;
+        std::uint64_t last_seq = 0;
+        bool has_last = false;
+        /// Grid samples below this have been written by some file; later arrivals are late.
+        std::uint64_t written_upto = 0;
+    };
+    /// Most samples held per stream while no file takes them (about three minutes of
+    /// 21 ms frames); older ones are recorded as not received.
+    static constexpr std::size_t bad_feed_mask_max_samples = 8192;
+    /// Streams by first coarse freq. Guarded by _bad_feed_mask_lock, as is _bad_feed_mask_step.
+    std::map<std::int32_t, BfMaskStream> _bad_feed_mask_streams;
+    /// FPGA samples per mask frame, from the first frame seen; 0 until then.
+    std::int64_t _bad_feed_mask_step = 0;
+    std::mutex _bad_feed_mask_lock;
+    std::thread _bad_feed_mask_thread;
+    std::atomic<bool> _bad_feed_mask_stop{false};
+
+    /// Ingest thread: take mask frames as they arrive and file them by stream.
+    void _bad_feed_mask_ingest();
+    void _bad_feed_mask_ingest_loop();
+    /// Append `filedata`'s mask rows for the grid samples before `upto_seq`.
+    void _bad_feed_mask_append(N2FileData& filedata, std::uint64_t upto_seq);
+    /// Drop the samples no open file still needs.
+    void _bad_feed_mask_prune(const std::map<size_t, std::unique_ptr<N2FileData>>& files);
+    /// Append the rows through the file's span end; stop if a frequency with data has no stream.
+    void _bad_feed_mask_finish(N2FileData& filedata);
 
     kotekan::prometheus::Gauge& _write_time_metric;
     kotekan::prometheus::Gauge& _n_datasets_metric;
@@ -342,6 +465,9 @@ private:
     kotekan::prometheus::MetricFamily<kotekan::prometheus::Gauge>& _last_add_frame_error_metric;
     kotekan::prometheus::MetricFamily<kotekan::prometheus::Counter>& _finalize_failures_metric;
     kotekan::prometheus::MetricFamily<kotekan::prometheus::Gauge>& _unfinalized_file_metric;
+    kotekan::prometheus::MetricFamily<kotekan::prometheus::Counter>& _bad_feed_mask_frames_metric;
+    kotekan::prometheus::MetricFamily<kotekan::prometheus::Counter>& _bad_feed_mask_missing_metric;
+    kotekan::prometheus::MetricFamily<kotekan::prometheus::Counter>& _bad_feed_mask_late_metric;
 
     /**
      * @brief Get an absolute file number (index) for given metadata.
@@ -351,7 +477,7 @@ private:
      * based on its absolute frame index and the configured
      * number of time frames per file.
      */
-    std::uint64_t _get_abs_file_idx(const N2FrameView& fv) const;
+    size_t _get_abs_file_idx(const N2FrameView& fv) const;
 
     /**
      * @brief Finalize a file: close and rename from .partial to final name.

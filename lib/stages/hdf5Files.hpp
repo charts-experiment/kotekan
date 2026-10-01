@@ -3,15 +3,17 @@
 
 #include "DataType.hpp" // for DataType, float16_t
 
-#include <array> // for array
-#include <highfive/highfive.hpp>
+#include <array>                         // for array
+#include <highfive/H5DataType.hpp>       // for AtomicType, DataType, H5T_NATIVE_FLOAT
+#include <highfive/bits/h5t_wrapper.hpp> // for h5t_copy, h5t_set_ebias, h5t_set_fields, h5t_se...
+#include <string>                        // for string
 
 namespace hdf5 {
 
 // The version number of the CHORD metadata format in HDF5 files.
 // This uses semver: A file with version X.Y can be read by software
 // that understands X.Z even when Y > Z.
-constexpr std::array<int, 2> chord_metadata_version{1, 0};
+constexpr std::array<int, 2> chord_metadata_version{2, 0};
 
 // Bitshuffle flags
 constexpr unsigned int H5Z_BLOSC = 32001;      // blosc filter id
@@ -34,6 +36,26 @@ constexpr unsigned int BITSHUFFLE_COMPRESS_LZ4 = 2;
 constexpr unsigned int BITSHUFFLE_COMPRESS_ZSTD = 3;
 
 HighFive::DataType chord2hdf5(const kotekan::DataType type);
+
+/**
+ * @brief The common part of the file names used by hdf5FileWrite and hdf5FileRead:
+ *        "<dir>/[<hostname>_][x<rank:04d>_]<file_name>"
+ *
+ * The caller appends the suffix, i.e. ".<frame:08d>.h5" for per-frame files and ".h5" for a
+ * single file.
+ */
+std::string file_path_prefix(const std::string& dir, const std::string& file_name,
+                             bool prefix_hostname, bool prefix_host_rank, int host_pool_rank);
+
+/**
+ * @brief Whether a dimension is a time axis
+ *
+ * Kotekan convention: a dimension is a time axis iff its name starts with 'T'
+ * ("T", "Tc", "Tbar", "Ttilde", "Thi64", "T8hi128", ...).
+ */
+inline bool is_time_axis(const std::string& dim_name) {
+    return !dim_name.empty() && dim_name[0] == 'T';
+}
 
 } // namespace hdf5
 

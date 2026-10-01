@@ -9,20 +9,6 @@ using Random
 
 const Memory = IndexSpaces.Memory
 
-# const card = "A30"
-const card = "A40"
-# const card = "GeForce_RTX_4090"
-# const card = "L40S"
-
-if CUDA.functional()
-    println("[Choosing CUDA device...]")
-    CUDA.device!(0)
-    println(name(device()))
-    @assert replace(name(device()), ' ' => '_') == "NVIDIA_$card"
-end
-
-chimify(x::Int4x8) = Int4x8(x.val ⊻ 0x88888888)
-unchimify(x) = chimify(x)
 idiv(i::Integer, j::Integer) = (@assert iszero(i % j); i ÷ j)
 # shift(x::Number, s) = (@assert s ≥ 0; s == 0 ? x : (x + (1 << (s - 1))) >> s)
 shift(x::Number, s) = (@assert s ≥ 1; (x + (1 << (s - 1))) >> s)
@@ -104,7 +90,7 @@ elseif setup ≡ :pathfinder || setup ≡ :smallfinder
 elseif setup ≡ :chime
 
     # CHIME
-    const B = 16
+    const B = 32                # 16
 
     const T1_stride = 128
     const T2_stride = 32
@@ -113,11 +99,28 @@ elseif setup ≡ :chime
     const Wd = 4
     const Wp = 1
 
+elseif setup ≡ :charts
+
+    # CHARTS
+    const B = 16
+
+    const T1_stride = 128
+    const T2_stride = 32
+
+    const Wb = idiv(B, 8)
+    const Wd = 1
+    const Wp = 2
+
 else
     @assert false
 end
 
 const Tout = idiv(T, 4)         # always process 1/4 of the ringbuffer at a time
+
+# The phase matrix is recalculated periodically, and the matrices are handed to the GPU through a
+# ring buffer holding this many of them (the Kotekan buffer depth). How many FPGA samples one
+# matrix covers is a run-time setting, `bb_phase_lifetime_in_samples`.
+const Tbb = idiv(T, Tout)
 
 # Since we introduced Tmin and Tmax, we don't support Bt != 1 any more
 # const Bt = 16                   # distribute time samples over that many blocks
@@ -1039,7 +1042,7 @@ function main(; compile_only::Bool=false, output_kernel::Bool=false, run_selftes
     end
 
     if output_kernel
-        open("output-$card/bb_$setup.jl", "w") do fh
+        open("output/bb_$setup.jl", "w") do fh
             println(fh, "# Julia source code for CUDA baseband beamformer")
             println(fh, "# This file has been generated automatically by `bb.jl`.")
             println(fh, "# Do not modify this file, your changes will be lost.")
@@ -1060,7 +1063,7 @@ function main(; compile_only::Bool=false, output_kernel::Bool=false, run_selftes
     shmem_bytes = kernel_setup.shmem_bytes
     @assert num_warps * num_blocks_per_sm ≤ 32 # (???)
     @assert shmem_bytes ≤ 100 * 1024 # NVIDIA A10/A40 have 100 kB shared memory
-    kernel = @cuda launch = false minthreads = (num_threads, num_warps) blocks_per_sm = num_blocks_per_sm bb(
+    kernel = @cuda launch = false cap = compute_capability ptx = ptx_compat minthreads = (num_threads, num_warps) blocks_per_sm = num_blocks_per_sm bb(
         Int32(0),
         Int32(0),
         CUDA.zeros(Int8x4, 0),
@@ -1077,9 +1080,9 @@ function main(; compile_only::Bool=false, output_kernel::Bool=false, run_selftes
     end
 
     if output_kernel
-        ptx = read("output-$card/bb_$setup.ptx", String)
+        ptx = read("output/bb_$setup.ptx", String)
         ptx = replace(ptx, r".extern .func gpu_([^;]*);"s => s".func gpu_\1.noreturn\n{\n\ttrap;\n}")
-        open("output-$card/bb_$setup.ptx", "w") do fh
+        open("output/bb_$setup.ptx", "w") do fh
             println(fh, "// PTX kernel code for CUDA baseband beamformer")
             println(fh, "// This file has been generated automatically by `bb.jl`.")
             println(fh, "// Do not modify this file, your changes will be lost.")
@@ -1087,17 +1090,25 @@ function main(; compile_only::Bool=false, output_kernel::Bool=false, run_selftes
             write(fh, ptx)
             return nothing
         end
-        sass = read("output-$card/bb_$setup.sass", String)
-        open("output-$card/bb_$setup.sass", "w") do fh
+        open("output/bb_$setup.sass", "w") do fh
             println(fh, "// SASS kernel code for CUDA baseband beamformer")
             println(fh, "// This file has been generated automatically by `bb.jl`.")
             println(fh, "// Do not modify this file, your changes will be lost.")
             println(fh)
-            write(fh, sass)
+            CUDA.code_sass(fh, bb, Tuple{Int32, Int32,
+                                         CuDeviceVector{Int8x4,1},
+                                         CuDeviceVector{Int4x8,1},
+                                         CuDeviceVector{Int32,1},
+                                         CuDeviceVector{Int4x8,1},
+                                         CuDeviceVector{Int32,1},
+                                         CuDeviceVector{Int32,1}};
+                           cap=compute_capability, ptx=ptx_compat,
+                           minthreads=(num_threads, num_warps),
+                           blocks_per_sm=num_blocks_per_sm)
             return nothing
         end
         kernel_symbol = match(r"\s\.globl\s+(\S+)"m, ptx).captures[1]
-        open("output-$card/bb_$setup.yaml", "w") do fh
+        open("output/bb_$setup.yaml", "w") do fh
             println(fh, "# Metadata for the CUDA baseband beamformer")
             println(fh, "# This file has been generated automatically by `bb.jl`.")
             println(fh, "# Do not modify this file, your changes will be lost.")
@@ -1179,6 +1190,7 @@ function main(; compile_only::Bool=false, output_kernel::Bool=false, run_selftes
             cxx,
             Dict(
                 "kernel_name" => "BasebandBeamformer_$setup",
+                "cuda_arch" => cuda_arch,
                 "kernel_design_parameters" => [
                     Dict("type" => "int", "name" => "cuda_number_of_beams", "value" => "$B"),
                     Dict("type" => "int", "name" => "cuda_number_of_complex_components", "value" => "$C"),
@@ -1207,6 +1219,7 @@ function main(; compile_only::Bool=false, output_kernel::Bool=false, run_selftes
                         "hasbuffer" => false,
                         "hasringbuffer" => false,
                         "do_once" => false,
+                        "haslifetime" => false,
                     ),
                     Dict(
                         "name" => "T_max",
@@ -1217,102 +1230,118 @@ function main(; compile_only::Bool=false, output_kernel::Bool=false, run_selftes
                         "hasbuffer" => false,
                         "hasringbuffer" => false,
                         "do_once" => false,
+                        "haslifetime" => false,
                     ),
                     Dict(
                         "name" => "A",
                         "kotekan_name" => "bb_phase_name",
                         "type" => "int8",
+                        # The slowest axis is the ring buffer direction. Its `dimscaling` is a
+                        # placeholder; it is overwritten at run time with the configured
+                        # `bb_phase_lifetime_in_samples`. The kernel itself still sees a single
+                        # phase matrix: the wrapper passes it the element covering the voltage
+                        # samples being processed.
                         "axes" => [
-                            Dict("label" => "C", "length" => C),
-                            Dict("label" => "D", "length" => D),
-                            Dict("label" => "B", "length" => B),
-                            Dict("label" => "P", "length" => P),
-                            Dict("label" => "F", "length" => F),
-                        ],
-                        "isoutput" => false,
-                        "isscalar" => false,
-                        "hasbuffer" => true,
-                        "hasringbuffer" => false,
-                        "do_once" => true,
-                    ),
-                    Dict(
-                        "name" => "E",
-                        "kotekan_name" => "voltage_name",
-                        "type" => "int4x2_swapped_withoffset",
-                        "axes" => [
-                            Dict("label" => "D", "length" => D),
-                            Dict("label" => "P", "length" => P),
-                            Dict("label" => "F", "length" => F),
-                            Dict("label" => "T", "length" => T),
+                            Dict("label" => "C", "length" => C, "dimscaling" => 1),
+                            Dict("label" => "D", "length" => D, "dimscaling" => 1),
+                            Dict("label" => "B", "length" => B, "dimscaling" => 1),
+                            Dict("label" => "P", "length" => P, "dimscaling" => 1),
+                            Dict("label" => "F", "length" => F, "dimscaling" => 1),
+                            Dict("label" => "Tbb", "length" => Tbb, "dimscaling" => 1),
                         ],
                         "isoutput" => false,
                         "isscalar" => false,
                         "hasbuffer" => true,
                         "hasringbuffer" => true,
                         "do_once" => false,
+                        "haslifetime" => true,
+                        "lifetime_config" => "bb_phase_lifetime_in_samples",
+                    ),
+                    Dict(
+                        "name" => "E",
+                        "kotekan_name" => "voltage_name",
+                        "type" => "int4x2_swapped_withoffset",
+                        "axes" => [
+                            Dict("label" => "D", "length" => D, "dimscaling" => 1),
+                            Dict("label" => "P", "length" => P, "dimscaling" => 1),
+                            Dict("label" => "F", "length" => F, "dimscaling" => 1),
+                            Dict("label" => "T", "length" => T, "dimscaling" => 1),
+                        ],
+                        "isoutput" => false,
+                        "isscalar" => false,
+                        "hasbuffer" => true,
+                        "hasringbuffer" => true,
+                        "do_once" => false,
+                        "haslifetime" => false,
                     ),
                     Dict(
                         "name" => "s",
                         "kotekan_name" => "bb_shift_name",
                         "type" => "int32",
                         "axes" => [
-                            Dict("label" => "B", "length" => B),
-                            Dict("label" => "P", "length" => P),
-                            Dict("label" => "F", "length" => F),
+                            Dict("label" => "B", "length" => B, "dimscaling" => 1),
+                            Dict("label" => "P", "length" => P, "dimscaling" => 1),
+                            Dict("label" => "F", "length" => F, "dimscaling" => 1),
                         ],
                         "isoutput" => false,
                         "isscalar" => false,
                         "hasbuffer" => true,
                         "hasringbuffer" => false,
                         "do_once" => true,
+                        "haslifetime" => false,
                     ),
                     Dict(
                         "name" => "J",
                         "type" => "int4x2_swapped_withoffset",
                         "kotekan_name" => "bb_beams_name",
                         "axes" => [
-                            Dict("label" => "T", "length" => Tout),
-                            Dict("label" => "P", "length" => P),
-                            Dict("label" => "F", "length" => F),
-                            Dict("label" => "B", "length" => B),
-                            Dict("label" => "Thi", "length" => 1),
+                            Dict("label" => "T", "length" => Tout, "dimscaling" => 1),
+                            Dict("label" => "P", "length" => P, "dimscaling" => 1),
+                            Dict("label" => "F", "length" => F, "dimscaling" => 1),
+                            Dict("label" => "B", "length" => B, "dimscaling" => 1),
+                            Dict("label" => "Thi", "length" => 1, "dimscaling" => Tout),
                         ],
                         "isoutput" => true,
                         "isscalar" => false,
                         "hasbuffer" => true,
                         "hasringbuffer" => false,
                         "do_once" => false,
+                        "haslifetime" => false,
                     ),
                     Dict(
                         "name" => "info",
                         "kotekan_name" => "gpu_mem_info",
                         "type" => "int32",
                         "axes" => [
-                            Dict("label" => "thread", "length" => num_threads),
-                            Dict("label" => "warp", "length" => num_warps),
-                            Dict("label" => "block", "length" => num_blocks),
+                            Dict("label" => "thread", "length" => num_threads, "dimscaling" => 1),
+                            Dict("label" => "warp", "length" => num_warps, "dimscaling" => 1),
+                            Dict("label" => "block", "length" => num_blocks, "dimscaling" => 1),
                         ],
                         "isoutput" => true,
                         "isscalar" => false,
                         "hasbuffer" => false,
                         "hasringbuffer" => false,
                         "do_once" => false,
+                        "haslifetime" => false,
                     ),
                     Dict(
                         "name" => "log",
                         "kotekan_name" => "gpu_mem_log",
                         "type" => "int32",
-                        "axes" => [Dict("label" => "block", "length" => num_blocks)],
+                        "axes" => [
+                            Dict("label" => "block", "length" => num_blocks, "dimscaling" => 1),
+                        ],
                         "isoutput" => true,
                         "isscalar" => false,
                         "hasbuffer" => false,
                         "hasringbuffer" => false,
                         "do_once" => false,
+                        "haslifetime" => false,
                     ),
                 ],
             ),
         )
-        write("output-$card/bb_$setup.cxx", cxx)
+        write("output/bb_$setup.cxx", cxx)
     end
 
     println("Allocating input data...")
@@ -1424,7 +1453,7 @@ function main(; compile_only::Bool=false, output_kernel::Bool=false, run_selftes
                 @assert max(abs(Ju.re), abs(Ju.im)) ≤ 32767
                 J = Ju
                 J = shift(J, s - σ)
-                reinterpret(Int4x2, J_wanted)[((b * F + f) * P + p) * T + t + 1] = Int4x2(
+                reinterpret(Int4x2, J_wanted)[((b * F + f) * P + p) * Tout + t + 1] = Int4x2(
                     Int32(clamp(J.re, -7:+7)), Int32(clamp(J.im, -7:+7))
                 )
             end
@@ -1433,9 +1462,9 @@ function main(; compile_only::Bool=false, output_kernel::Bool=false, run_selftes
 
     println("Copying data from CPU to GPU...")
     A_cuda = CuArray(A_memory)
-    E_cuda = CuArray(chimify.(E_memory))
+    E_cuda = CuArray(swap_offset.(E_memory))
     s_cuda = CuArray(s_memory)
-    J_cuda = CUDA.fill(chimify(Int4x8(-8, -8, -8, -8, -8, -8, -8, -8)), idiv(Tout, 4) * P * F * B)
+    J_cuda = CUDA.fill(swap_offset(Int4x8(-8, -8, -8, -8, -8, -8, -8, -8)), idiv(Tout, 4) * P * F * B)
     info_cuda = CUDA.fill(-1i32, num_threads * num_warps * num_blocks)
     log_cuda = CUDA.fill(0i32, num_blocks)
 
@@ -1513,7 +1542,7 @@ function main(; compile_only::Bool=false, output_kernel::Bool=false, run_selftes
     end
 
     println("Copying data back from GPU to CPU...")
-    J_memory = unchimify.(Array(J_cuda))
+    J_memory = swap_offset.(Array(J_cuda))
     info_memory = Array(info_cuda)
     log_memory = Array(log_cuda)
     @assert all(info_memory .== 0)
@@ -1537,6 +1566,8 @@ function main(; compile_only::Bool=false, output_kernel::Bool=false, run_selftes
         end
         @assert all(checked_J)
         println("    J: $error_count errors found")
+        error_count == 0 || error("*** SELF-TEST FAILED: $(error_count) mismatches ***")
+        println("Self-test passed.")
     end
 
     println("Done.")
@@ -1545,14 +1576,9 @@ end
 
 if CUDA.functional()
     # Output kernel
-    open("output-$card/bb_$setup.ptx", "w") do fh
+    open("output/bb_$setup.ptx", "w") do fh
         redirect_stdout(fh) do
             @device_code_ptx main(; compile_only=true)
-        end
-    end
-    open("output-$card/bb_$setup.sass", "w") do fh
-        redirect_stdout(fh) do
-            @device_code_sass main(; compile_only=true)
         end
     end
     # This call needs to happen after generating PTX code since it

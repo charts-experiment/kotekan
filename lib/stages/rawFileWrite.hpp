@@ -23,10 +23,18 @@
  * @conf file_ext  String. File extension.
  * @conf num_frames_per_file Int. No of frames to write into a single file.
  * @conf exit_after_n_files  Int. Stop writing after this many files, Default 0 = unlimited files.
+ * @conf prefix_hostname    Bool. Prefix the filename with the hostname. Default true.
+ * @conf allow_ndarray      Bool. Write an NDArray buffer's raw bytes instead of failing.
+ *                          Default false. The frame descriptor is NOT written, so the
+ *                          reader has to know the shape out of band.
  *
  * @par Metrics
  * @metric kotekan_rawfilewrite_write_time_seconds
  *         The write time to write out the last frame.
+ *
+ * @note The on-disk file format is documented in
+ *       docs/sphinx/user/file_formats/raw_frames.rst. Any change to the byte
+ *       layout written by this stage should be reflected there.
  *
  * @author Andre Renard
  **/
@@ -44,6 +52,8 @@ private:
     std::string _file_ext;
     uint32_t _num_frames_per_file;
     uint32_t _exit_after_n_files;
+    /// Write NDArray-descriptor buffers anyway (shape known out of band; see the .cpp note).
+    bool _allow_ndarray = false;
     // Prefix file name with hostname or not
     bool _prefix_hostname;
 };

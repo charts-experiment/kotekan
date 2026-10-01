@@ -8,17 +8,17 @@
 
 #include "fmt.hpp" // for compile_string_to_view, format, format_string
 
-#include <algorithm>     // for max
-#include <bits/chrono.h> // for duration, operator-, operator/, operator>, seconds, ste...
-#include <functional>    // for bind, function
-#include <math.h>        // for round
-#include <memory>        // for __shared_ptr_access, shared_ptr
-#include <ratio>         // for ratio
-#include <stddef.h>      // for size_t
-#include <sys/stat.h>    // for mkdir, S_IRGRP, S_IROTH, S_IRWXU, S_IXGRP, S_IXOTH
-#include <thread>        // for sleep_for, thread
-#include <tuple>         // for forward_as_tuple
-#include <utility>       // for pair, piecewise_construct
+#include <algorithm>  // for max
+#include <chrono>     // for duration, operator-, operator/, operator>, seconds, ste...
+#include <functional> // for bind, function
+#include <math.h>     // for round
+#include <memory>     // for __shared_ptr_access, shared_ptr
+#include <ratio>      // for ratio
+#include <stddef.h>   // for size_t
+#include <sys/stat.h> // for mkdir, S_IRGRP, S_IROTH, S_IRWXU, S_IXGRP, S_IXOTH
+#include <thread>     // for sleep_for, thread
+#include <tuple>      // for forward_as_tuple
+#include <utility>    // for pair, piecewise_construct
 
 using kotekan::bufferContainer;
 using kotekan::Config;
@@ -105,6 +105,10 @@ void BasebandWriter::main_thread() {
         in_buf->mark_frame_empty(unique_name, frame_id++);
     }
 
+    {
+        std::lock_guard<std::mutex> lk(mtx);
+        closing_stop = true;
+    }
     stop_closing.notify_one();
     closing_thread.join();
 }
@@ -172,14 +176,10 @@ void BasebandWriter::close_old_events() {
         double now = current_time();
         DEBUG("Run file-closing thread {:.1f}", now);
         std::unique_lock lk(mtx);
-        if (stop_closing.wait_for(lk, std::chrono::seconds(sweep_cadence_s))
-            != std::cv_status::timeout) {
-            // is it a notification to exit or a spurious interrupt?
-            if (stop_thread) {
-                return;
-            } else {
-                continue;
-            }
+        if (stop_closing.wait_for(lk, std::chrono::seconds(sweep_cadence_s),
+                                  [this]() { return closing_stop; })) {
+            // notified to exit (the predicate also filters spurious wakeups)
+            return;
         }
 
         // Otherwise, we've waited long enough and can do the sweep

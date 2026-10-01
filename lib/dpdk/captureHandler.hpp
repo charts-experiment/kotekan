@@ -46,7 +46,7 @@ public:
     int handle_packet(struct rte_mbuf* mbuf) override;
 
     /// Update stats, not used by this handler yet.
-    virtual void update_stats() override{};
+    virtual void update_stats() override {};
 
 protected:
     /// The output buffer
@@ -73,7 +73,7 @@ inline captureHandler::captureHandler(kotekan::Config& config, const std::string
     dpdkRXhandler(config, unique_name, buffer_container, port) {
 
     out_buf = buffer_container.get_buffer(config.get<std::string>(unique_name, "out_buf"));
-    out_buf->register_producer(unique_name.c_str());
+    out_buf->register_producer(unique_name);
 
     packet_size = config.get<uint32_t>(unique_name, "packet_size");
 
@@ -102,7 +102,6 @@ inline int captureHandler::handle_packet(struct rte_mbuf* mbuf) {
         first_run = false;
     }
 
-#ifndef OLD_DPDK
     if (unlikely((mbuf->ol_flags & RTE_MBUF_F_RX_IP_CKSUM_MASK) == RTE_MBUF_F_RX_IP_CKSUM_BAD)) {
         WARN("Port: {:d}; Got bad packet IP checksum", port);
         return 0;
@@ -112,30 +111,32 @@ inline int captureHandler::handle_packet(struct rte_mbuf* mbuf) {
         WARN("Port: {:d}; Got bad packet UDP checksum", port);
         return 0;
     }
-#else 
-    if (unlikely((mbuf->ol_flags | PKT_RX_IP_CKSUM_BAD) == 1)) {
-        WARN("Port: {:d}; Got bad packet IP checksum", port);
+
+    if (unlikely(packet_size != mbuf->pkt_len)) {
+        WARN("Port: {:d}; Got packet with size {:d}, but expected size was {:d}", port,
+             mbuf->pkt_len, packet_size);
         return 0;
     }
-#endif
 
-// Copy the packet.
-const int ip_udp_header_size = 42; //skip header IP/UDP
-int offset = ip_udp_header_size;
-copy_block(&mbuf, &out_frame[packet_location * packet_size], packet_size, (int*)&offset);
+    // Copy the packet.
+    assert((packet_location + 1) * packet_size <= (uint32_t)out_buf->frame_size);
+    int offset = 0;
+    copy_block(&mbuf, &out_frame[packet_location * packet_size], packet_size, (int*)&offset);
 
-if (packet_location * packet_size == (uint32_t)out_buf->frame_size) {
-    out_buf->mark_frame_full(unique_name.c_str(), out_frame_id);
-    out_frame_id = (out_frame_id + 1) % out_buf->num_frames;
+    packet_location++;
 
-    out_frame = out_buf->wait_for_empty_frame(unique_name, out_frame_id);
-    if (out_frame == nullptr)
-        return -1;
+    if (packet_location * packet_size == (uint32_t)out_buf->frame_size) {
+        out_buf->mark_frame_full(unique_name, out_frame_id);
+        out_frame_id = (out_frame_id + 1) % out_buf->num_frames;
 
-    packet_location = 0;
+        out_frame = out_buf->wait_for_empty_frame(unique_name, out_frame_id);
+        if (out_frame == nullptr)
+            return -1;
+
+        packet_location = 0;
+    }
+
+    return 0;
 }
 
-return 0;
-
-}
 #endif

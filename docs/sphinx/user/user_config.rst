@@ -36,21 +36,40 @@ omit metadata entirely.
 
 Common keys (unless noted otherwise):
 
-- ``kotekan_buffer``: buffer type; supported values are ``standard``, ``vis``, ``N2``, ``hfb``, and
-  ``ring``.
+- ``kotekan_buffer``: buffer type; supported values are ``standard``, ``ndarray``, ``vis``, ``N2``,
+  ``hfb``, and ``ring``.
 - ``num_frames``: depth of frame-based buffers (everything except ``ring``). Pick a size that covers
   the latency of downstream stages.
 - ``metadata_pool``: optional for ``standard`` buffers; name of a :ref:`metadata pool
   <metadata_config>` block. If omitted, the buffer carries no metadata.
 - ``numa_node`` (default ``0``), ``use_hugepages`` (default ``false``), ``mlock_frames`` (default
   ``true``), ``zero_new_frames`` (default ``true``), ``cpu_affinity`` (pin the zeroing helper
-  threads), and ``log_level`` mirror the values on stages. ``zero_new_frames`` only zeros memory
-  when it is first allocated; reused frames are not cleared unless a stage calls ``zero_frames()``
-  or explicitly writes over the data.
+  threads), and ``log_level`` mirror the values on stages. The frames, and the buffer object
+  itself, are allocated on ``numa_node``; see :ref:`memory placement <numa_placement>` under
+  Stages. ``zero_new_frames`` only zeros memory when it is first allocated; reused frames are not
+  cleared unless a stage calls ``zero_frames()`` or explicitly writes over the data.
+- ``peek_hold`` (default ``false``, frame-based buffers only): keep the newest full frame around —
+  its recycling is deferred until the next frame is marked full — so the ``/buffer_frame``
+  endpoint always has a frame to serve even when consumers drain frames quickly. Requires
+  ``num_frames >= 2``; the held frame counts as one full frame in ``/buffers``. It occupies
+  that slot for the lifetime of the pipeline, so kotekan warns at startup on a buffer of
+  fewer than four frames, where the hold is a large share of the depth available to absorb
+  jitter. Setting it on a ``ring`` buffer warns and does nothing — ring buffers are not
+  peekable yet.
 
 Type-specific notes:
 
 - ``standard`` – raw byte buffers. You must set ``frame_size`` in bytes.
+- ``ndarray`` – frames holding a single typed multi-dimensional array. The **required** structural
+  fields are ``value_type`` (a kotekan ``DataType`` name such as ``float32`` or ``int4x2``) and
+  ``extents`` (a list of dimension sizes; entries may be arithmetic expressions referencing other
+  config values, e.g. ``samples_per_data_set / upchan_factor``) -- these fix the byte layout the
+  factory allocates. The semantic labels ``quantity_name`` and ``dimnames`` (a list of axis labels,
+  one per extent) are **optional**: when omitted, the producing stage supplies them; when given,
+  the stage validates against them. ``frame_size`` is derived from the descriptor, and the frame
+  descriptor is attached to the buffer at startup, so stages can validate against it (or read
+  shapes from it) from their constructors onward. Typically paired with a ``chordMetadata`` pool.
+  See :ref:`dev_buffers` for the descriptor model and authoring guidance.
 - ``vis`` – visibility frames sized automatically from ``num_elements``, ``num_ev``, and optional
   ``num_prod`` (defaults to an upper-triangular visibility matrix). Numeric types are fixed
   (complex floats for visibilities/EVs, floats for weights/flags). The attached metadata type is
@@ -127,15 +146,63 @@ pipelines. Commonly used config parameters include (under ``dataset_manager``):
   - REST: ``/dataset-manager/force-update`` forces re-registration with the broker.
   - Metrics: ``kotekan_datasetbroker_error_count`` (broker comms errors), plus per-stage dataset
     metrics (see writer/transform stages).
-- The Config Tracker is intended as a more lightweight replacement for the dataset manager. It stores 
-snapshots of both local and upstream config blocks, and optionally writes them to disk. You can use the
-  ``configTrackerWriter`` stage with:
+- The Config Tracker is intended as a more lightweight replacement for the dataset manager.
+  It stores snapshots of this node's own (local) config and configs from upstream peers, and
+  optionally a combined ``{"config": ..., "timing": ...}`` snapshot fetched from an upstream
+  FPGA controller. All entries propagate to downstream nodes over REST. Configured by an
+  optional top-level ``config_tracker`` block::
+
+    fpga_controller:
+        host: chive.site.chord-observatory.ca
+        port: 54321
+        config_endpoint: /config                  # consumed by ConfigTracker
+        timing_endpoint: /get-frame0-time         # consumed by Telescope + ConfigTracker
+        gains_endpoint: /get-current-gain-file    # consumed by hdf5N2Write
+
+    config_tracker:
+        enabled: true                          # default; false disables the tracker globally
+        fpga_host_info: /fpga_controller       # optional; names the controller block
+        upstream_fetch_retries: 2              # retries per HTTP request (FPGA + peer pulls)
+        upstream_fetch_timeout_seconds: 10     # per-attempt HTTP timeout (FPGA + peer pulls)
+
+  The ``fpga_host_info`` indirection lets a pipeline define the FPGA controller address and
+  endpoints once and have multiple consumers (the Config Tracker plus the Telescope's
+  ``gps_host_info`` and ``hdf5N2Write``'s ``baseband_gain_host_info``) point at it. The
+  Telescope picks up ``timing_endpoint`` from the same block as the default for its own
+  ``gps_endpoint``, and ``hdf5N2Write`` picks up ``gains_endpoint`` (default
+  ``/get-current-gain-file``) for the startup gains-file fetch, so paths aren't duplicated.
+  Stages that support the tracker (``bufferSend``/``bufferRecv``) read their per-stage
+  ``use_config_tracker`` first; if unset, they fall back to ``/config_tracker/enabled``.
+
+  You can use the ``configTrackerWriter`` stage with:
+
   - ``base_dir``: directory to write JSON snapshots (created if missing).
-  - Output naming follows the config tracker; files are rotated on hash change.
+  - Output naming: ``local.json`` for the local entry, ``<host>_<port>.json`` for every
+    upstream entry (including the FPGA controller snapshot).
+  - Files are rotated on tracker-hash change.
 
 
 Stages
 ------
+
+Stages are declared by adding ``kotekan_stage`` to a block. A few keys are read by every stage,
+usually inherited from an enclosing section or the root of the config:
+
+- ``cpu_affinity``: the CPU cores the stage's threads are pinned to. It also decides the NUMA
+  node the stage's memory is allocated on; see below.
+- ``log_level``: the stage's log level.
+- ``join_timeout`` (default ``60``): seconds to wait for the stage's thread to exit at shutdown
+  before kotekan aborts.
+
+.. _numa_placement:
+
+**Memory placement.** Kotekan is usually run with the kernel's automatic NUMA balancing disabled
+(``numa_balancing=0``), so a page stays on the node it was first allocated on. A buffer's frames,
+and the buffer object itself, are allocated on the buffer's ``numa_node``. A stage, and everything
+its constructor allocates, is placed on the NUMA node of the cores in its ``cpu_affinity``; a
+``numa_node`` in scope of a stage is not consulted. If the cores span more than one node, kotekan
+logs a warning and uses the node of the first core listed. Placement needs a build with libnuma
+(``-DUSE_NUMA=ON``, the default) and is skipped entirely in a ``-DNO_MEMLOCK=ON`` build.
 
 .. toctree::
     :glob:
@@ -151,6 +218,30 @@ Config values are resolved by walking up the YAML path: a stage first looks in i
 parent scopes, then the root. Jinja2 templating can be used in ``.j2`` configs; supply variables via
 ``-e '{"key": "value"}'`` when invoking kotekan. Shared constants can be defined at higher levels
 and referenced by name in child blocks.
+
+Config usage tracking
+---------------------
+
+Set the top-level ``log_config_usage`` to have kotekan record which config leaf items (scalar
+values, strings, and lists -- not the object blocks that contain them) are actually read while a
+pipeline runs, and by which path. At shutdown a summary is logged listing the accessed items (with
+the requesting base paths, typically stage ``unique_name``\ s) and the items that were never
+accessed. This is useful for spotting stale or misspelled config keys that no stage consumes. The
+feature is off by default and adds no overhead unless enabled.
+
+The value selects how unused items are reported:
+
+- ``false`` (default) -- disabled.
+- ``true`` / ``info`` -- log the summary at ``INFO``.
+- ``warn`` / ``error`` -- log the summary at that severity when one or more items went unused
+  (otherwise ``INFO``).
+- ``fatal_error`` -- additionally fail kotekan with a non-zero exit when any item went unused. Useful
+  in CI to reject configs that carry stale parameters.
+
+Framework dispatch markers (``kotekan_buffer``, ``kotekan_stage``, ``kotekan_metadata_pool``,
+``kotekan_update_endpoint``) are excluded from the summary: the factories and config updater consume
+those by walking the config tree directly rather than through a value lookup, so they would otherwise
+always appear as unused.
 
 REST server
 -----------

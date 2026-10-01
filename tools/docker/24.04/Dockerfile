@@ -70,6 +70,7 @@ RUN apt-get update && \
         libsystemd-dev \
         libxtensor-dev \
         libyaml-cpp-dev \
+        lld \
         make \
         pkg-config \
         python3 \
@@ -102,6 +103,7 @@ RUN rm /usr/lib/python*/EXTERNALLY-MANAGED && \
         gmpy2 \
         h5py \
         hdf5plugin \
+        jinja2 \
         mpmath \
         msgpack \
         numpy \
@@ -114,6 +116,7 @@ RUN rm /usr/lib/python*/EXTERNALLY-MANAGED && \
         pytest-timeout \
         pytest-xdist \
         requests \
+        ruamel.yaml \
         setuptools \
         sphinx==6.2.* \
         sphinx_rtd_theme==2.0.* \
@@ -128,7 +131,9 @@ RUN rm /usr/lib/python*/EXTERNALLY-MANAGED && \
 # We want the `python` command to point to python3
 RUN ln -sf /usr/bin/python3 /usr/bin/python
 
-# Install Blaze for the eigenvalue processes
+# Install Blaze for the eigenvalue processes. Pin the cache size: Blaze bakes the build
+# host's L3 size into a header and rejects values above 100 MB at compile time.
+# 30 MiB matches the per-socket L3 of the CHORD compute nodes.
 RUN mkdir src && \
     ( \
         git clone -b v3.8.2 https://bitbucket.org/blaze-lib/blaze.git blaze && \
@@ -137,6 +142,8 @@ RUN mkdir src && \
         cmake -B cmake-build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DBLAZE_CACHE_SIZE_AUTO=OFF \
+            -DBLAZE_CACHE_SIZE=31457280 \
             && \
         cmake --build cmake-build --parallel $(nproc) && \
         cmake --install cmake-build && \
@@ -201,6 +208,40 @@ CMD ["/bin/bash"]
 
 
 ##############################################################
+# INTEL IMAGE
+# This image extends the cpu image with the Intel oneAPI
+# C/C++ compilers (icx/icpx). It is a separate target (rather
+# than part of the cpu image) to keep the cpu and gpu images
+# small, i.e. build with `--target intel`.
+##############################################################
+
+FROM cpu AS intel
+
+# Add the Intel oneAPI apt repository and install the DPC++/C++
+# compilers (icx/icpx), pinned to a specific oneAPI release.
+# The gdb-oneapi debugger (~530 MB) is forced in by a hard package
+# dependency but is not needed for CI builds, so remove it in the
+# same layer to keep the image smaller.
+RUN wget -qO /usr/share/keyrings/oneapi-archive-keyring.asc \
+        https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB && \
+    echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.asc] https://apt.repos.intel.com/oneapi all main" \
+        > /etc/apt/sources.list.d/oneAPI.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends intel-oneapi-compiler-dpcpp-cpp-2026.1 && \
+    apt-get clean && apt-get autoclean && rm -rf /var/lib/apt/lists/* && \
+    rm -rf /opt/intel/oneapi/debugger
+
+# Make icx/icpx and the Intel runtime libraries available without
+# needing to source /opt/intel/oneapi/setvars.sh. The symlinks
+# keep the compilers reachable even where the image ENV is not
+# propagated (e.g. some CI step runners).
+ENV PATH="/opt/intel/oneapi/compiler/latest/bin${PATH:+:${PATH}}"
+ENV LD_LIBRARY_PATH="/opt/intel/oneapi/compiler/latest/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+RUN ln -s /opt/intel/oneapi/compiler/latest/bin/icx /usr/local/bin/icx && \
+    ln -s /opt/intel/oneapi/compiler/latest/bin/icpx /usr/local/bin/icpx
+
+
+##############################################################
 # GPU IMAGE
 # This image extends the cpu image with NVIDIA drivers and the
 # CUDA toolkit.
@@ -220,8 +261,20 @@ RUN mkdir src && \
     true) && \
     rm -rf src
 
+# Install mathdx for CHIME beamformer
+RUN mkdir src && \
+    ( \
+        cd src && \
+        wget https://developer.nvidia.com/downloads/compute/cuFFTDx/redist/cuFFTDx/cuda13/nvidia-mathdx-26.03.0-cuda13.tar.gz && \
+        tar -xzf nvidia-mathdx-26.03.0-cuda13.tar.gz && \
+        cd nvidia-mathdx-26.03.0-cuda13 && \
+        mv nvidia/mathdx/26.03/include /usr/local/include/mathdx && \
+        cp -a nvidia/mathdx/26.03/lib/* /usr/local/lib/ && \
+        cp -a nvidia/mathdx/26.03/src/* /usr/local/src/ && \
+    true) && \
+    rm -rf src
+
 ENV CUDADIR=/usr/local/cuda
 ENV PATH="${PATH:+${PATH}:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/cuda/bin"
 ENV LD_LIBRARY_PATH="${CUDADIR}/lib64:/usr/local/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 ENV CPLUS_INCLUDE_PATH="${CUDADIR}/include${CPLUS_INCLUDE_PATH:+:${CPLUS_INCLUDE_PATH}}"
-

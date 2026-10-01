@@ -9,22 +9,24 @@ scriptdir=$(dirname "$0")
 cd "$scriptdir/.."
 
 setups='
-    chime_U2 chime_U4 chime_U8 chime_U16 chime_U32 chime_U64 chime_U128
-    chord_U2 chord_U4 chord_U8 chord_U16 chord_U32 chord_U64 chord_U128
-    hirax_U8 hirax_U16 hirax_U32 hirax_U64 hirax_U128
-    pathfinder_U2 pathfinder_U4 pathfinder_U8 pathfinder_U16 pathfinder_U32 pathfinder_U64
-    smallfinder_U2 smallfinder_U4 smallfinder_U8 smallfinder_U16 smallfinder_U32 smallfinder_U64
+    charts_U32_K4
+    chime_U2_K4 chime_U4_K4 chime_U8_K4 chime_U16_K4 chime_U32_K4 chime_U64_K4 chime_U128_K4
+    chime_U2_K8 chime_U4_K8 chime_U8_K8 chime_U16_K8 chime_U32_K8 chime_U64_K8 chime_U128_K8
+    chord_U2_K4 chord_U4_K4 chord_U8_K4 chord_U16_K4 chord_U32_K4 chord_U64_K4 chord_U128_K4
+    hirax_U8_K4 hirax_U16_K4 hirax_U32_K4 hirax_U64_K4 hirax_U128_K4
+    pathfinder_U2_K4 pathfinder_U4_K4 pathfinder_U8_K4 pathfinder_U16_K4 pathfinder_U32_K4 pathfinder_U64_K4 pathfinder_U128_K4
 '
+# smallfinder_U2_K4 smallfinder_U4_K4 smallfinder_U8_K4 smallfinder_U16_K4 smallfinder_U32_K4 smallfinder_U64_K4
 
-mkdir -p output-A40
+mkdir -p output
 
 # Delete previous output (so that we don't accidentally re-use it)
 for setup in ${setups}; do
-    rm -f output-A40/upchan_${setup}.cxx
-    rm -f output-A40/upchan_${setup}.jl
-    rm -f output-A40/upchan_${setup}.ptx
-    rm -f output-A40/upchan_${setup}.sass
-    rm -f output-A40/upchan_${setup}.yaml
+    rm -f output/upchan_${setup}.cxx
+    rm -f output/upchan_${setup}.jl
+    rm -f output/upchan_${setup}.ptx
+    rm -f output/upchan_${setup}.sass
+    rm -f output/upchan_${setup}.yaml
     rm -f ../lib/cuda/generated/cudaUpchannelizer_${setup}.cpp
     rm -f ../lib/cuda/generated/Upchannelizer_${setup}.jl
     rm -f ../lib/cuda/generated/Upchannelizer_${setup}.ptx
@@ -33,34 +35,34 @@ done
 
 # Generate kernels
 for setup in ${setups}; do
-    julia --project=@. --optimize kernels/upchan_${setup}.jl 2>&1 | tee output-A40/upchan_${setup}.out &
+    julia --project=@. --optimize kernels/upchan_${setup}.jl 2>&1 | tee output/upchan_${setup}.out &
 done
 wait
 
 # Check whether kernels were generated
 for setup in ${setups}; do
-    test -f output-A40/upchan_${setup}.cxx
-    test -f output-A40/upchan_${setup}.jl
-    test -f output-A40/upchan_${setup}.ptx
-    test -f output-A40/upchan_${setup}.sass
-    test -f output-A40/upchan_${setup}.yaml
+    test -f output/upchan_${setup}.cxx
+    test -f output/upchan_${setup}.jl
+    test -f output/upchan_${setup}.ptx
+    test -f output/upchan_${setup}.sass
+    test -f output/upchan_${setup}.yaml
 done
 
 # Format generated C++ code
 for setup in ${setups}; do
-    clang-format-18 -i output-A40/upchan_${setup}.cxx &
+    clang-format-18 -i output/upchan_${setup}.cxx &
 done
 
 # Format generated Julia code
 for setup in ${setups}; do
-    julia --project=@. --eval 'using JuliaFormatter; JuliaFormatter.format_file("'output-A40/upchan_${setup}.jl'")' &
+    julia --project=@. --eval 'using JuliaFormatter; JuliaFormatter.format_file("'output/upchan_${setup}.jl'")' &
 done
 wait
 
 # Copy kernels into Kotekan
 for setup in ${setups}; do
-    cp output-A40/upchan_${setup}.cxx ../lib/cuda/generated/cudaUpchannelizer_${setup}.cpp
-    cp output-A40/upchan_${setup}.jl ../lib/cuda/generated/Upchannelizer_${setup}.jl
-    cp output-A40/upchan_${setup}.ptx ../lib/cuda/generated/Upchannelizer_${setup}.ptx
-    cp output-A40/upchan_${setup}.yaml ../lib/cuda/generated/Upchannelizer_${setup}.yaml
+    cp output/upchan_${setup}.cxx ../lib/cuda/generated/cudaUpchannelizer_${setup}.cpp
+    cp output/upchan_${setup}.jl ../lib/cuda/generated/Upchannelizer_${setup}.jl
+    cp output/upchan_${setup}.ptx ../lib/cuda/generated/Upchannelizer_${setup}.ptx
+    cp output/upchan_${setup}.yaml ../lib/cuda/generated/Upchannelizer_${setup}.yaml
 done

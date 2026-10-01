@@ -1,13 +1,14 @@
-#include "CHORDTelescope.hpp"      // for EOP
+#include "CHORDTelescope.hpp"      // for CHORDTelescope
 #include "Config.hpp"              // for Config
 #include "DataType.hpp"            // for DataType, type_to_string
+#include "ICETelescope.hpp"        // for ICETelescope
 #include "N2FrameView.hpp"         // for N2FrameView
 #include "N2Metadata.hpp"          // for metadata_is_N2
 #include "NDArray.hpp"             // for GenericNDArray
 #include "Stage.hpp"               // for Stage
 #include "StageFactory.hpp"        // for REGISTER_KOTEKAN_STAGE
 #include "Symbol.hpp"              // for Symbol
-#include "Telescope.hpp"           //
+#include "Telescope.hpp"           // for Telescope
 #include "buffer.hpp"              // for Buffer
 #include "bufferContainer.hpp"     // for bufferContainer
 #include "chordMetadata.hpp"       // for chordMetadata, metadata_is_chord, get_c...
@@ -16,29 +17,37 @@
 #include "kotekanLogging.hpp"      // for DEBUG, FATAL_ERROR, WARN, INFO
 #include "metadata.hpp"            // for metadataObject
 #include "prometheusMetrics.hpp"   // for Metrics, Gauge
-#include "timeUtil.hpp"            //
+#include "timeUtil.hpp"            // for EOP
 #include "visUtil.hpp"             // for current_time
 #include "waitingForMaxFrames.hpp" // for waiting_for_max_frames
 
-#include <algorithm>             // for max, min
-#include <array>                 // for array
-#include <atomic>                // for __atomic_base, atomic
-#include <cassert>               // for assert
-#include <cstddef>               // for size_t, ptrdiff_t
-#include <cstdint>               // for uint8_t, int64_t, uint32_t
-#include <errno.h>               // for errno, EEXIST, EISDIR
-#include <fmt.hpp>               // for compile_string_to_view
-#include <functional>            // for function
-#include <gsl-lite.hpp>          // for span
-#include <highfive/highfive.hpp> //
-#include <iomanip>               // for operator<<, setfill, setw
-#include <memory>                // for allocator, shared_ptr, __shared_ptr_access
-#include <sstream>               // for basic_ostream, operator<<, basic_ostrin...
-#include <string.h>              // for strerror
-#include <string>                // for basic_string, char_traits, string, oper...
-#include <sys/stat.h>            // for mkdir
-#include <unistd.h>              // for gethostname
-#include <vector>                // for vector
+#include "fmt.hpp" // for compile_string_to_view
+
+#include <algorithm>                             // for max, min
+#include <array>                                 // for array
+#include <atomic>                                // for __atomic_base, atomic
+#include <cassert>                               // for assert
+#include <cstddef>                               // for size_t
+#include <cstdint>                               // for int64_t, uint8_t, uint32_t
+#include <errno.h>                               // for errno, EEXIST, EISDIR
+#include <functional>                            // for function
+#include <gsl-lite.hpp>                          // for span
+#include <highfive/H5DataSet.hpp>                // for DataSet, AnnotateTraits::createAttribute
+#include <highfive/H5DataSpace.hpp>              // for DataSpace, DataSpace::DataSpace, DataSp...
+#include <highfive/H5DataType.hpp>               // for DataType
+#include <highfive/H5File.hpp>                   // for File, NodeTraits::createDataSet, File::...
+#include <highfive/H5Object.hpp>                 // for hsize_t, H5Z_FLAG_MANDATORY
+#include <highfive/H5PropertyList.hpp>           // for PropertyType, RawPropertyList, Chunking
+#include <highfive/H5Selection.hpp>              // for SliceTraits::write_raw, Selection, Slic...
+#include <highfive/bits/H5PropertyList_misc.hpp> // for PropertyList::_initializeIfNeeded, Prop...
+#include <highfive/bits/H5Selection_misc.hpp>    // for Selection::getSpace
+#include <iomanip>                               // for operator<<, setfill, setw
+#include <memory>                                // for allocator, shared_ptr, __shared_ptr_access
+#include <sstream>                               // for basic_ostream, operator<<, basic_ostrin...
+#include <string.h>                              // for strerror
+#include <string>                                // for basic_string, char_traits, string, oper...
+#include <sys/stat.h>                            // for mkdir
+#include <vector>                                // for vector
 
 
 using namespace hdf5;
@@ -51,20 +60,45 @@ using namespace HighFive;
  * @par Buffers:
  * @buffer in_buf Buffer to write to disk.
  *     @buffer_format Any
- *     @buffer_metadata Any
+ *     @buffer_metadata chord or N2
  *
  * @conf base_dir  String. Directory to write into.
  * @conf file_name String. Base filename to write.
  * @conf prefix_hostname  Bool. Prepend hostname to output file names. Default:
  *       true.
- * @conf max_frames  Int. Stop writing after this many frames, Default 0 = unlimited
- *       frames.
+ * @conf prefix_host_rank  Bool. Prepend rank to output file names. Default: false.
+ * @conf frequency_pool_rank    Int. This stage's rank in the frequency pool.
+ * @conf frequency_pool_size    Int. Number of stages in the frequency pool.
+ * @conf max_frames  Int. Default: -1. Values <= 0 mean unlimited; N > 0 stops after N
+ *       frames and shuts kotekan down.
  * @conf skip_writing  Bool. Do not actually write anything. Default:
  *       false.
+ * @conf use_compression  Bool. Default: true. bitshuffle+zstd (filter 32008).
+ * @conf create_single_file Bool. Default: false. Write all data to one single file,
+ *       concatenating the frames along axis 0. Only supported for chord metadata. The
+ *       metadata attributes are stored only once (from the first frame), so neither the
+ *       per-frame metadata nor the frame boundary is on disk; see hdf5FileRead for how
+ *       they are reconstructed when replaying. Because of that a single file must hold a
+ *       contiguous, uniformly sampled stream, which is enforced here (fatal otherwise):
+ *       - dimension 0 must be a time axis (its name starts with "T");
+ *       - `dim_scaling[0]` must equal `time_downsampling_fpga` (1 if that is not set);
+ *       - consecutive frames must advance `fpga_seq_num` by exactly
+ *         `dim[0] * time_downsampling_fpga`, and must not change the frame shape;
+ *       - frame decimation (@c write_x_frames / @c per_y_frames) must not be used.
+ *       A writer whose buffer violates one of these has to use per-frame files
+ *       (`create_single_file: false`), which have no such constraints.
+ * @conf write_x_frames  Int. Write the first X out of every Y frames (see per_y_frames).
+ *       Default: -1 (disabled). Cannot be combined with @c create_single_file.
+ * @conf per_y_frames  Int. Period Y for frame decimation (see write_x_frames).
+ *       Default: -1 (disabled). Cannot be combined with @c create_single_file.
  *
  * @par Metrics
  * @metric kotekan_hdf5filewrite_write_time_seconds
  *         The write time to write out the last frame.
+ *
+ * @note The on-disk file format is documented in
+ *       docs/sphinx/user/file_formats/hdf5_frames.rst. Any change to the
+ *       datasets or attributes written by this stage should be reflected there.
  *
  * @author Erik Schnetter
  **/
@@ -78,13 +112,30 @@ class hdf5FileWrite : public kotekan::Stage {
     const int host_pool_size = config.get_default<int>(unique_name, "frequency_pool_size", 1);
 
     const int max_frames = config.get_default<int>(unique_name, "max_frames", -1);
+    const bool use_compression = config.get_default<bool>(unique_name, "use_compression", true);
     const bool skip_writing = config.get_default<bool>(unique_name, "skip_writing", false);
     const bool create_single_file =
         config.get_default<bool>(unique_name, "create_single_file", false);
+    const int64_t write_x_frames = config.get_default<int64_t>(unique_name, "write_x_frames", -1);
+    const int64_t per_y_frames = config.get_default<int64_t>(unique_name, "per_y_frames", -1);
+
+    const uint64_t num_polarizations = config.get<uint64_t>(unique_name, "num_polarizations");
+    const uint64_t num_dishes = config.get<uint64_t>(unique_name, "num_dishes");
 
     Buffer* const buffer;
 
     std::shared_ptr<File> the_single_file;
+
+    // The state of the single-file stream: the shape and time downsampling of the first frame,
+    // and the fpga_seq_num the next frame has to start at. See the checks in write_chord.
+    std::size_t single_file_dim0 = 0;
+    std::int64_t single_file_tds = 0;
+    bool single_file_has_seq = false;
+    std::int64_t single_file_next_seq = 0;
+
+    kotekan::prometheus::Gauge& write_time_metric =
+        kotekan::prometheus::Metrics::instance().add_gauge(
+            "kotekan_hdf5filewrite_write_time_seconds", unique_name);
 
 public:
     hdf5FileWrite(kotekan::Config& config, const std::string& unique_name,
@@ -95,7 +146,13 @@ public:
               }),
         buffer(get_buffer("in_buf")) {
 
-        if (max_frames >= 0)
+        if (create_single_file && write_x_frames >= 0 && per_y_frames > 0)
+            FATAL_ERROR("hdf5FileWrite {:s}: write_x_frames/per_y_frames (frame decimation) cannot "
+                        "be combined with create_single_file; a single file must hold a contiguous "
+                        "stream",
+                        unique_name);
+
+        if (max_frames > 0)
             ++waiting_for_max_frames;
 
         buffer->register_consumer(unique_name);
@@ -108,21 +165,19 @@ public:
     std::shared_ptr<File> create_file(const std::int64_t frame_counter) const {
         // Define file name
         std::ostringstream buf;
-        buf << base_dir << "/";
-        if (prefix_hostname) {
-            char hostname[256];
-            gethostname(hostname, sizeof hostname);
-            buf << hostname << "_";
-        }
-        if (prefix_host_rank) {
-            buf << "x" << std::setw(4) << std::setfill('0') << host_pool_rank << "_";
-        }
-        buf << file_name;
+        buf << hdf5::file_path_prefix(base_dir, file_name, prefix_hostname, prefix_host_rank,
+                                      host_pool_rank);
         if (create_single_file) {
             // Do not include the frame counter when all output is written to a single file
-            assert(frame_counter < 0);
+            if (frame_counter >= 0)
+                FATAL_ERROR("Internal error -- cannot handle a non-negative frame_counter when "
+                            "creating a single_file HDF5 file with base name \"{:s}\"",
+                            file_name);
         } else {
-            assert(frame_counter >= 0);
+            if (frame_counter < 0)
+                FATAL_ERROR("Internal error -- cannot handle a negative frame_counter when a "
+                            "regular (non single_file) HDF5 file with base name \"{:s}\"",
+                            file_name);
             buf << "." << std::setw(8) << std::setfill('0') << frame_counter;
         }
         buf << ".h5";
@@ -147,6 +202,42 @@ public:
         // You may have to use `h5clear -s FILENAME.h5` to "tell" the file that the writer does not
         // exist any more.
         return std::make_unique<File>(full_path, File::Truncate | File::WriteSWMR, fprops, fapl);
+    }
+
+    /**
+     * @brief Write the telescope metadata
+     *
+     * @param node   The HDF5 object (file, group, dataset, etc.) where the metadata should be
+     *               attached
+     */
+    template<typename Node>
+    void write_telescope_metadata(Node& node) {
+        const auto& telescope = Telescope::instance();
+
+        node.createAttribute("telescope_name", telescope.get_name());
+        node.createAttribute("seq_length_nsec", telescope.seq_length_nsec());
+        node.createAttribute("gps_time_enabled", telescope.gps_time_enabled());
+        node.createAttribute("num_polarizations", num_polarizations);
+        node.createAttribute("num_dishes", num_dishes);
+        node.createAttribute("itrs_lat_deg", telescope.get_itrs_lat_deg());
+        node.createAttribute("itrs_lon_deg", telescope.get_itrs_lon_deg());
+        node.createAttribute("grid_orientation", telescope.get_grid_orientation());
+        node.createAttribute("grid_size_x", telescope.get_grid_size_x());
+        node.createAttribute("grid_size_y", telescope.get_grid_size_y());
+        node.createAttribute("feed_separation_x_m", telescope.get_feed_separation_x_m());
+        node.createAttribute("feed_separation_y_m", telescope.get_feed_separation_y_m());
+
+        // Flatten to proper HDF5 multi-dimensional arrays
+        const auto& dish_grid_indices =
+            telescope.get_main_array_grid_indices(num_dishes, telescope.fiducial_element_order());
+        node.createAttribute("dish_grid_indices", DataSpace({dish_grid_indices.size(), 2}),
+                             create_datatype<std::int64_t>())
+            .write_raw(reinterpret_cast<const std::int64_t*>(dish_grid_indices.data()));
+        const auto& feed_positions_m =
+            telescope.get_feed_positions_m(num_dishes, telescope.fiducial_element_order());
+        node.createAttribute("feed_positions_m", DataSpace({feed_positions_m.size(), 3}),
+                             create_datatype<double>())
+            .write_raw(reinterpret_cast<const double*>(feed_positions_m.data()));
     }
 
     /**
@@ -179,6 +270,48 @@ public:
         }
         auto& file = *fileptr;
 
+        if (create_single_file) {
+            // A single file concatenates frames along axis 0 and stores the metadata only once,
+            // so hdf5FileRead can only reconstruct the per-frame fpga_seq_num if axis 0 is a
+            // contiguous, uniformly sampled time axis.
+            const std::string dim0_name = meta->get_dimension_name(0);
+            if (!is_time_axis(dim0_name))
+                FATAL_ERROR("Buffer \"{:s}\": create_single_file requires a time axis as dimension "
+                            "0, but dimension 0 is \"{:s}\"; set create_single_file: false for "
+                            "this writer",
+                            buffer->buffer_name, dim0_name);
+            const std::int64_t tds =
+                meta->has_time_downsampling_fpga() ? meta->get_time_downsampling_fpga() : 1;
+            if (meta->dim_scaling[0] != tds)
+                FATAL_ERROR("Buffer \"{:s}\": create_single_file requires dim_scaling[0] ({:d}) == "
+                            "time_downsampling_fpga ({:d}); set create_single_file: false for this "
+                            "writer",
+                            buffer->buffer_name, meta->dim_scaling[0], tds);
+            if (do_create_dataset) {
+                single_file_dim0 = meta->dim[0];
+                single_file_tds = tds;
+            } else {
+                if (std::size_t(meta->dim[0]) != single_file_dim0 || tds != single_file_tds)
+                    FATAL_ERROR("Buffer \"{:s}\": frame {:d} changes the frame shape/downsampling "
+                                "(dim[0] {:d}->{:d}, time_downsampling_fpga {:d}->{:d}) within a "
+                                "single file",
+                                buffer->buffer_name, frame_counter, single_file_dim0, meta->dim[0],
+                                single_file_tds, tds);
+                if (meta->has_fpga_seq_num() != single_file_has_seq)
+                    FATAL_ERROR("Buffer \"{:s}\": fpga_seq_num is present in some frames but not "
+                                "in others; cannot write a single file",
+                                buffer->buffer_name);
+                if (single_file_has_seq && meta->get_fpga_seq_num() != single_file_next_seq)
+                    FATAL_ERROR("Buffer \"{:s}\": create_single_file requires a contiguous stream, "
+                                "but frame {:d} starts at fpga_seq_num {:d}, expected {:d}",
+                                buffer->buffer_name, frame_counter, meta->get_fpga_seq_num(),
+                                single_file_next_seq);
+            }
+            single_file_has_seq = meta->has_fpga_seq_num();
+            if (single_file_has_seq)
+                single_file_next_seq = meta->get_fpga_seq_num() + std::int64_t(meta->dim[0]) * tds;
+        }
+
         if (do_create_dataset) {
 
             // Choose dataspace
@@ -210,32 +343,30 @@ public:
             }
             (*(DataSetCreateProps*)&props).add(Chunking(chunk_dims));
 
-            // // Enable compression
-            // constexpr int blosc_compression_level = 9;
-            // const std::vector<unsigned int> blosc_flags{
-            //     blosc_compression_level,
-            //     BLOSC_SHUFFLE_BIT,
-            //     BLOSC_COMPRESS_ZSTD,
-            // };
-            // props.add(H5Pset_filter, H5Z_BLOSC, H5Z_FLAG_MANDATORY, blosc_flags.size(),
-            //           blosc_flags.data());
-            constexpr int bitshuffle_compression_level = 9;
-            const std::vector<unsigned int> bitshuffle_flags{
-                BITSHUFFLE_BLOCKSIZE_AUTO,
-                BITSHUFFLE_COMPRESS_ZSTD,
-                bitshuffle_compression_level,
-            };
-            props.add(H5Pset_filter, H5Z_BITSHUFFLE, H5Z_FLAG_MANDATORY, bitshuffle_flags.size(),
-                      bitshuffle_flags.data());
+            if (use_compression) {
+                // // Enable compression
+                // constexpr int blosc_compression_level = 9;
+                // const std::vector<unsigned int> blosc_flags{
+                //     blosc_compression_level,
+                //     BLOSC_SHUFFLE_BIT,
+                //     BLOSC_COMPRESS_ZSTD,
+                // };
+                // props.add(H5Pset_filter, H5Z_BLOSC, H5Z_FLAG_MANDATORY, blosc_flags.size(),
+                //           blosc_flags.data());
+                constexpr int bitshuffle_compression_level = 9;
+                const std::vector<unsigned int> bitshuffle_flags{
+                    BITSHUFFLE_BLOCKSIZE_AUTO,
+                    BITSHUFFLE_COMPRESS_ZSTD,
+                    bitshuffle_compression_level,
+                };
+                props.add(H5Pset_filter, H5Z_BITSHUFFLE, H5Z_FLAG_MANDATORY,
+                          bitshuffle_flags.size(), bitshuffle_flags.data());
+            }
 
             // Create dataset
             auto dataset = file.createDataSet(file_name, space, type, props);
 
             // Write metadata (attributes)
-
-            dataset.createAttribute("telescope_name", telescope.get_name());
-            dataset.createAttribute("seq_length_nsec", telescope.seq_length_nsec());
-            dataset.createAttribute("gps_time_enabled", telescope.gps_time_enabled());
 
             dataset.createAttribute("chord_metadata_version", chord_metadata_version);
             dataset.createAttribute("name", meta->get_name());
@@ -244,12 +375,14 @@ public:
             const auto dimnames = frame_desc->get_dimnames();
             std::vector<std::string> dim_names(dimnames.begin(), dimnames.end());
             dataset.createAttribute("dim_names", dim_names);
+            const auto dimscalings = frame_desc->get_dimscalings();
+            std::vector<std::ptrdiff_t> dim_scalings(dimscalings.begin(), dimscalings.end());
+            dataset.createAttribute("dim_scalings", dim_scalings);
 
             if (meta->has_fpga_seq_num()) {
                 dataset.createAttribute("fpga_seq_num", meta->get_fpga_seq_num());
-                dataset.createAttribute(
-                    "fpga_seq_time_nsec",
-                    timespec_to_nanosec_i64(telescope.to_time(meta->get_fpga_seq_num())));
+                dataset.createAttribute("fpga_seq_time_nsec",
+                                        telescope.to_time_ns(meta->get_fpga_seq_num()));
             }
 
             if (meta->has_time_downsampling_fpga())
@@ -265,20 +398,15 @@ public:
             if (meta->has_freq_upchan_index())
                 dataset.createAttribute("freq_upchan_index", meta->get_freq_upchan_index());
 
-            if (meta->ndishes >= 0) {
-                dataset.createAttribute("ndishes", meta->ndishes);
-                // const DataSpace space{std::size_t(meta->n_dish_locations_ns),
-                //                       std::size_t(meta->n_dish_locations_ew)};
-                // auto attr = dataset.createAttribute<int>("dish_index", space);
-                // attr.write(meta->dish_index);
-                dataset.createAttribute("n_dish_locations_ns", meta->n_dish_locations_ns);
-                dataset.createAttribute("n_dish_locations_ew", meta->n_dish_locations_ew);
-                dataset.createAttribute(
-                    "dish_index",
-                    std::vector<int>(meta->dish_index,
-                                     meta->dish_index
-                                         + meta->n_dish_locations_ns * meta->n_dish_locations_ew));
-            }
+            if (meta->has_rfi_frame_excision_enabled())
+                dataset.createAttribute("rfi_frame_excision_enabled",
+                                        meta->get_rfi_frame_excision_enabled());
+
+            if (meta->has_rfi_frame_excision_thresholds())
+                dataset.createAttribute("rfi_frame_excision_thresholds",
+                                        meta->get_rfi_frame_excision_thresholds());
+
+            write_telescope_metadata(dataset);
 
             if (create_single_file) {
                 // Start SWMR mode
@@ -341,6 +469,7 @@ public:
         const std::vector<size_t> emethod_dims({1});
         const std::vector<size_t> erms_dims({1});
         const std::vector<size_t> gain_dims({frame.num_elements, 2});
+        const std::vector<size_t> radiometer_chi2_dims({3}); // 3 pol pairs XX, XY, YY
 
         // Create dataspaces
         const DataSpace vis_space(vis_dims);
@@ -351,6 +480,7 @@ public:
         const DataSpace emethod_space(emethod_dims);
         const DataSpace erms_space(erms_dims);
         const DataSpace gain_space(gain_dims);
+        const DataSpace radiometer_chi2_space(radiometer_chi2_dims);
 
         // Create datatypes
         const DataType float_type = chord2hdf5(kotekan::float32);
@@ -365,6 +495,7 @@ public:
         auto emethod_props = make_chunked_props(emethod_dims);
         auto erms_props = make_chunked_props(erms_dims);
         auto gain_props = make_chunked_props(gain_dims);
+        auto radiometer_chi2_props = make_chunked_props(radiometer_chi2_dims);
 
         // Create dataset
         auto vis_dset = file.createDataSet("vis", vis_space, float_type, vis_props);
@@ -375,6 +506,8 @@ public:
         auto emethod_dset = file.createDataSet("emethod", emethod_space, int_type, emethod_props);
         auto erms_dset = file.createDataSet("erms", erms_space, float_type, erms_props);
         auto gain_dset = file.createDataSet("gain", gain_space, float_type, gain_props);
+        auto radiometer_chi2_dset = file.createDataSet("radiometer_chi2", radiometer_chi2_space,
+                                                       float_type, radiometer_chi2_props);
 
         vis_dset.write_raw(frame.vis.data(), float_type);
         weight_dset.write_raw(frame.weight.data(), float_type);
@@ -384,36 +517,44 @@ public:
         emethod_dset.write_raw(&frame.emethod, int_type);
         erms_dset.write_raw(&frame.erms, float_type);
         gain_dset.write_raw(frame.gain.data(), float_type);
+        radiometer_chi2_dset.write_raw(frame.radiometer_chi2.data(), float_type);
 
         // Set metadata as file-level attributes
-        file.createAttribute("num_elements", frame.num_elements);
         file.createAttribute("num_prod", frame.num_prod);
         file.createAttribute("num_ev", frame.num_ev);
         file.createAttribute("freq_id", frame.freq_id);
         file.createAttribute("freq_MHz", frame.freq_MHz);
         file.createAttribute("abs_time_idx", frame.abs_time_idx);
-        file.createAttribute("time_center_eop.t_inst", frame.time_center_eop.t_inst);
-        file.createAttribute("time_center_eop.t_ut1", frame.time_center_eop.t_ut1);
+        file.createAttribute("time_center_eop.t_inst_ns", frame.time_center_eop.t_inst_ns);
+        file.createAttribute("time_center_eop.t_ut1_ns", frame.time_center_eop.t_ut1_ns);
         file.createAttribute("time_center_eop.delta_UT1_inst",
                              frame.time_center_eop.delta_UT1_inst);
         file.createAttribute("time_center_eop.ERA_deg", frame.time_center_eop.ERA_deg);
         file.createAttribute("time_center_eop.xp_as", frame.time_center_eop.xp_as);
         file.createAttribute("time_center_eop.yp_as", frame.time_center_eop.yp_as);
-        file.createAttribute("bin_eop.t_inst", frame.bin_eop.t_inst);
-        file.createAttribute("bin_eop.t_ut1", frame.bin_eop.t_ut1);
+        file.createAttribute("bin_eop.t_inst_ns", frame.bin_eop.t_inst_ns);
+        file.createAttribute("bin_eop.t_ut1_ns", frame.bin_eop.t_ut1_ns);
         file.createAttribute("bin_eop.delta_UT1_inst", frame.bin_eop.delta_UT1_inst);
         file.createAttribute("bin_eop.ERA_deg", frame.bin_eop.ERA_deg);
         file.createAttribute("bin_eop.xp_as", frame.bin_eop.xp_as);
         file.createAttribute("bin_eop.yp_as", frame.bin_eop.yp_as);
         file.createAttribute("bin_start_ERA_deg", frame.bin_start_ERA_deg);
         file.createAttribute("bin_end_ERA_deg", frame.bin_end_ERA_deg);
-        file.createAttribute("bin_start_LAST", frame.bin_start_LAST);
-        file.createAttribute("bin_end_LAST", frame.bin_end_LAST);
+        file.createAttribute("bin_start_ERAL_deg", frame.bin_start_ERAL_deg);
+        file.createAttribute("bin_end_ERAL_deg", frame.bin_end_ERAL_deg);
         file.createAttribute("fpga_start_tick", frame.fpga_start_tick);
         file.createAttribute("frame_start_time_ns", frame.frame_start_time_ns);
         file.createAttribute("frame_length_fpga_ticks", frame.frame_length_fpga_ticks);
         file.createAttribute("n_valid_fpga_ticks", frame.n_valid_fpga_ticks);
         file.createAttribute("n_rfi_fpga_ticks", frame.n_rfi_fpga_ticks);
+        file.createAttribute("n_rfi_only_fpga_ticks", frame.n_rfi_only_fpga_ticks);
+        file.createAttribute("n_pl_fpga_ticks", frame.n_pl_fpga_ticks);
+        file.createAttribute("rfi_frame_excision_enabled", frame.rfi_frame_excision_enabled);
+        file.createAttribute("rfi_frame_excision_num", frame.rfi_frame_excision_num);
+        file.createAttribute("rfi_frame_excision_threshold", frame.rfi_frame_excision_threshold);
+        file.createAttribute("rfi_frame_excision_fraction", frame.rfi_frame_excision_fraction);
+
+        write_telescope_metadata(file);
     }
 
     /**
@@ -470,9 +611,6 @@ public:
      * This function is responsible for the main logic of the hdf5FileWrite class.
      */
     void main_thread() override {
-        auto& write_time_metric = kotekan::prometheus::Metrics::instance().add_gauge(
-            "kotekan_hdf5filewrite_write_time_seconds", unique_name);
-
         const double start_time = current_time();
 
         for (std::int64_t frame_counter = 0;; ++frame_counter) {
@@ -497,7 +635,15 @@ public:
             INFO("Received buffer {} frame {} (duration {} sec)", unique_name, frame_counter,
                  elapsed_time);
 
-            if (!skip_writing) {
+            // Optionally, only write every X out of Y frames.
+            bool do_write = true;
+            if (write_x_frames >= 0 && per_y_frames > 0) {
+                if (frame_counter % per_y_frames > write_x_frames) {
+                    do_write = false;
+                }
+            }
+
+            if (!skip_writing && do_write) {
                 // Fetch metadata
                 const std::shared_ptr<const metadataObject> mc = buffer->get_metadata(frame_id);
                 if (!mc)
@@ -510,8 +656,18 @@ public:
                     assert(metadata_is_chord(mc));
                     const std::shared_ptr<const chordMetadata> meta = get_chord_metadata(mc);
                     const std::shared_ptr<const kotekan::GenericNDArray> frame_desc =
-                        buffer->get_ndarray_frame_desc();
-                    assert(frame_desc);
+                        buffer->get_frame_desc<kotekan::GenericNDArray>();
+                    if (!frame_desc)
+                        FATAL_ERROR(
+                            "Buffer \"{:s}\" has no NDArray frame descriptor; hdf5FileWrite "
+                            "needs one to write CHORD-metadata frames",
+                            buffer->buffer_name);
+                    if (frame_desc->get_byte_size() != buffer->frame_size)
+                        FATAL_ERROR(
+                            "Buffer \"{:s}\" has inconsistent size in NDArray "
+                            "frame descriptor ({:d}) and buffer ({:d}); hdf5FileWrite needs "
+                            "consistent frame sizes",
+                            buffer->buffer_name, frame_desc->get_byte_size(), buffer->frame_size);
                     write_chord(frame, meta, frame_desc, frame_counter);
                 } else if (metadata_is_N2(mc)) {
                     assert(metadata_is_N2(mc));
@@ -532,7 +688,7 @@ public:
             DEBUG("mark_frame_empty: frame_id={}", frame_id);
             buffer->mark_frame_empty(unique_name, frame_id);
 
-            if (max_frames >= 0 && frame_counter + 1 >= max_frames) {
+            if (max_frames > 0 && frame_counter + 1 >= max_frames) {
                 WARN("Processed {} frames", frame_counter + 1);
                 break;
             }
@@ -541,7 +697,7 @@ public:
         // Close file if necessary
         the_single_file.reset();
 
-        if (max_frames >= 0) {
+        if (max_frames > 0) {
             // Unregister to allow the pipeline to continue, unless I'm the last
             // consumer on this buffer.
             buffer->unregister_consumer(unique_name, true);

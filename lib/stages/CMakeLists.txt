@@ -10,7 +10,9 @@ add_library(
     computeDualpolPower.cpp
     fullPacketDump.cpp
     pulsarPostProcess.cpp
-    ReadGain.cpp
+    loadFeedGains.cpp
+    processFeedGains.cpp
+    processFRBFeedGains.cpp
     nDiskFileWrite.cpp
     nDiskFileRead.cpp
     networkPowerStream.cpp
@@ -42,10 +44,14 @@ add_library(
     bufferSend.cpp
     bufferRecv.cpp
     simpleAutocorr.cpp
+    SampleAutocorr.cpp
+    SimpleCrosscorr.cpp
+    SpawnProcess.cpp
     freqSplit.cpp
     FreqSubset.cpp
     prodSubset.cpp
     N2Subset.cpp
+    N2AutoSpectrum.cpp
     countCheck.cpp
     visAccumulate.cpp
     visCompression.cpp
@@ -71,10 +77,11 @@ add_library(
     BufferSplit.cpp
     InputSubset.cpp
     setScatterIndices.cpp
-    UpchannelizationSchedule.cpp
+    setBBBeams.cpp
     calcBBPhase.cpp
     setUpchanGain.cpp
     setFRB1Phase.cpp
+    setFRBBeams.cpp
     calcFRB2Weights.cpp
     # RFI Pipeline Processes
     rfiVDIF.cpp
@@ -88,6 +95,7 @@ add_library(
     compressLostSamples.cpp
     lostSamplesToPLMask.cpp
     lostSamplesToN2Counts.cpp
+    rfiBroadcast.cpp
     bufferBadInputs.cpp
     RfiFrameDrop.cpp
     VisSharedMemWriter.cpp
@@ -96,20 +104,28 @@ add_library(
     BeamInspect.cpp
     configTrackerWriter.cpp
     runMetadataWriter.cpp
+    FPGAMonitor.cpp
     givenDataGen.cpp
     testDataGen.cpp
+    testDataGenFewHot.cpp
     DPDKShuffleSimulate.cpp
     BadInputFlag.cpp
     hexDump.cpp
+    ProcessPacketMask.cpp
     printSparse.cpp
     ExampleProducer.cpp
     ExampleConsumer.cpp
     ExampleDotProduct.cpp
     N2Accumulate.cpp
     N2TimeDownsample.cpp
-    N2FringeStop.cpp
+    TransposeBasebandArray.cpp
     dropAllFrames.cpp
     N2FrameToVisFrame.cpp
+    RfiMaskSum.cpp
+    RfiFrameMask.cpp
+    RfiSKMetrics.cpp
+    CountLostPLSamplesScalar.cpp
+    PLMaskExpandedToCompact.cpp
     # Julia
     $<$<BOOL:${Julia_FOUND}>:juliaHelloWorld.cpp>)
 
@@ -118,8 +134,12 @@ target_include_directories(kotekan_stages PRIVATE .)
 if(LIBAIRSPY_FOUND)
     target_sources(kotekan_stages PRIVATE airspyInput.cpp)
     target_include_directories(kotekan_stages SYSTEM PRIVATE ${LIBAIRSPY_INCLUDE_DIR})
-    target_include_directories(kotekan_stages SYSTEM PRIVATE ${FFTW_INCLUDES})
     target_link_libraries(kotekan_stages PRIVATE ${LIBAIRSPY_LIBRARIES})
+    if(FFTW_FOUND)
+        target_sources(kotekan_stages PRIVATE AirspyAlign.cpp)
+        target_include_directories(kotekan_stages SYSTEM PRIVATE ${FFTW_INCLUDES})
+        target_link_libraries(kotekan_stages PRIVATE ${FFTW_LIBRARIES})
+    endif()
 endif()
 
 if(FFTW_FOUND)
@@ -146,8 +166,11 @@ if(HDF5_FOUND
     target_include_directories(kotekan_stages SYSTEM PRIVATE ${HDF5_INCLUDE_DIRS})
     target_link_libraries(kotekan_stages PRIVATE ${HDF5_HL_LIBRARIES} ${HDF5_LIBRARIES}
                                                  HighFive::HighFive)
-    # applyGains.cpp uses std::atomic<timespec>, which relies on libatomic on some platforms
-    target_link_libraries(kotekan_stages PRIVATE atomic)
+    # applyGains.cpp uses std::atomic<timespec>, which relies on libatomic on some platforms (not
+    # needed on macOS where atomics are built into the compiler runtime)
+    if(NOT APPLE)
+        target_link_libraries(kotekan_stages PRIVATE atomic)
+    endif()
 endif()
 
 if(${USE_ZARR})
@@ -174,8 +197,7 @@ if(OpenMP_FOUND)
 endif()
 
 if(LAPACKE_FOUND AND BLAZE_FOUND)
-    target_sources(kotekan_stages PRIVATE eigenVis.cpp RingMapMaker.cpp EigenVisIter.cpp
-                                          EigenN2Iter.cpp)
+    target_sources(kotekan_stages PRIVATE RingMapMaker.cpp EigenN2Iter.cpp)
     target_include_directories(kotekan_stages SYSTEM PRIVATE ${LAPACKE_INCLUDE_DIRS} ${BLAZE_PATH})
     target_link_libraries(kotekan_stages PRIVATE ${LAPACKE_LIBRARIES})
     if(DEFINED OPENBLAS_EXTRA_LIB AND OPENBLAS_EXTRA_LIB)

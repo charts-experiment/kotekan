@@ -5,12 +5,12 @@
 #include "Stage.hpp"           // for Stage
 #include "buffer.hpp"          // for Buffer
 #include "bufferContainer.hpp" // for bufferContainer
-#include "datasetManager.hpp"
-#include "version.h"
-#include "visUtil.hpp"
+#include "datasetManager.hpp"  // for datasetManager, state_id_t
+#include "visUtil.hpp"         // for freq_ctype, input_ctype, prod_ctype
 
-#include <stdint.h> // for int32_t, uint32_t, uint8_t
-#include <string>   // for string
+#include <stdint.h> // for uint32_t
+#include <string>   // for string, basic_string
+#include <utility>  // for pair
 #include <vector>   // for vector
 
 /**
@@ -29,6 +29,8 @@
  *
  * @conf  n2_buf  Buffers to hold the N2FrameView
  * @conf  vis_buf Buffers to hold the VisFrameView
+ * @conf  fake_git_tag String. Fake git hash in visMetadata to make receiver
+ *        accept it. Leave empty to use actual git tag.
  *
  * @author Roland Haas
  */
@@ -61,6 +63,9 @@ private:
 
     /// The target buffer for a visFrame
     Buffer* vis_buf;
+
+    /// Fake git hash to record in visMetadata dataset id
+    std::string fake_git_tag;
 };
 
 #endif /* N2FRAME_TO_VISFRAME_HPP */

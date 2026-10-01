@@ -13,14 +13,16 @@
 #include "Stage.hpp"             // for Stage
 #include "buffer.hpp"            // for Buffer
 #include "bufferContainer.hpp"   // for bufferContainer
-#include "bufferSend.hpp"        // for bufferFrameHeader, bufferFrameHeaderNoConfigTracker
+#include "bufferSend.hpp"        // for bufferFrameHeader
 #include "kotekanLogging.hpp"    // for DEBUG2, ERROR, INFO, kotekanLogging
 #include "prometheusMetrics.hpp" // for Counter, Gauge, MetricFamily
 
 #include "fmt.hpp" // for compile_string_to_view
 
+#include <atomic>             // for atomic
 #include <condition_variable> // for condition_variable
 #include <deque>              // for deque
+#include <errno.h>            // for EAGAIN, EDEADLK
 #include <event2/event.h>     // for event_add
 #include <event2/util.h>      // for evutil_socket_t
 #include <map>                // for map
@@ -60,10 +62,17 @@ class connInstance;
  * @conf num_threads         Int, default 1.  The number of worker threads to use
  * @conf connection_timeout  Int, default 60.  Number of seconds before timeout on transfer
  * @conf drop_frames         Bool, default true.  Whether to drop frames when buffer fills.
+ * @conf upstream_rest_port  Int, default: this instance's own REST port. The
+ *        REST port to reach a sender on when fetching config-tracker state.
+ *        Nothing on the wire carries the sender's REST port, so it has to be
+ *        stated here; the default assumes the fleet runs on one port, which
+ *        holds when every instance is launched with the same --bind-address.
+ *        Set it explicitly when the senders bind a different port than this
+ *        receiver does.
  * @conf upstream_rest_endpoints  List[str], default empty. Optional list of
  *        "host:port" entries specifying non-standard upstream REST ports to use for
  *        particular senders. If the client IP (as seen by bufferRecv) matches a host in this
- *        list, that port overrides the default REST port (PORT_REST_SERVER) for that connection.
+ *        list, that port overrides @c upstream_rest_port for that connection.
  *
  * @par Metrics
  * @metric kotekan_buffer_recv_transfer_time_seconds
@@ -88,8 +97,8 @@ public:
     ~bufferRecv();
     void main_thread() override;
 
-    /// Adds the source port to the pipeline dot graph
-    virtual std::string dot_string(const std::string& prefix) const override;
+    /// Adds the source port to the pipeline graph
+    void add_graph_details(kotekan::PipelineGraph& graph) const override;
 
 private:
     /**
@@ -133,6 +142,9 @@ private:
     /// Whether to drop frames when buffer starts filling up
     bool drop_frames;
 
+    /// REST port used to reach a sender that has no per-host override
+    uint16_t default_upstream_rest_port;
+
     /// Optional per-host overrides for upstream REST ports
     std::map<std::string, uint16_t> upstream_rest_port_overrides;
 
@@ -140,7 +152,15 @@ private:
     std::mutex next_frame_lock;
 
     /// Whether to use the config tracker
-    const bool use_config_tracker;
+    bool use_config_tracker;
+
+    /// Expect a serialized frame descriptor on the wire. Not negotiated: it must
+    /// be set identically on the sending bufferSend (like use_config_tracker). A
+    /// mismatch desynchronizes the stream: set here but not on the sender is
+    /// caught by the descriptor size/parse checks (fatal); set on the sender but
+    /// not here misreads the descriptor bytes as metadata and is only caught at
+    /// the next frame header, after one corrupted frame.
+    bool use_frame_desc;
 
     static void read_callback(evutil_socket_t fd, short what, void* arg);
     static void accept_connection(evutil_socket_t listener, short event, void* arg);
@@ -197,11 +217,18 @@ private:
     /// Lock for the work queue
     std::mutex work_queue_lock;
 
+    /// All open connection instances, so they can be cleaned up on exit
+    std::deque<connInstance*> instance_list;
+
+    /// Lock for the instance list
+    std::mutex instance_list_lock;
+
     /// Condition variable for the state (empty or not) of the work queue
     std::condition_variable work_cv;
 
-    /// Set to true to stop the worker threads
-    bool worker_stop_thread = false;
+    /// Set to true to stop the worker threads. Read by the workers and by the
+    /// read callbacks, which do not hold @c work_queue_lock.
+    std::atomic<bool> worker_stop_thread = false;
 
     /**
      * @brief The worker thread for handing read callbacks.
@@ -212,7 +239,7 @@ private:
 /**
  * @brief List of valid states for a connection to be in.
  */
-enum class connState { header, metadata, frame, finished };
+enum class connState { header, frame_desc_size, frame_desc, metadata, frame, finished };
 
 /**
  * @brief Args passed to the accept new connection call back function
@@ -249,7 +276,7 @@ public:
     /// Constructor
     connInstance(const std::string& producer_name, Buffer* buf, bufferRecv* buffer_recv,
                  const std::string& client_ip, int port, struct timeval read_timeout,
-                 bool use_config_tracker, uint16_t upstream_rest_port);
+                 bool use_config_tracker, bool use_frame_desc, uint16_t upstream_rest_port);
 
     /// Destructor
     ~connInstance();
@@ -315,6 +342,19 @@ public:
 
     /// Whether to use the config tracker
     const bool use_config_tracker;
+
+    /// Whether to expect a serialized frame descriptor on the wire
+    const bool use_frame_desc;
+
+    /// Set once the frame descriptor has been read on this connection; the sender
+    /// transmits it only on the first frame, so later frames skip the read.
+    bool frame_desc_read = false;
+
+    /// Size in bytes of the frame descriptor (0 if the sender had none)
+    uint32_t frame_desc_size = 0;
+
+    /// Scratch buffer for the received serialized frame descriptor
+    std::vector<char> frame_desc_space;
 
     /// Upstream REST port for this connection (may override stage default)
     uint16_t upstream_rest_port;

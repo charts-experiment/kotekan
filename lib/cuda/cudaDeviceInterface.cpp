@@ -6,7 +6,6 @@
 
 #include "fmt.hpp" // for compile_string_to_view
 
-#include <algorithm>       // for max
 #include <assert.h>        // for assert
 #include <cuda.h>          // for cuGetErrorString, cuModuleGetFunction, cuModuleLoadDataEx
 #include <mutex>           // for mutex, lock_guard
@@ -14,7 +13,7 @@
 #include <nvrtc.h>         // for nvrtcGetErrorString, NVRTC_SUCCESS, nvrtcCompileProgram
 #include <stdexcept>       // for runtime_error
 #include <stdio.h>         // for fclose, fopen, fread, fseek, ftell, rewind, FILE, SEEK_END
-#include <stdlib.h>        // for free, malloc, size_t, NULL
+#include <stdlib.h>        // for free, malloc
 #include <utility>         // for pair
 
 using kotekan::Config;
@@ -287,10 +286,32 @@ void cudaDeviceInterface::build_ptx(const std::string& kernel_filename,
         return;
     }
 
+    // Compile for the compute capability of the GPU that is actually present. Callers
+    // pass the --gpu-name their kernel was generated for, but SASS is only compatible
+    // within a major architecture (an sm_89 cubin fails to load on an sm_86 device with
+    // "no kernel image is available for execution on the device"), so kernels would
+    // otherwise only run on the specific GPU model they were generated for.
+    cudaDeviceProp prop;
+    CHECK_CUDA_ERROR(cudaGetDeviceProperties(&prop, gpu_id));
+    const std::string gpu_name = fmt::format("--gpu-name=sm_{:d}{:d}", prop.major, prop.minor);
+    std::vector<std::string> compile_opts;
+    compile_opts.reserve(opts.size() + 1);
+    for (const std::string& opt : opts) {
+        if (opt.rfind("--gpu-name", 0) == 0) {
+            if (opt != gpu_name)
+                INFO("Kernel file {:s} was generated for {:s}; compiling for the local GPU with "
+                     "{:s} instead",
+                     kernel_filename, opt, gpu_name);
+        } else {
+            compile_opts.push_back(opt);
+        }
+    }
+    compile_opts.push_back(gpu_name);
+
     // Convert compiler options to a c-style array.
     std::vector<const char*> cstring_opts;
-    cstring_opts.reserve(opts.size());
-    for (auto& s : opts)
+    cstring_opts.reserve(compile_opts.size());
+    for (auto& s : compile_opts)
         cstring_opts.push_back(s.c_str());
 
     // Compile the code
@@ -363,7 +384,10 @@ void cudaDeviceInterface::build_ptx(const std::string& kernel_filename,
     // Extract kernels
     cu_res = cuModuleLoadDataEx(&module, elf, 0, nullptr, nullptr);
     if (cu_res != CUDA_SUCCESS) {
-        FATAL_ERROR("Could not load module data from elf");
+        const char* errStr = nullptr;
+        cuGetErrorString(cu_res, &errStr);
+        FATAL_ERROR("Could not load module data from elf for kernel file {:s}: {:s}",
+                    kernel_filename, errStr);
         return;
     }
 

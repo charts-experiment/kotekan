@@ -81,6 +81,8 @@ private:
     std::vector<float> _fvalue_array;
     uint64_t lvalue;
     std::vector<uint64_t> _lvalue_array;
+    uint64_t ulvalue;
+    std::vector<uint64_t> _ulvalue_array;
     int step_to_frame;
     bool _pathfinder_test_mode;
     int samples_per_data_set;
@@ -96,6 +98,7 @@ private:
     std::string _name;
     std::vector<int> _array_shape;
     std::vector<std::string> _dim_name;
+    std::vector<std::ptrdiff_t> _dim_scaling;
     std::vector<uint32_t> _manual_freq_ids;
     int _meta_time_downsample_factor;
 
