@@ -9,6 +9,7 @@
 #include "Telescope.hpp"       // for Telescope, stream_t
 #include "buffer.hpp"          // for Buffer
 #include "bufferContainer.hpp" // for bufferContainer
+#include "chartsMetadata.hpp"  // for chartsMetadata, get_charts_metadata
 #include "chordMetadata.hpp"   // for chordMetadata, get_chord_metadata, CHORD_META_MAX_FREQ
 #include "kotekanLogging.hpp"  // for INFO, DEBUG, ERROR
 #include "kotekanTrackers.hpp" // for KotekanTrackers
@@ -231,20 +232,7 @@ void testDataGen::main_thread() {
 
         buf->allocate_new_metadata_object(frame_id);
         std::shared_ptr<chordMetadata> chordmeta = get_chord_metadata(buf, frame_id);
-
-        chordmeta->set_fpga_seq_num(seq_num);
-        chordmeta->set_time_downsampling_fpga(_meta_time_downsample_factor);
-
-        // TODO: Fix this, cannot change from frame to frame (and should not be "now")
-        gettimeofday(&now, nullptr);
-        chordmeta->set_first_packet_recv_time(now);
-
-        chordmeta->set_name(_name);
-        chordmeta->dims = (int)_array_shape.size();
-        for (int d = 0; d < chordmeta->dims; ++d)
-            chordmeta->set_array_dimension(d, _array_shape[d], _dim_name[d], _dim_scaling[d]);
-        chordmeta->set_strides_simple();
-        // frame_desc is set only after "type" has been decoded below
+        std::shared_ptr<chartsMetadata> chartsmeta = get_charts_metadata(buf, frame_id);
 
         // Set frequency channel metadata
 
@@ -263,11 +251,41 @@ void testDataGen::main_thread() {
             freq_upchan_index[f] = 0;
         }
 
-        chordmeta->set_coarse_freq(coarse_freq);
-        chordmeta->set_freq_upchan_factor(freq_upchan_factor);
-        chordmeta->set_freq_upchan_index(freq_upchan_index);
+        // TODO: Fix this, cannot change from frame to frame (and should not be "now")
+        gettimeofday(&now, nullptr);
 
-        chordmeta->set_frame_counter(frame_id_abs);
+        if (chordmeta) {
+            chordmeta->set_fpga_seq_num(seq_num);
+            chordmeta->set_time_downsampling_fpga(_meta_time_downsample_factor);
+            chordmeta->set_first_packet_recv_time(now);
+
+            chordmeta->set_name(_name);
+            chordmeta->dims = (int)_array_shape.size();
+            for (int d = 0; d < chordmeta->dims; ++d)
+                chordmeta->set_array_dimension(d, _array_shape[d], _dim_name[d], _dim_scaling[d]);
+            chordmeta->set_strides_simple();
+            // frame_desc is set only after "type" has been decoded below
+
+            chordmeta->set_coarse_freq(coarse_freq);
+            chordmeta->set_freq_upchan_factor(freq_upchan_factor);
+            chordmeta->set_freq_upchan_index(freq_upchan_index);
+
+            chordmeta->set_frame_counter(frame_id_abs);
+        } else if (chartsmeta) {
+            chartsmeta->set_fpga_seq_num(seq_num);
+            chartsmeta->set_time_downsampling_fpga(_meta_time_downsample_factor);
+            chartsmeta->set_first_packet_recv_time(now);
+
+            chartsmeta->set_name(_name);
+            chartsmeta->dims = (int)_array_shape.size();
+            for (int d = 0; d < chartsmeta->dims; ++d)
+                chartsmeta->set_array_dimension(d, _array_shape[d], _dim_name[d]);
+            chartsmeta->set_strides_simple();
+
+            chartsmeta->set_coarse_freq(coarse_freq);
+
+            chartsmeta->set_frame_counter(frame_id_abs);
+        }
 
         unsigned char temp_output;
         int num_elements = buf->frame_size / samples_per_data_set / _num_freq_in_frame;
@@ -278,83 +296,123 @@ void testDataGen::main_thread() {
             frame8 = (int8_t*)frame;
             if (chordmeta)
                 chordmeta->type = kotekan::int4x2;
+            if (chartsmeta)
+                chartsmeta->type = kotekan::int4x2;
         } else if (type == "const_offset") {
             n_to_set /= sizeof(int8_t);
             frame8 = (int8_t*)frame;
             if (chordmeta)
                 chordmeta->type = kotekan::int4x2_swapped_withoffset;
+            if (chartsmeta)
+                chartsmeta->type = kotekan::int4x2_swapped_withoffset;
         } else if (type == "const8" || type == "random8") {
             n_to_set /= sizeof(int8_t);
             frame8 = (int8_t*)frame;
             if (chordmeta)
                 chordmeta->type = kotekan::int8;
+            if (chartsmeta)
+                chartsmeta->type = kotekan::int8;
         } else if (type == "constu8") {
             n_to_set /= sizeof(uint8_t);
             frameu8 = (uint8_t*)frame;
             if (chordmeta)
                 chordmeta->type = kotekan::uint8;
+            if (chartsmeta)
+                chartsmeta->type = kotekan::uint8;
         } else if (type == "const1x8") {
             n_to_set /= sizeof(int8_t);
             frame8 = (int8_t*)frame;
             if (chordmeta)
                 chordmeta->type = kotekan::uint1x8;
+            if (chartsmeta)
+                chartsmeta->type = kotekan::uint1x8;
         } else if (type == "const16") {
             n_to_set /= sizeof(int16_t);
             frame16 = (int16_t*)frame;
             if (chordmeta)
                 chordmeta->type = kotekan::int16;
+            if (chartsmeta)
+                chartsmeta->type = kotekan::int16;
         } else if (type == "const32" || type == "random32") {
             n_to_set /= sizeof(int32_t);
             frame32 = (int32_t*)frame;
             if (chordmeta)
                 chordmeta->type = kotekan::int32;
+            if (chartsmeta)
+                chartsmeta->type = kotekan::int32;
 #if KOTEKAN_FLOAT16
         } else if (type == "constf16") {
             n_to_set /= sizeof(float16_t);
             framef16 = (float16_t*)frame;
             if (chordmeta)
                 chordmeta->type = kotekan::float16;
+            if (chartsmeta)
+                chartsmeta->type = kotekan::float16;
 #endif
         } else if (type == "constu64" || type == "randomu64") {
             n_to_set /= sizeof(uint64_t);
             frameu64 = (uint64_t*)frame;
             if (chordmeta)
                 chordmeta->type = kotekan::uint64;
+            if (chartsmeta)
+                chartsmeta->type = kotekan::uint64;
         } else if (type == "const64" || type == "random64") {
             n_to_set /= sizeof(int64_t);
             frame64 = (int64_t*)frame;
             if (chordmeta)
                 chordmeta->type = kotekan::int64;
+            if (chartsmeta)
+                chartsmeta->type = kotekan::int64;
         } else if (type == "random") {
             if (chordmeta)
                 chordmeta->type = kotekan::uint4x2;
+            if (chartsmeta)
+                chartsmeta->type = kotekan::uint4x2;
         } else if (type == "random_signed") {
             if (chordmeta)
                 chordmeta->type = kotekan::int4x2;
+            if (chartsmeta)
+                chartsmeta->type = kotekan::int4x2;
         } else if (type == "random_signed_offset") {
             if (chordmeta)
                 chordmeta->type = kotekan::int4x2_swapped_withoffset;
+            if (chartsmeta)
+                chartsmeta->type = kotekan::int4x2_swapped_withoffset;
         } else if (type == "random1x8") {
             if (chordmeta)
                 chordmeta->type = kotekan::uint1x8;
+            if (chartsmeta)
+                chartsmeta->type = kotekan::uint1x8;
         } else if (type == "ramp") {
             if (chordmeta)
                 chordmeta->type = kotekan::uint8;
+            if (chartsmeta)
+                chartsmeta->type = kotekan::uint8;
         } else if (type == "tpluse") {
             if (chordmeta)
                 chordmeta->type = kotekan::uint1x8;
+            if (chartsmeta)
+                chartsmeta->type = kotekan::uint1x8;
         } else if (type == "tpluseplusf") {
             if (chordmeta)
                 chordmeta->type = kotekan::uint1x8;
+            if (chartsmeta)
+                chartsmeta->type = kotekan::uint1x8;
         } else if (type == "tpluseplusfprime") {
             if (chordmeta)
                 chordmeta->type = kotekan::uint1x8;
+            if (chartsmeta)
+                chartsmeta->type = kotekan::uint1x8;
         } else if (type == "square") {
             if (chordmeta)
                 chordmeta->type = kotekan::int4x2;
+            if (chartsmeta)
+                chartsmeta->type = kotekan::int4x2;
         } else if (type == "onehot") {
             if (chordmeta)
                 chordmeta->type = kotekan::uint8;
+            if (chartsmeta)
+                chartsmeta->type = kotekan::uint8;
         } else {
             ERROR("unexpected type: {:s}", type);
             throw std::runtime_error("unexpected type: " + type);
@@ -367,10 +425,14 @@ void testDataGen::main_thread() {
         const std::vector<kotekan::Symbol> dimnames(_dim_name.begin(), _dim_name.end());
         const std::vector<std::ptrdiff_t> dimscalings(_dim_scaling.begin(), _dim_scaling.end());
 
-        buf->ensure_frame_desc(kotekan::GenericNDArray::describe(chordmeta->type, _name, extents,
+        const kotekan::DataType frame_type = chordmeta ? chordmeta->type : chartsmeta->type;
+        buf->ensure_frame_desc(kotekan::GenericNDArray::describe(frame_type, _name, extents,
                                                                  dimnames, dimscalings));
         /* test that things are consistent */
-        chordmeta->check_frame_desc(buf->get_frame_desc<kotekan::GenericNDArray>());
+        if (chordmeta)
+            chordmeta->check_frame_desc(buf->get_frame_desc<kotekan::GenericNDArray>());
+        else if (chartsmeta)
+            chartsmeta->check_frame_desc(buf->get_frame_desc<kotekan::GenericNDArray>());
 
         if (type == "onehot") {
             int val = value;
