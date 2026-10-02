@@ -23,8 +23,11 @@ ICETelescope::ICETelescope(const kotekan::Config& config, const std::string& pat
               config.get_default<bool>(path, "fatal_eop_out_of_range", false),
               config.get_default<std::string>(path, "eop_updatable_config", ""),
               grid_frame_from_config(config, path)),
-    _num_polarizations(config.get<uint64_t>(path, "num_polarizations")),
-    _num_dishes(config.get<uint64_t>(path, "num_dishes")),
+    // Fall back gracefully for configs that only declare `num_elements`
+    // (e.g. CHARTS sim configs without an explicit /telescope section).
+    _num_polarizations(config.get_default<uint64_t>(path, "num_polarizations", 1)),
+    _num_dishes(config.get_default<uint64_t>(path, "num_dishes",
+                                             config.get<uint64_t>(path, "num_elements"))),
     _num_elements(_num_dishes * _num_polarizations),
     _num_cylinders(config.get_default<uint64_t>(path, "num_cylinders", 1)),
     _num_dishes_per_cylinder(_num_dishes / _num_cylinders),
