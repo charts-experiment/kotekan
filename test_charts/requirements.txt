@@ -1,0 +1,10 @@
+numpy
+scipy
+matplotlib
+dash
+plotly
+pandas
+h5py
+astropy
+pyyaml
+pynvml
