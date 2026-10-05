@@ -57,8 +57,10 @@ __global__ void shuffle_astron(int *input, int *output, int ne, int nt, int nf) 
     int d[4], dd[4];
     //d[t], [e] inside words
     //in[nt,nf,ne]
-    for (int t=0; t<4; t++)
-        d[t] = input[((T + t) * nf + F) * ne / 4 + E / 4];
+    for (int t = 0; t < 4; t++) {
+        size_t in_idx = ((size_t)(T + t) * nf + F) * (ne / 4) + (E / 4);
+        d[t] = input[in_idx];
+    }
     dd[0] = ((d[0] & 0x000000ff)>> 0) | ((d[1] & 0x000000ff)<< 8) | ((d[2] & 0x000000ff)<<16) | ((d[3] & 0x000000ff)<<24);
     dd[1] = ((d[0] & 0x0000ff00)>> 8) | ((d[1] & 0x0000ff00)<< 0) | ((d[2] & 0x0000ff00)<< 8) | ((d[3] & 0x0000ff00)<<16);
     dd[2] = ((d[0] & 0x00ff0000)>>16) | ((d[1] & 0x00ff0000)>> 8) | ((d[2] & 0x00ff0000)>> 0) | ((d[3] & 0x00ff0000)<< 8);
@@ -68,8 +70,10 @@ __global__ void shuffle_astron(int *input, int *output, int ne, int nt, int nf) 
     for (int e=0; e<4; e++)
         dd[e] = (((dd[e]&0xf0f0f0f0)>>4) | ((dd[e]&0x0f0f0f0f)<<4));
     //out[nf,nt/32,ne,32]
-    for (int e=0; e<4; e++)
-        output[((F * nt/32 + blockIdx.y)*ne + E+e)*8 + threadIdx.y] = dd[e];
+    for (int e = 0; e < 4; e++) {
+        size_t out_idx = (((size_t)F * (nt / 32) + blockIdx.y) * ne + (E + e)) * 8 + threadIdx.y;
+        output[out_idx] = dd[e];
+    }
 }
 
 cudaEvent_t cudaShuffleAstron::execute(cudaPipelineState& pipestate, const std::vector<cudaEvent_t>& pre_events) {
