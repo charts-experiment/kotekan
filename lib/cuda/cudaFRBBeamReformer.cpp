@@ -25,7 +25,6 @@
 #include <cassert>        // for assert
 #include <cstddef>        // for ptrdiff_t
 #include <cstdlib>        // for abort
-#include <cublas_api.h>   // for cublasGetStatusString, CUBLAS_STATUS_SUCCESS, cublasH...
 #include <cublas_v2.h>    // for cublasCreate, cublasDestroy, cublasSetStream
 #include <driver_types.h> // for cudaEvent_t, CUevent_st, CUstream_st
 #include <functional>     // for function
