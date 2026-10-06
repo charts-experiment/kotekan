@@ -51,6 +51,7 @@ private:
     std::string _gpu_mem_voltage;
     std::string _gpu_mem_alive_voltages;
     int32_t _max_alive_antennas = 64;
+    std::string _antenna_order = "descending";
 
     // Device allocations
     float* _d_antenna_powers = nullptr;

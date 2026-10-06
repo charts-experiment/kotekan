@@ -49,6 +49,7 @@ private:
     std::size_t _time_chunk_size;
     std::size_t _time_unroll;
     std::size_t _beam_tile_size = 4;
+    std::string _antenna_order = "descending";
 
     // CUDA Graph state for zero CPU dispatch latency across ring buffer slots
     bool _enable_cuda_graph = false;

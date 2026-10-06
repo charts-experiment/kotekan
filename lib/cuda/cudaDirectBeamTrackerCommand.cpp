@@ -138,10 +138,35 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(
         }
 
         // Antenna active/bad element masks
+        std::string antenna_order = config.get_default<std::string>(unique_name, "antenna_order", "descending");
+        _antenna_order = antenna_order;
+        auto to_raw = [&](int ant) {
+            return (_antenna_order == "descending") ? ((_num_elements - 1) - ant) : ant;
+        };
+
+        auto bad_antennas = config.get_default<std::vector<int>>(unique_name, "bad_antennas", {});
+        for (int ant : bad_antennas) {
+            int elem = to_raw(ant);
+            if (elem >= 0 && elem < _num_elements && elem < static_cast<int>(MAX_DIRECT_ANTENNAS)) {
+                _shared_config.antenna_mask[elem] = 0;
+            }
+        }
+
         auto bad_elements = config.get_default<std::vector<int>>(unique_name, "bad_elements", {});
         for (int elem : bad_elements) {
             if (elem >= 0 && elem < _num_elements && elem < static_cast<int>(MAX_DIRECT_ANTENNAS)) {
                 _shared_config.antenna_mask[elem] = 0;
+            }
+        }
+
+        auto active_antennas = config.get_default<std::vector<int>>(unique_name, "active_antennas", {});
+        if (!active_antennas.empty()) {
+            _shared_config.antenna_mask.fill(0);
+            for (int ant : active_antennas) {
+                int r = to_raw(ant);
+                if (r >= 0 && r < _num_elements && r < static_cast<int>(MAX_DIRECT_ANTENNAS)) {
+                    _shared_config.antenna_mask[r] = 1;
+                }
             }
         }
 
@@ -162,7 +187,6 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(
         _shared_config.num_active_antennas = n_active_init;
 
         // Antenna positions: descending (CHARTS raw 31 -> physical 0) or ascending
-        std::string antenna_order = config.get_default<std::string>(unique_name, "antenna_order", "descending");
         for (int r = 0; r < _num_elements && r < static_cast<int>(MAX_DIRECT_ANTENNAS); ++r) {
             int phys_elem = (antenna_order == "descending") ? ((_num_elements - 1) - r) : r;
             unsigned int col, row;
@@ -317,28 +341,48 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(
             rest.register_post_callback("/beam_tracker/enable_beam", enable_beams_cb);
 
             // 4. Mask Antenna
-            auto mask_ant_cb = [](connectionInstance& conn, nlohmann::json& j) {
+            auto mask_ant_cb = [this](connectionInstance& conn, nlohmann::json& j) {
                 try {
-                    if (!j.contains("antenna_id")) {
-                        conn.send_error("Missing antenna_id", HTTP_RESPONSE::BAD_REQUEST);
+                    bool is_raw = j.value("is_raw", false);
+                    std::size_t raw_id = 0;
+                    std::size_t phys_id = 0;
+                    if (j.contains("physical_id")) {
+                        phys_id = j["physical_id"];
+                        raw_id = (_antenna_order == "descending") ? ((_num_elements - 1) - phys_id) : phys_id;
+                    } else if (j.contains("raw_id")) {
+                        raw_id = j["raw_id"];
+                        phys_id = (_antenna_order == "descending") ? ((_num_elements - 1) - raw_id) : raw_id;
+                    } else if (j.contains("antenna_id")) {
+                        std::size_t ant_id = j["antenna_id"];
+                        if (is_raw) {
+                            raw_id = ant_id;
+                            phys_id = (_antenna_order == "descending") ? ((_num_elements - 1) - raw_id) : raw_id;
+                        } else {
+                            phys_id = ant_id;
+                            raw_id = (_antenna_order == "descending") ? ((_num_elements - 1) - phys_id) : phys_id;
+                        }
+                    } else {
+                        conn.send_error("Missing antenna_id, physical_id, or raw_id", HTTP_RESPONSE::BAD_REQUEST);
                         return;
                     }
-                    std::size_t ant_id = j["antenna_id"];
-                    if (ant_id >= MAX_DIRECT_ANTENNAS) {
-                        conn.send_error("antenna_id exceeds MAX_DIRECT_ANTENNAS", HTTP_RESPONSE::BAD_REQUEST);
+
+                    if (raw_id >= MAX_DIRECT_ANTENNAS) {
+                        conn.send_error("antenna index exceeds MAX_DIRECT_ANTENNAS", HTTP_RESPONSE::BAD_REQUEST);
                         return;
                     }
                     bool enabled = j.value("enabled", false);
                     std::lock_guard<std::mutex> lk(_global_mutex);
-                    _shared_config.antenna_mask[ant_id] = enabled ? 1 : 0;
+                    _shared_config.antenna_mask[raw_id] = enabled ? 1 : 0;
                     int n_active = 0;
                     for (std::size_t i = 0; i < MAX_DIRECT_ANTENNAS; ++i) {
                         if (_shared_config.antenna_mask[i] != 0) n_active++;
                     }
                     _shared_config.num_active_antennas = static_cast<std::size_t>(n_active);
                     _weights_dirty = true;
-                    INFO_NON_OO("Direct Beam Tracker: Antenna {:d} set to {:s}", ant_id, enabled ? "ACTIVE" : "MASKED");
-                    conn.send_text_reply(fmt::format("Antenna {:d} set to {:s}\n", ant_id, enabled ? "ACTIVE" : "MASKED"));
+                    INFO_NON_OO("Direct Beam Tracker: Physical antenna {:d} (raw element {:d}) set to {:s}",
+                                phys_id, raw_id, enabled ? "ACTIVE" : "MASKED");
+                    conn.send_text_reply(fmt::format("Physical antenna {:d} (raw {:d}) set to {:s}\n",
+                                                     phys_id, raw_id, enabled ? "ACTIVE" : "MASKED"));
                 } catch (const std::exception& e) {
                     conn.send_error(e.what(), HTTP_RESPONSE::BAD_REQUEST);
                 }
@@ -369,6 +413,7 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(
                 reply["num_active_beams"] = _shared_config.num_active_beams;
                 reply["max_beams"] = _max_beams;
                 reply["num_elements"] = _num_elements;
+                reply["antenna_order"] = _antenna_order;
                 reply["num_local_freq"] = _num_local_freq;
                 reply["samples_per_data_set"] = _samples_per_data_set;
                 reply["subframe_interpolation_enabled"] = _enable_subframe_interpolation;
@@ -387,13 +432,17 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(
 
                 int active_count = 0;
                 nlohmann::json active_raw = nlohmann::json::array();
+                nlohmann::json active_phys = nlohmann::json::array();
                 for (int a = 0; a < _num_elements; ++a) {
                     if (_shared_config.antenna_mask[a] != 0) {
                         active_count++;
                         active_raw.push_back(a);
+                        int p = (_antenna_order == "descending") ? ((_num_elements - 1) - a) : a;
+                        active_phys.push_back(p);
                     }
                 }
-                reply["active_antennas"] = active_count;
+                reply["active_antennas"] = active_phys;
+                reply["active_antennas_count"] = active_count;
                 reply["active_raw_elements"] = active_raw;
 
                 reply["beams"] = nlohmann::json::array();

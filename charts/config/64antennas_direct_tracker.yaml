@@ -176,6 +176,8 @@ gpu:
       num_local_freq: 336
       samples_per_data_set: 15360
       buffer_depth: 3
+      antenna_order: "descending"        # RFSoC raw buffer ordering: raw_id = 63 - physical_ant
+      active_antennas: [0, 4, 5, 6, 32]  # Alive physical antennas convention (auto-mapped to raw elements [63, 59, 58, 57, 31])
       auto_detect_enabled: true
       blank_voltages_enabled: false
       dead_power_threshold: 0.50
@@ -191,6 +193,8 @@ gpu:
       num_local_freq: 336
       samples_per_data_set: 15360
       spacing_m: 0.6
+      antenna_order: "descending"        # Maps raw element r to physical position (63 - r)
+      active_antennas: [0, 4, 5, 6, 32]  # Alive physical antennas
       max_beams: 2
       initial_active_beams: 2
       buffer_depth: 3
@@ -234,6 +238,8 @@ gpu:
       num_local_freq: 336
       samples_per_data_set: 15360
       buffer_depth: 3
+      antenna_order: "descending"        # RFSoC raw buffer ordering: raw_id = 63 - physical_ant
+      active_antennas: [0, 4, 5, 6, 32]  # Alive physical antennas convention (auto-mapped to raw elements [63, 59, 58, 57, 31])
       auto_detect_enabled: true
       blank_voltages_enabled: false
       dead_power_threshold: 0.50
@@ -249,6 +255,8 @@ gpu:
       num_local_freq: 336
       samples_per_data_set: 15360
       spacing_m: 0.6
+      antenna_order: "descending"        # Maps raw element r to physical position (63 - r)
+      active_antennas: [0, 4, 5, 6, 32]  # Alive physical antennas
       max_beams: 2
       initial_active_beams: 2
       buffer_depth: 3

@@ -44,6 +44,7 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(
     _gpu_mem_voltage = config.get_default<std::string>(unique_name, "gpu_mem_voltage", "voltage");
     _gpu_mem_alive_voltages = config.get_default<std::string>(unique_name, "gpu_mem_alive_voltages", "");
     _max_alive_antennas = config.get_default<int>(unique_name, "max_alive_antennas", _num_elements);
+    _antenna_order = config.get_default<std::string>(unique_name, "antenna_order", "descending");
 
     {
         std::lock_guard<std::mutex> lock(_global_mutex);
@@ -59,12 +60,43 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(
         _shared_mask.fill(1);
         _shared_config.manual_mask.fill(1);
 
+        auto to_raw = [&](int ant) {
+            return (_antenna_order == "descending") ? ((_num_elements - 1) - ant) : ant;
+        };
+
+        auto bad_antennas = config.get_default<std::vector<int>>(unique_name, "bad_antennas", {});
+        for (int ant : bad_antennas) {
+            int elem = to_raw(ant);
+            if (elem >= 0 && elem < _num_elements && elem < static_cast<int>(MAX_MASK_ANTENNAS)) {
+                _shared_config.manual_mask[elem] = 0;
+                _shared_mask[elem] = 0;
+                _shared_metrics[elem].status = AntennaHealthStatus::MANUAL_MASK;
+            }
+        }
+
         auto bad_elements = config.get_default<std::vector<int>>(unique_name, "bad_elements", {});
         for (int elem : bad_elements) {
             if (elem >= 0 && elem < _num_elements && elem < static_cast<int>(MAX_MASK_ANTENNAS)) {
                 _shared_config.manual_mask[elem] = 0;
                 _shared_mask[elem] = 0;
                 _shared_metrics[elem].status = AntennaHealthStatus::MANUAL_MASK;
+            }
+        }
+
+        auto active_antennas = config.get_default<std::vector<int>>(unique_name, "active_antennas", {});
+        if (!active_antennas.empty()) {
+            _shared_config.manual_mask.fill(0);
+            _shared_mask.fill(0);
+            for (std::size_t i = 0; i < MAX_MASK_ANTENNAS; ++i) {
+                _shared_metrics[i].status = AntennaHealthStatus::MANUAL_MASK;
+                _shared_metrics[i].consecutive_healthy = 0;
+            }
+            for (int ant : active_antennas) {
+                int r = to_raw(ant);
+                if (r >= 0 && r < _num_elements && r < static_cast<int>(MAX_MASK_ANTENNAS)) {
+                    _shared_config.manual_mask[r] = 1;
+                    _shared_mask[r] = 1;
+                }
             }
         }
 
@@ -100,12 +132,13 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(
 
             // 1. GET /antenna_mask/status
             int num_elements = _num_elements;
-            auto status_cb = [num_elements](connectionInstance& conn) {
+            auto status_cb = [this, num_elements](connectionInstance& conn) {
                 nlohmann::json reply;
                 std::lock_guard<std::mutex> lk(_global_mutex);
 
                 reply["version"] = "Kotekan Antenna Masking Stage v1.0";
                 reply["num_elements"] = num_elements;
+                reply["antenna_order"] = _antenna_order;
                 reply["auto_detect_enabled"] = _shared_config.auto_detect_enabled;
                 reply["blank_voltages_enabled"] = _shared_config.blank_voltages_enabled;
                 reply["thresholds"] = {
@@ -122,6 +155,10 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(
                 int manual_count = 0;
                 nlohmann::json ant_array = nlohmann::json::array();
 
+                auto to_phys = [&](int raw_id) {
+                    return (_antenna_order == "descending") ? ((num_elements - 1) - raw_id) : raw_id;
+                };
+
                 for (int a = 0; a < num_elements; ++a) {
                     const auto& m = _shared_metrics[a];
                     const bool active = (_shared_mask[a] != 0);
@@ -132,6 +169,8 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(
 
                     ant_array.push_back({
                         {"id", a},
+                        {"raw_id", a},
+                        {"physical_id", to_phys(a)},
                         {"active", active},
                         {"status", antenna_health_status_to_string(m.status)},
                         {"power", m.power},
@@ -148,12 +187,15 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(
                 reply["manual_masked_antennas"] = manual_count;
 
                 nlohmann::json active_indices = nlohmann::json::array();
+                nlohmann::json active_phys = nlohmann::json::array();
                 for (int a = 0; a < num_elements; ++a) {
                     if (_shared_mask[a] != 0) {
                         active_indices.push_back(a);
+                        active_phys.push_back(to_phys(a));
                     }
                 }
                 reply["active_raw_elements"] = active_indices;
+                reply["active_physical_antennas"] = active_phys;
                 reply["antennas"] = ant_array;
 
                 conn.send_json_reply(reply);
@@ -161,30 +203,48 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(
             rest.register_get_callback("/antenna_mask/status", status_cb);
 
             // 2. POST /antenna_mask/mask
-            auto mask_cb = [num_elements](connectionInstance& conn, nlohmann::json& j) {
+            auto mask_cb = [this, num_elements](connectionInstance& conn, nlohmann::json& j) {
                 try {
-                    if (!j.contains("antenna_id")) {
-                        conn.send_error("Missing antenna_id", HTTP_RESPONSE::BAD_REQUEST);
+                    bool is_raw = j.value("is_raw", false);
+                    std::size_t raw_id = 0;
+                    std::size_t phys_id = 0;
+                    if (j.contains("physical_id")) {
+                        phys_id = j["physical_id"];
+                        raw_id = (_antenna_order == "descending") ? ((num_elements - 1) - phys_id) : phys_id;
+                    } else if (j.contains("raw_id")) {
+                        raw_id = j["raw_id"];
+                        phys_id = (_antenna_order == "descending") ? ((num_elements - 1) - raw_id) : raw_id;
+                    } else if (j.contains("antenna_id")) {
+                        std::size_t ant_id = j["antenna_id"];
+                        if (is_raw) {
+                            raw_id = ant_id;
+                            phys_id = (_antenna_order == "descending") ? ((num_elements - 1) - raw_id) : raw_id;
+                        } else {
+                            phys_id = ant_id;
+                            raw_id = (_antenna_order == "descending") ? ((num_elements - 1) - phys_id) : phys_id;
+                        }
+                    } else {
+                        conn.send_error("Missing antenna_id, physical_id, or raw_id", HTTP_RESPONSE::BAD_REQUEST);
                         return;
                     }
-                    std::size_t ant_id = j["antenna_id"];
-                    if (ant_id >= MAX_MASK_ANTENNAS) {
-                        conn.send_error("antenna_id exceeds MAX_MASK_ANTENNAS", HTTP_RESPONSE::BAD_REQUEST);
+
+                    if (raw_id >= MAX_MASK_ANTENNAS) {
+                        conn.send_error("antenna index exceeds MAX_MASK_ANTENNAS", HTTP_RESPONSE::BAD_REQUEST);
                         return;
                     }
                     std::lock_guard<std::mutex> lk(_global_mutex);
-                    _shared_config.manual_mask[ant_id] = 0;
-                    _shared_mask[ant_id] = 0;
-                    _shared_metrics[ant_id].status = AntennaHealthStatus::MANUAL_MASK;
-                    _shared_metrics[ant_id].consecutive_healthy = 0;
+                    _shared_config.manual_mask[raw_id] = 0;
+                    _shared_mask[raw_id] = 0;
+                    _shared_metrics[raw_id].status = AntennaHealthStatus::MANUAL_MASK;
+                    _shared_metrics[raw_id].consecutive_healthy = 0;
                     _mask_dirty = true;
                     int n_active = 0;
                     for (int i = 0; i < num_elements; ++i) {
                         if (_shared_mask[i] != 0) n_active++;
                     }
                     cudaDirectBeamTrackerCommand::set_shared_antenna_mask(_shared_mask, n_active);
-                    INFO_NON_OO("AntennaMask: Antenna {:d} MANUAL MASK applied", ant_id);
-                    conn.send_text_reply(fmt::format("Antenna {:d} masked successfully\n", ant_id));
+                    INFO_NON_OO("AntennaMask: Physical antenna {:d} (raw element {:d}) MANUAL MASK applied", phys_id, raw_id);
+                    conn.send_text_reply(fmt::format("Physical antenna {:d} (raw element {:d}) masked successfully\n", phys_id, raw_id));
                 } catch (const std::exception& e) {
                     conn.send_error(e.what(), HTTP_RESPONSE::BAD_REQUEST);
                 }
@@ -192,30 +252,48 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(
             rest.register_post_callback("/antenna_mask/mask", mask_cb);
 
             // 3. POST /antenna_mask/unmask
-            auto unmask_cb = [num_elements](connectionInstance& conn, nlohmann::json& j) {
+            auto unmask_cb = [this, num_elements](connectionInstance& conn, nlohmann::json& j) {
                 try {
-                    if (!j.contains("antenna_id")) {
-                        conn.send_error("Missing antenna_id", HTTP_RESPONSE::BAD_REQUEST);
+                    bool is_raw = j.value("is_raw", false);
+                    std::size_t raw_id = 0;
+                    std::size_t phys_id = 0;
+                    if (j.contains("physical_id")) {
+                        phys_id = j["physical_id"];
+                        raw_id = (_antenna_order == "descending") ? ((num_elements - 1) - phys_id) : phys_id;
+                    } else if (j.contains("raw_id")) {
+                        raw_id = j["raw_id"];
+                        phys_id = (_antenna_order == "descending") ? ((num_elements - 1) - raw_id) : raw_id;
+                    } else if (j.contains("antenna_id")) {
+                        std::size_t ant_id = j["antenna_id"];
+                        if (is_raw) {
+                            raw_id = ant_id;
+                            phys_id = (_antenna_order == "descending") ? ((num_elements - 1) - raw_id) : raw_id;
+                        } else {
+                            phys_id = ant_id;
+                            raw_id = (_antenna_order == "descending") ? ((num_elements - 1) - phys_id) : phys_id;
+                        }
+                    } else {
+                        conn.send_error("Missing antenna_id, physical_id, or raw_id", HTTP_RESPONSE::BAD_REQUEST);
                         return;
                     }
-                    std::size_t ant_id = j["antenna_id"];
-                    if (ant_id >= MAX_MASK_ANTENNAS) {
-                        conn.send_error("antenna_id exceeds MAX_MASK_ANTENNAS", HTTP_RESPONSE::BAD_REQUEST);
+
+                    if (raw_id >= MAX_MASK_ANTENNAS) {
+                        conn.send_error("antenna index exceeds MAX_MASK_ANTENNAS", HTTP_RESPONSE::BAD_REQUEST);
                         return;
                     }
                     std::lock_guard<std::mutex> lk(_global_mutex);
-                    _shared_config.manual_mask[ant_id] = 1;
-                    _shared_mask[ant_id] = 1;
-                    _shared_metrics[ant_id].status = AntennaHealthStatus::HEALTHY;
-                    _shared_metrics[ant_id].consecutive_healthy = _shared_config.revival_frames;
+                    _shared_config.manual_mask[raw_id] = 1;
+                    _shared_mask[raw_id] = 1;
+                    _shared_metrics[raw_id].status = AntennaHealthStatus::HEALTHY;
+                    _shared_metrics[raw_id].consecutive_healthy = _shared_config.revival_frames;
                     _mask_dirty = true;
                     int n_active = 0;
                     for (int i = 0; i < num_elements; ++i) {
                         if (_shared_mask[i] != 0) n_active++;
                     }
                     cudaDirectBeamTrackerCommand::set_shared_antenna_mask(_shared_mask, n_active);
-                    INFO_NON_OO("AntennaMask: Antenna {:d} UNMASK applied", ant_id);
-                    conn.send_text_reply(fmt::format("Antenna {:d} unmasked successfully\n", ant_id));
+                    INFO_NON_OO("AntennaMask: Physical antenna {:d} (raw element {:d}) UNMASK applied", phys_id, raw_id);
+                    conn.send_text_reply(fmt::format("Physical antenna {:d} (raw element {:d}) unmasked successfully\n", phys_id, raw_id));
                 } catch (const std::exception& e) {
                     conn.send_error(e.what(), HTTP_RESPONSE::BAD_REQUEST);
                 }
