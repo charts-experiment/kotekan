@@ -441,8 +441,8 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(
                         active_phys.push_back(p);
                     }
                 }
-                reply["active_antennas"] = active_phys;
-                reply["active_antennas_count"] = active_count;
+                reply["active_antennas"] = active_count;
+                reply["active_physical_antennas"] = active_phys;
                 reply["active_raw_elements"] = active_raw;
 
                 reply["beams"] = nlohmann::json::array();
