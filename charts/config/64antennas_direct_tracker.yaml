@@ -32,7 +32,7 @@ sample_period_s: 3.333333333333e-6
 samples_per_data_set: 15360
 frame_arrival_period: samples_per_data_set * sample_period_s
 bytes_per_dataset: n_channels_per_packet * local_subbands_per_packet * samples_per_data_set
-capture_n_frames: 168750          # Continuous streaming duration (~2.4 hours)
+capture_n_frames: 1687500         # Continuous streaming duration (24.0 hours)
 
 # Memory & Buffer Management
 buffer_depth: 20                  # Host RAM frame queue depth (~6.6 GB total queue per NIC)
