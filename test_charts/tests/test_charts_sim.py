@@ -151,10 +151,13 @@ class TestChartsSimulationSuite(unittest.TestCase):
         self.assertTrue(yaml_out.is_file())
         content = yaml_out.read_text(encoding="utf-8")
         self.assertIn("kotekan_stage: rawFileRead", content)
+        self.assertIn("buf: network_capture_buf", content)
+        self.assertIn("prefix_hostname: false", content)
         self.assertIn("kotekan_stage: cudaProcess", content)
         self.assertIn("name: cudaShuffleAstron", content)
         self.assertIn("name: cudaCorrelatorAstron", content)
         self.assertIn("kotekan_stage: rawFileWrite", content)
+        self.assertIn("in_buf: host_correlation_buffer", content)
         self.assertIn("num_elements: 64", content)
         self.assertIn("num_blocks: 528", content)
 

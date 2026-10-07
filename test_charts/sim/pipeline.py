@@ -116,13 +116,11 @@ host_correlation_buffer:
 
 baseband_reader:
   kotekan_stage: rawFileRead
-  out_buf: network_capture_buf
-  prefix: "{(baseband_dir / baseband_name).as_posix()}_"
-  suffix: ".bin"
-  format_length: 7
-  start_index: 0
-  max_index: {num_frames - 1}
-  playback_rate: 0
+  buf: network_capture_buf
+  base_dir: "{baseband_dir.as_posix()}"
+  file_name: "{baseband_name}"
+  file_ext: "bin"
+  prefix_hostname: false
   end_interrupt: true
 
 gpu:
@@ -136,9 +134,24 @@ gpu:
     - name: cudaShuffleAstron
       gpu_mem_voltage: voltage
       gpu_mem_ordered_voltage: ordered_voltage
+      num_elements: {num_elements}
+      num_local_freq: {num_local_freq}
+      samples_per_data_set: {samples_per_data_set}
+      num_data_sets: 1
+      block_size: {block_size}
+      num_blocks: {num_blocks}
+      buffer_depth: {buffer_depth}
     - name: cudaCorrelatorAstron
       gpu_mem_voltage: ordered_voltage
       gpu_mem_correlation_matrix: correlation_matrix
+      num_elements: {num_elements}
+      num_local_freq: {num_local_freq}
+      samples_per_data_set: {samples_per_data_set}
+      num_data_sets: 1
+      block_size: {block_size}
+      num_blocks: {num_blocks}
+      elements_per_thread_block: {elements_per_thread_block}
+      buffer_depth: {buffer_depth}
     - name: cudaSyncOutput
     - name: cudaOutputData
       in_buf: host_voltage
@@ -157,11 +170,12 @@ gpu:
 correlator_dump:
   kotekan_stage: rawFileWrite
   in_buf: host_correlation_buffer
-  prefix: "{(correlator_dir / 'corr_').as_posix()}"
-  suffix: ".bin"
-  format_length: 7
-  start_index: 0
-  dump_metadata: false
+  base_dir: "{correlator_dir.as_posix()}"
+  file_name: "corr"
+  file_ext: "bin"
+  num_frames_per_file: 1
+  prefix_hostname: false
+  skip_zero_frames: false
 """
     yaml_path.write_text(content, encoding="utf-8")
     return yaml_path
@@ -344,13 +358,11 @@ host_formed_beams_buffer:
 
 baseband_reader:
   kotekan_stage: rawFileRead
-  out_buf: network_capture_buf
-  prefix: "{(baseband_dir / baseband_name).as_posix()}_"
-  suffix: ".bin"
-  format_length: 7
-  start_index: 0
-  max_index: {num_frames - 1}
-  playback_rate: 0
+  buf: network_capture_buf
+  base_dir: "{baseband_dir.as_posix()}"
+  file_name: "{baseband_name}"
+  file_ext: "bin"
+  prefix_hostname: false
   end_interrupt: true
 
 gpu:
@@ -371,11 +383,12 @@ gpu:
 tracker_dump:
   kotekan_stage: rawFileWrite
   in_buf: host_formed_beams_buffer
-  prefix: "{(tracker_dir / tracker_name).as_posix()}_"
-  suffix: ".bin"
-  format_length: 7
-  start_index: 0
-  dump_metadata: false
+  base_dir: "{tracker_dir.as_posix()}"
+  file_name: "{tracker_name}"
+  file_ext: "bin"
+  num_frames_per_file: 1
+  prefix_hostname: false
+  skip_zero_frames: false
 """
     yaml_path.write_text(content, encoding="utf-8")
     return yaml_path
@@ -457,13 +470,11 @@ integrated_correlation_buffer:
 
 baseband_reader:
   kotekan_stage: rawFileRead
-  out_buf: network_capture_buf
-  prefix: "{(baseband_dir / baseband_name).as_posix()}_"
-  suffix: ".bin"
-  format_length: 7
-  start_index: 0
-  max_index: {num_frames - 1}
-  playback_rate: 0
+  buf: network_capture_buf
+  base_dir: "{baseband_dir.as_posix()}"
+  file_name: "{baseband_name}"
+  file_ext: "bin"
+  prefix_hostname: false
   end_interrupt: true
 
 gpu:
@@ -477,9 +488,24 @@ gpu:
     - name: cudaShuffleAstron
       gpu_mem_voltage: voltage
       gpu_mem_ordered_voltage: ordered_voltage
+      num_elements: {num_elements}
+      num_local_freq: {num_local_freq}
+      samples_per_data_set: {samples_per_data_set}
+      num_data_sets: 1
+      block_size: {block_size}
+      num_blocks: {num_blocks}
+      buffer_depth: {buffer_depth}
     - name: cudaCorrelatorAstron
       gpu_mem_voltage: ordered_voltage
       gpu_mem_correlation_matrix: correlation_matrix
+      num_elements: {num_elements}
+      num_local_freq: {num_local_freq}
+      samples_per_data_set: {samples_per_data_set}
+      num_data_sets: 1
+      block_size: {block_size}
+      num_blocks: {num_blocks}
+      elements_per_thread_block: {elements_per_thread_block}
+      buffer_depth: {buffer_depth}
     - name: cudaSyncOutput
     - name: cudaOutputData
       in_buf: host_voltage
@@ -504,11 +530,12 @@ charts_accumulate:
 accumulate_dump:
   kotekan_stage: rawFileWrite
   in_buf: integrated_correlation_buffer
-  prefix: "{(output_dir / 'corr_accum_').as_posix()}"
-  suffix: ".bin"
-  format_length: 7
-  start_index: 0
-  dump_metadata: false
+  base_dir: "{output_dir.as_posix()}"
+  file_name: "corr_accum"
+  file_ext: "bin"
+  num_frames_per_file: 1
+  prefix_hostname: false
+  skip_zero_frames: false
 """
     yaml_path.write_text(content, encoding="utf-8")
     return yaml_path

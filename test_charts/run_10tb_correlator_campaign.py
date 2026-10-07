@@ -368,6 +368,7 @@ def run_single_simulation(
     workers: int = 8,
     dry_run: bool = False,
     cleanup_baseband: bool = False,
+    force_generate: bool = False,
 ) -> int:
     """Executes a single simulation run: baseband generation -> correlator replay -> CASM extraction."""
     run_id = spec["run_id"]
@@ -419,11 +420,18 @@ def run_single_simulation(
 
     # 2. Step 1: Baseband Generation
     print("\n[Step 1/4] Generating Baseband Voltage Stream...")
-    t0_gen = time.perf_counter()
-    gen_result = generate_simulation_window(cfg)
-    num_written = gen_result["num_written"]
-    t_gen_s = time.perf_counter() - t0_gen
-    print(f"  * Generated {num_written} frames in {t_gen_s:.1f} s ({data_bytes / 1e9 / max(0.1, t_gen_s):.2f} GB/s)")
+    existing_bins = sorted(window_dir.glob(f"{run_id}_*.bin"))
+    meta_h5 = window_dir / f"{run_id}_meta.h5"
+    target_frames = 1 if dry_run else spec["frames"]
+    if not force_generate and not dry_run and len(existing_bins) >= target_frames and meta_h5.exists():
+        print(f"  * Detected {len(existing_bins)} existing baseband frames in {window_dir}. Reusing existing stream.")
+        num_written = len(existing_bins)
+    else:
+        t0_gen = time.perf_counter()
+        gen_result = generate_simulation_window(cfg)
+        num_written = gen_result["num_written"]
+        t_gen_s = time.perf_counter() - t0_gen
+        print(f"  * Generated {num_written} frames in {t_gen_s:.1f} s ({data_bytes / 1e9 / max(0.1, t_gen_s):.2f} GB/s)")
 
     # 3. Step 2: Correlator Replay (cudaCorrelatorAstron)
     print("\n[Step 2/4] Executing Kotekan GPU Tensor Core Correlator...")
@@ -556,6 +564,7 @@ def main():
     parser.add_argument("--workers", type=int, default=None, help="Number of CPU worker threads for baseband synthesis")
     parser.add_argument("--cleanup-baseband", action="store_true", help="Delete raw baseband frames after correlator completes")
     parser.add_argument("--dry-run", action="store_true", help="Validate configurations without writing full baseband files")
+    parser.add_argument("--force-generate", action="store_true", help="Force re-generation of baseband frames even if already present")
 
     args = parser.parse_args()
 
@@ -609,6 +618,7 @@ def main():
             workers=workers,
             dry_run=args.dry_run,
             cleanup_baseband=args.cleanup_baseband,
+            force_generate=args.force_generate,
         )
         if rc != 0:
             print(f"[FATAL] Simulation {spec['run_id']} failed with code {rc}. Aborting.")
