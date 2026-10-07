@@ -487,17 +487,28 @@ def render_and_write_frame(job: Dict[str, Any]) -> Tuple[int, int, float, float,
 def compute_analytic_lightcurve(
     duration_s: float,
     noise_power_base: float,
-    sun_power_series: np.ndarray,
+    sun_power_series: Union[np.ndarray, float],
     events: List[SimulatedEvent],
     freqs_hz: np.ndarray,
     cadence_hz: float = 10.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Computes a 10 Hz analytic power lightcurve for the entire observation window."""
-    num_points = int(round(duration_s * cadence_hz))
+    num_points = max(1, int(round(duration_s * cadence_hz)))
     t_points = np.linspace(0.0, duration_s, num_points, endpoint=False)
     p_total = np.full(num_points, noise_power_base, dtype=np.float64)
 
-    p_total += sun_power_series
+    if np.isscalar(sun_power_series):
+        p_total += float(sun_power_series)
+    elif isinstance(sun_power_series, np.ndarray):
+        if len(sun_power_series) == num_points:
+            p_total += sun_power_series
+        elif len(sun_power_series) > 0:
+            sun_interp = np.interp(
+                np.linspace(0, 1, num_points),
+                np.linspace(0, 1, len(sun_power_series)),
+                sun_power_series,
+            )
+            p_total += sun_interp
 
     f_top_hz = freqs_hz[-1]
     f_top_ghz = f_top_hz / 1e9
@@ -727,7 +738,7 @@ def generate_simulation_window(
 
     # Compute analytic lightcurve
     noise_pwr_base = float(np.mean(2.0 * (sigma_ant ** 2)) * np.mean(bandpass ** 2))
-    sun_pwr_series = np.full(int(config.duration_s * 10.0), sun_amp ** 2 if sun_is_up else 0.0)
+    sun_pwr_series = np.full(int(round(config.duration_s * 10.0)), sun_amp ** 2 if sun_is_up else 0.0)
 
     lc_t, lc_power = compute_analytic_lightcurve(
         duration_s=config.duration_s,

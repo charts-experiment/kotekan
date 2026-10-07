@@ -62,6 +62,8 @@ logger = logging.getLogger("kotekan.charts.sim.sky")
 # Repository layout: test_charts/sim/sky.py -> kotekan/test_charts -> kotekan -> charts
 _SIM_DIR = Path(__file__).resolve().parent
 _VERIFIED_TARGETS_CANDIDATES = [
+    _SIM_DIR / "verified_targets.json",
+    _SIM_DIR.parent / "verified_targets.json",
     _SIM_DIR.parent.parent.parent / "tools" / "verified_targets.json",
     _SIM_DIR.parent.parent / "tools" / "verified_targets.json",
     Path("tools") / "verified_targets.json",
@@ -120,14 +122,18 @@ def load_verified_catalog(path: Optional[Union[str, Path]] = None) -> Dict[str, 
     Use :func:`find_verified_target` for fuzzy name lookup.
     """
     cat_path = Path(path) if path is not None else _default_catalog_path()
-    if cat_path is None or not cat_path.is_file():
-        raise FileNotFoundError(
-            "verified_targets.json not found. Expected at 'tools/verified_targets.json' "
-            "relative to the charts workspace root."
-        )
-
-    with open(cat_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    if cat_path is not None and cat_path.is_file():
+        with open(cat_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    else:
+        try:
+            from .verified_catalog_data import VERIFIED_TARGETS_RAW
+            data = json.loads(VERIFIED_TARGETS_RAW) if isinstance(VERIFIED_TARGETS_RAW, str) else VERIFIED_TARGETS_RAW
+        except Exception:
+            raise FileNotFoundError(
+                "verified_targets.json not found on disk and fallback catalog is unavailable. "
+                "Expected at 'tools/verified_targets.json' relative to the charts workspace root."
+            )
 
     catalog: Dict[str, VerifiedTarget] = {}
     for t in data.get("targets", []):
