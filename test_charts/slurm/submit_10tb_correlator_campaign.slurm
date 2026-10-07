@@ -86,21 +86,6 @@ else
 fi
 cd "${REPO_ROOT}"
 
-# 3. Resolve Fast Scratch Storage (NVMe / Node-Local Scratch)
-TASK_ID="${SLURM_ARRAY_TASK_ID:-0}"
-JOB_ID="${SLURM_ARRAY_JOB_ID:-${SLURM_JOB_ID:-manual}}"
-
-if [ -n "${SCRATCH_DIR:-}" ]; then
-    SCRATCH_BASE="${SCRATCH_DIR}/charts_10tb_${JOB_ID}_task${TASK_ID}"
-elif [ -n "${SLURM_TMPDIR:-}" ] && [[ "${SLURM_TMPDIR}" != /dev/shm* ]]; then
-    SCRATCH_BASE="${SLURM_TMPDIR}/charts_10tb_task${TASK_ID}"
-elif [ -n "${SCRATCH:-}" ]; then
-    SCRATCH_BASE="${SCRATCH}/kotekan_10tb/${JOB_ID}_task${TASK_ID}"
-else
-    SCRATCH_BASE="${REPO_ROOT}/scratch_10tb_${JOB_ID}_task${TASK_ID}"
-fi
-mkdir -p "${SCRATCH_BASE}"
-
 # Resolve Permanent Output Directory
 if [ -n "${OUTPUT_DIR:-}" ]; then
     DEST_OUTPUT="${OUTPUT_DIR}"
@@ -110,6 +95,19 @@ else
     DEST_OUTPUT="${REPO_ROOT}/test_charts/data/campaign_10tb_output"
 fi
 mkdir -p "${DEST_OUTPUT}"
+
+# 3. Resolve Scratch / Working Storage
+# By default, generates directly inside DEST_OUTPUT so all baseband files,
+# correlator visibility dumps, plots, and metadata are preserved in one canonical location.
+TASK_ID="${SLURM_ARRAY_TASK_ID:-0}"
+JOB_ID="${SLURM_ARRAY_JOB_ID:-${SLURM_JOB_ID:-manual}}"
+
+if [ -n "${SCRATCH_DIR:-}" ]; then
+    SCRATCH_BASE="${SCRATCH_DIR}/charts_10tb_${JOB_ID}_task${TASK_ID}"
+else
+    SCRATCH_BASE="${DEST_OUTPUT}"
+fi
+mkdir -p "${SCRATCH_BASE}"
 
 # 4. Build / Locate Kotekan Binary
 KOTEKAN_BIN="${REPO_ROOT}/build/kotekan/kotekan"

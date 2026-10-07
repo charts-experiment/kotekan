@@ -493,25 +493,42 @@ def run_single_simulation(
         print(f"  * Saved Correlator Waterfall : {wf_out}")
 
     # 6. Archive Data Products to Output Directory
-    dest_dir = output_dir / run_id
+    dest_dir = (output_dir / run_id).resolve()
+    window_dir_resolved = window_dir.resolve()
     dest_dir.mkdir(parents=True, exist_ok=True)
-    print(f"\n>>> Archiving data products to {dest_dir}...")
-    for f in window_dir.glob("*_meta.h5"):
-        shutil.copy2(f, dest_dir)
-    for f in window_dir.glob("*_events.json"):
-        shutil.copy2(f, dest_dir)
-    for f in window_dir.glob("sim_config.yaml"):
-        shutil.copy2(f, dest_dir)
-    if plots_dir.exists():
-        dest_plots = dest_dir / "plots"
-        dest_plots.mkdir(parents=True, exist_ok=True)
-        for p in plots_dir.glob("*.png"):
-            shutil.copy2(p, dest_plots)
 
-    # 7. Baseband Cleanup (optional, frees scratch space in sequential batch runs)
+    if dest_dir != window_dir_resolved:
+        print(f"\n>>> Archiving data products to {dest_dir}...")
+        for f in window_dir.glob("*_meta.h5"):
+            shutil.copy2(f, dest_dir)
+        for f in window_dir.glob("*_events.json"):
+            shutil.copy2(f, dest_dir)
+        for f in window_dir.glob("sim_config.yaml"):
+            shutil.copy2(f, dest_dir)
+        for f in window_dir.glob("*.log"):
+            shutil.copy2(f, dest_dir)
+        if plots_dir.exists():
+            dest_plots = dest_dir / "plots"
+            dest_plots.mkdir(parents=True, exist_ok=True)
+            for p in plots_dir.glob("*.png"):
+                shutil.copy2(p, dest_plots)
+        if corr_dir.exists():
+            dest_corr = dest_dir / "correlator"
+            dest_corr.mkdir(parents=True, exist_ok=True)
+            for c in corr_dir.glob("*.bin"):
+                shutil.copy2(c, dest_corr)
+
+        # Preserve baseband data unless cleanup explicitly requested
+        if not cleanup_baseband and not dry_run:
+            print(f">>> Preserving raw baseband voltage files in {dest_dir}...")
+            for b in window_dir.glob(f"{run_id}_*.bin"):
+                shutil.move(b, dest_dir / b.name)
+
+    # 7. Baseband Cleanup (optional, frees scratch space only if explicitly requested)
     if cleanup_baseband and not dry_run:
-        print(f"\n>>> Cleaning up {num_written} raw baseband .bin files from {window_dir}...")
-        for bin_f in window_dir.glob("*.bin"):
+        print(f"\n>>> Cleaning up {num_written} raw baseband .bin files...")
+        target_dir_clean = dest_dir if dest_dir == window_dir_resolved else window_dir
+        for bin_f in target_dir_clean.glob(f"{run_id}_*.bin"):
             bin_f.unlink()
         print("  * Baseband scratch space reclaimed successfully.")
 
