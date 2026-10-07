@@ -44,6 +44,7 @@ class SimulationConfig:
 
     # Transients & RFI
     num_events: int = 1
+    allowed_event_types: Optional[List[str]] = None
     persistent_rfi_channels: List[int] = field(default_factory=lambda: [94, 133, 147])
     persistent_rfi_freqs: Optional[List[float]] = None
     persistent_rfi_amp: float = 7.0
@@ -57,6 +58,7 @@ class SimulationConfig:
     initial_lst_hours: float = 5.575
     start_time: Optional[str] = None
     save_reference: Optional[str] = None
+    skip_tracker: bool = False
 
     # System & Execution Paths
     scratch_dir: Path = field(default_factory=lambda: Path("./scratch_charts_sim"))
@@ -64,7 +66,6 @@ class SimulationConfig:
     kotekan_bin: Optional[Path] = None
     workers: int = 4
     dry_run: bool = False
-    writer: str = "raw_bin"            # 'raw_bin' | 'hdf5'
 
     # Visualizations & Video
     generate_plots: bool = True

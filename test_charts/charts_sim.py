@@ -38,6 +38,11 @@ from sim.astro import (
     parse_observation_time,
     resolve_beam_targets,
 )
+from sim.sky import (
+    catalog_transit_summary,
+    load_verified_catalog,
+    resolve_window_start,
+)
 from sim.benchmark import run_direct_tracker_benchmark
 from sim.constants import (
     CHARTS_CHANNEL_WIDTH_MHZ,
@@ -72,12 +77,6 @@ from sim.visualizer import (
     plot_casm_correlation_matrix,
     plot_correlator_waterfalls,
     plot_tracker_waterfall,
-)
-from sim.writer import (
-    BasebandWriter,
-    HDF5Writer,
-    RawBinWriter,
-    create_writer,
 )
 
 
@@ -136,41 +135,44 @@ def run_pipeline(cfg: SimulationConfig) -> int:
         return rc_corr
 
     # Step 3: Direct Beam Tracker Replay (cudaDirectBeamTracker)
-    print(f"\n[Step 3/5] Running Kotekan Direct Beam Tracker ({cfg.max_beams} Beams)...")
-    tracker_dir = window_dir / "tracker"
-    tracker_yaml = window_dir / "kotekan_tracker.yaml"
-    beam_targets = parse_beam_targets(
-        cfg.beam_targets,
-        max_beams=cfg.max_beams,
-        default_lst=cfg.initial_lst_hours,
-        obs_time=cfg.start_time,
-    )
-    create_beam_tracker_yaml(
-        yaml_path=tracker_yaml,
-        baseband_dir=window_dir,
-        baseband_name=cfg.window_name,
-        tracker_dir=tracker_dir,
-        tracker_name=f"beams_{cfg.window_name}",
-        num_frames=num_frames,
-        beam_targets=beam_targets,
-        num_elements=cfg.antennas,
-        num_local_freq=cfg.num_freq,
-        samples_per_data_set=cfg.samples_per_frame,
-        max_beams=cfg.max_beams,
-        integration_spectra=cfg.integration_spectra,
-        buffer_depth=cfg.buffer_depth,
-        stage_type="direct",
-    )
+    if not getattr(cfg, "skip_tracker", False):
+        print(f"\n[Step 3/5] Running Kotekan Direct Beam Tracker ({cfg.max_beams} Beams)...")
+        tracker_dir = window_dir / "tracker"
+        tracker_yaml = window_dir / "kotekan_tracker.yaml"
+        beam_targets = parse_beam_targets(
+            cfg.beam_targets,
+            max_beams=cfg.max_beams,
+            default_lst=cfg.initial_lst_hours,
+            obs_time=cfg.start_time,
+        )
+        create_beam_tracker_yaml(
+            yaml_path=tracker_yaml,
+            baseband_dir=window_dir,
+            baseband_name=cfg.window_name,
+            tracker_dir=tracker_dir,
+            tracker_name=f"beams_{cfg.window_name}",
+            num_frames=num_frames,
+            beam_targets=beam_targets,
+            num_elements=cfg.antennas,
+            num_local_freq=cfg.num_freq,
+            samples_per_data_set=cfg.samples_per_frame,
+            max_beams=cfg.max_beams,
+            integration_spectra=cfg.integration_spectra,
+            buffer_depth=cfg.buffer_depth,
+            stage_type="direct",
+        )
 
-    rc_track = execute_kotekan(
-        config_path=tracker_yaml,
-        kotekan_bin=cfg.kotekan_bin,
-        dry_run=cfg.dry_run,
-        log_path=window_dir / "kotekan_tracker.log",
-    )
-    if rc_track != 0 and not cfg.dry_run:
-        print(f"[ERROR] Beam tracker execution failed with return code {rc_track}")
-        return rc_track
+        rc_track = execute_kotekan(
+            config_path=tracker_yaml,
+            kotekan_bin=cfg.kotekan_bin,
+            dry_run=cfg.dry_run,
+            log_path=window_dir / "kotekan_tracker.log",
+        )
+        if rc_track != 0 and not cfg.dry_run:
+            print(f"[ERROR] Beam tracker execution failed with return code {rc_track}")
+            return rc_track
+    else:
+        print("\n[Step 3/5] Skipping Beam Tracker (--no-tracker requested)...")
 
     # Step 4: Verification & Inspection
     print("\n[Step 4/5] Inspecting & Validating Pipeline Outputs...")
@@ -184,16 +186,18 @@ def run_pipeline(cfg: SimulationConfig) -> int:
             print(f"  * Mean Autocorrelation power : {diag['mean_autocorr']:.2f} LSB^2")
             print(f"  * Baseline cross-power SNR   : {diag['cross_snr']:.2f}")
 
-        tracker_dumps = sorted(tracker_dir.glob("*.bin"))
-        if tracker_dumps:
-            t_diag = inspect_tracker_dump(
-                tracker_dumps[0],
-                num_freq=cfg.num_freq,
-                max_beams=cfg.max_beams,
-                samples_per_data_set=cfg.samples_per_frame,
-            )
-            print(f"  * Tracker total beam power   : {t_diag['total_power']:.2f}")
-            print(f"  * Peak formed beam slot      : Beam {t_diag['peak_beam']}")
+        if not getattr(cfg, "skip_tracker", False):
+            tracker_dir = window_dir / "tracker"
+            tracker_dumps = sorted(tracker_dir.glob("*.bin"))
+            if tracker_dumps:
+                t_diag = inspect_tracker_dump(
+                    tracker_dumps[0],
+                    num_freq=cfg.num_freq,
+                    max_beams=cfg.max_beams,
+                    samples_per_data_set=cfg.samples_per_frame,
+                )
+                print(f"  * Tracker total beam power   : {t_diag['total_power']:.2f}")
+                print(f"  * Peak formed beam slot      : Beam {t_diag['peak_beam']}")
     else:
         print("  [DRY-RUN] Skipped binary dump inspection.")
 
@@ -227,18 +231,21 @@ def run_pipeline(cfg: SimulationConfig) -> int:
             )
             print(f"  * Saved Correlator waterfall : {wf_out}")
 
-        if tracker_dumps:
-            tr_out = plots_dir / f"tracker_waterfall_{cfg.window_name}.png"
-            plot_tracker_waterfall(
-                tracker_dir=tracker_dir,
-                output_path=tr_out,
-                max_beams=cfg.max_beams,
-                num_freq=cfg.num_freq,
-                samples_per_frame=cfg.samples_per_frame,
-                duration_s=cfg.duration_s,
-                beam_targets_str=cfg.beam_targets,
-            )
-            print(f"  * Saved Tracker lightcurves  : {tr_out}")
+        if not getattr(cfg, "skip_tracker", False):
+            tracker_dir = window_dir / "tracker"
+            tracker_dumps = sorted(tracker_dir.glob("*.bin")) if tracker_dir.exists() else []
+            if tracker_dumps:
+                tr_out = plots_dir / f"tracker_waterfall_{cfg.window_name}.png"
+                plot_tracker_waterfall(
+                    tracker_dir=tracker_dir,
+                    output_path=tr_out,
+                    max_beams=cfg.max_beams,
+                    num_freq=cfg.num_freq,
+                    samples_per_frame=cfg.samples_per_frame,
+                    duration_s=cfg.duration_s,
+                    beam_targets_str=cfg.beam_targets,
+                )
+                print(f"  * Saved Tracker lightcurves  : {tr_out}")
     else:
         print("  [DRY-RUN] Skipped plot generation.")
 
@@ -289,6 +296,7 @@ def main():
     pipe_parser.add_argument("--preset", type=str, default="quick", choices=["quick", "1min", "5min"], help="Preset profile")
     pipe_parser.add_argument("--profile", type=str, default="day", choices=["day", "night", "both"], help="Time/sky profile")
     pipe_parser.add_argument("--start-time", type=str, default=None, help="Observation start time (ISO 8601, 'now', or 'HH:MM')")
+    pipe_parser.add_argument("--transit", "--transit-target", dest="transit_target", type=str, default=None, help="Anchor window at target confirmed transit (e.g. 'Vela', 'Sgr A*', 'Crab')")
     pipe_parser.add_argument("--beam-targets", type=str, default=None, help="Targets: e.g. 'Crab;Vela' or 'auto'")
     pipe_parser.add_argument("--duration-s", type=float, default=None, help="Custom duration (seconds)")
     pipe_parser.add_argument("--antennas", type=int, default=None, help="Number of antennas (e.g. 64 or 256)")
@@ -299,6 +307,7 @@ def main():
     pipe_parser.add_argument("--save-reference", type=str, default=None, help="Save generated dataset to reference library under tag")
     pipe_parser.add_argument("--kotekan-bin", type=str, default=None, help="Path to kotekan executable")
     pipe_parser.add_argument("--workers", type=int, default=None, help="Parallel worker threads")
+    pipe_parser.add_argument("--no-tracker", "--skip-tracker", dest="skip_tracker", action="store_true", help="Run only baseband generation and correlator (skip beam tracker)")
     pipe_parser.add_argument("--dry-run", action="store_true", help="Generate configs and simulate without running Kotekan binary")
 
     # 2. Generate subcommand
@@ -308,30 +317,16 @@ def main():
     gen_parser.add_argument("--num-freq", type=int, default=336, help="Frequency channels")
     gen_parser.add_argument("--profile", type=str, default="day", choices=["day", "night"], help="Day or Night profile")
     gen_parser.add_argument("--start-time", type=str, default=None, help="Observation start time (ISO 8601, 'now', or 'HH:MM')")
+    gen_parser.add_argument("--transit", "--transit-target", dest="transit_target", type=str, default=None, help="Anchor window at target confirmed transit (e.g. 'Vela', 'Sgr A*', 'Crab')")
     gen_parser.add_argument("--beam-targets", type=str, default="auto", help="Injected celestial sources (e.g. 'Crab;Vela' or 'auto')")
     gen_parser.add_argument("--num-events", type=int, default=2, help="Number of injected transients")
     gen_parser.add_argument("--save-reference", type=str, default=None, help="Save to reference library under tag")
     gen_parser.add_argument("--scratch-dir", type=str, default="./scratch_charts_sim", help="Target output directory")
-    gen_parser.add_argument("--writer", type=str, default="raw_bin", choices=["raw_bin", "hdf5"], help="Baseband writer format ('raw_bin' or 'hdf5')")
 
-    # 3. Write Baseband subcommand (Standalone baseband serialization without Kotekan pipeline)
-    wb_parser = subparsers.add_parser("write-baseband", help="Write simulated baseband data to disk without running Kotekan pipeline")
-    wb_parser.add_argument("--preset", type=str, default="quick", choices=["quick", "1min", "5min"], help="Preset profile")
-    wb_parser.add_argument("--profile", type=str, default="day", choices=["day", "night"], help="Day or Night profile")
-    wb_parser.add_argument("--writer", type=str, default="raw_bin", choices=["raw_bin", "hdf5"], help="Baseband writer format ('raw_bin' or 'hdf5')")
-    wb_parser.add_argument("--duration-s", type=float, default=None, help="Custom duration (seconds)")
-    wb_parser.add_argument("--antennas", type=int, default=None, help="Number of antennas (e.g. 32, 64, or 256)")
-    wb_parser.add_argument("--num-freq", type=int, default=None, help="Frequency channels")
-    wb_parser.add_argument("--samples-per-frame", type=int, default=None, help="Samples per frame")
-    wb_parser.add_argument("--window-name", type=str, default=None, help="Custom window name")
-    wb_parser.add_argument("--start-time", type=str, default=None, help="Observation start time (ISO 8601, 'now', or 'HH:MM')")
-    wb_parser.add_argument("--beam-targets", type=str, default=None, help="Injected celestial sources (e.g. 'Crab;Vela' or 'auto')")
-    wb_parser.add_argument("--num-events", type=int, default=None, help="Number of injected transients")
-    wb_parser.add_argument("--scratch-dir", type=str, default="./scratch_charts_sim", help="Target output directory")
-    wb_parser.add_argument("--save-reference", type=str, default=None, help="Save to reference library under tag")
-    wb_parser.add_argument("--workers", type=int, default=None, help="Parallel worker threads")
+    # Catalog subcommand
+    subparsers.add_parser("catalog", help="List confirmed targets and transit ephemeris")
 
-    # 4. Reference Library subcommand
+    # 3. Reference Library subcommand
     ref_parser = subparsers.add_parser("reference", help="Manage reference baseband library")
     ref_parser.add_argument("action", choices=["list", "info"], help="Action: 'list' or 'info'")
     ref_parser.add_argument("--tag", type=str, default=None, help="Reference window tag for 'info'")
@@ -389,11 +384,17 @@ def main():
                 antennas=args.antennas,
                 num_freq=args.num_freq,
             )
-            if args.start_time:
-                cfg.start_time = args.start_time
-                dt = parse_observation_time(args.start_time)
+            if args.transit_target:
+                cfg.start_time = f"transit:{args.transit_target}"
+                dt = resolve_window_start(cfg.start_time, duration_s=cfg.duration_s)
                 cfg.initial_lst_hours = datetime_to_lst_hours(dt)
-            if args.beam_targets:
+                if not args.beam_targets:
+                    cfg.beam_targets = args.transit_target
+            elif args.start_time:
+                cfg.start_time = args.start_time
+                dt = resolve_window_start(args.start_time, duration_s=cfg.duration_s)
+                cfg.initial_lst_hours = datetime_to_lst_hours(dt)
+            if args.beam_targets and not (args.transit_target and not args.beam_targets):
                 cfg.beam_targets = args.beam_targets
             if args.duration_s:
                 cfg.duration_s = args.duration_s
@@ -409,6 +410,7 @@ def main():
                 cfg.kotekan_bin = Path(args.kotekan_bin)
             if args.workers:
                 cfg.workers = args.workers
+            cfg.skip_tracker = args.skip_tracker
             cfg.dry_run = args.dry_run
 
             ret = run_pipeline(cfg)
@@ -423,14 +425,18 @@ def main():
             cfg.num_events = args.num_events
             cfg.scratch_dir = Path(args.scratch_dir)
             cfg.window_name = f"charts_sim_{ant}ant"
-            if args.start_time:
-                cfg.start_time = args.start_time
-                dt = parse_observation_time(args.start_time)
+            if args.transit_target:
+                cfg.start_time = f"transit:{args.transit_target}"
+                dt = resolve_window_start(cfg.start_time, duration_s=cfg.duration_s)
                 cfg.initial_lst_hours = datetime_to_lst_hours(dt)
-            if args.beam_targets:
+                if args.beam_targets == "auto":
+                    cfg.beam_targets = args.transit_target
+            elif args.start_time:
+                cfg.start_time = args.start_time
+                dt = resolve_window_start(args.start_time, duration_s=cfg.duration_s)
+                cfg.initial_lst_hours = datetime_to_lst_hours(dt)
+            if args.beam_targets and not (args.transit_target and args.beam_targets == "auto"):
                 cfg.beam_targets = args.beam_targets
-            if hasattr(args, "writer") and args.writer:
-                cfg.writer = args.writer
 
             ref_tag = None
             if args.save_reference:
@@ -452,66 +458,20 @@ def main():
                     samples_per_frame=cfg.samples_per_frame,
                 )
 
-    elif args.command == "write-baseband":
-        cfg = get_preset_config(
-            preset=args.preset,
-            profile=args.profile,
-            antennas=args.antennas,
-            num_freq=args.num_freq,
-        )
-        if args.duration_s is not None:
-            cfg.duration_s = args.duration_s
-        if args.samples_per_frame is not None:
-            cfg.samples_per_frame = args.samples_per_frame
-        if args.window_name is not None:
-            cfg.window_name = args.window_name
-        if args.start_time is not None:
-            cfg.start_time = args.start_time
-            dt = parse_observation_time(args.start_time)
-            cfg.initial_lst_hours = datetime_to_lst_hours(dt)
-        if args.beam_targets is not None:
-            cfg.beam_targets = args.beam_targets
-        if args.num_events is not None:
-            cfg.num_events = args.num_events
-        if args.scratch_dir is not None:
-            cfg.scratch_dir = Path(args.scratch_dir)
-        if args.workers is not None:
-            cfg.workers = args.workers
-        cfg.writer = args.writer
-
-        print("=" * 80)
-        print(f" CHARTS WRITE-BASEBAND: PRESET={cfg.preset.upper()} PROFILE={cfg.profile.upper()} WRITER={cfg.writer.upper()}")
-        print("=" * 80)
-        print(f" Target Directory   : {Path(cfg.scratch_dir) / cfg.window_name}")
-        print(f" Antennas           : {cfg.antennas}")
-        print(f" Frequency Channels : {cfg.num_freq}")
-        print(f" Duration           : {cfg.duration_s:.1f} s")
-        print(f" Backend Writer     : {cfg.writer}")
-        print("=" * 80)
-
-        res = generate_simulation_window(cfg)
-        print("\n" + "=" * 80)
-        print(f"[SUCCESS] Baseband data written cleanly via {args.writer} writer:")
-        print(f"  * Window Name     : {res['window_name']}")
-        print(f"  * Output Dir      : {res['target_dir']}")
-        print(f"  * Frames Written  : {res['num_written']}")
-        print(f"  * Duration        : {res['duration_s']:.2f} s")
-        print(f"  * Generation Time : {res['gen_time_s']:.2f} s")
-        if "manifest" in res:
-            print(f"  * Manifest Saved  : {res['target_dir'] / 'window_manifest.json'}")
-        print("=" * 80)
-
-        if args.save_reference:
-            save_as_reference_window(
-                src_window_dir=res["target_dir"],
-                tag=args.save_reference,
-                description=f"CHARTS Baseband Window ({cfg.antennas} Ant, {cfg.num_freq} Chans)",
-                obs_time=cfg.start_time,
-                duration_s=cfg.duration_s,
-                antennas=cfg.antennas,
-                num_freq=cfg.num_freq,
-                samples_per_frame=cfg.samples_per_frame,
+    elif args.command == "catalog":
+        summary = catalog_transit_summary()
+        print("=" * 105)
+        print(" CHARTS CONFIRMED CELESTIAL TARGETS & TRANSIT EPHEMERIS (SIMBAD-VERIFIED)")
+        print("=" * 105)
+        print(f" {'Target Label':<28} {'RA (deg)':>9} {'Dec (deg)':>10} {'Transit UTC':>20} {'Transit Loc':>13} {'Max Alt':>8} {'Vis (h)':>8}")
+        print("-" * 105)
+        for t in summary:
+            utc_str = t["transit_utc"].replace("T", " ")[:19]
+            print(
+                f" {t['label']:<28} {t['ra_deg']:>9.4f} {t['dec_deg']:>10.4f} "
+                f"{utc_str:>20} {t['transit_local']:>13} {t['max_alt_deg']:>6.1f} deg {t['hours_above_mask']:>7.2f}h"
             )
+        print("=" * 105)
 
     elif args.command == "reference":
         if args.action == "list":

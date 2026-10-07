@@ -201,6 +201,10 @@ def parse_observation_time(time_spec: Optional[Union[str, datetime.datetime, flo
     if s.lower() == "now":
         return datetime.datetime.now(datetime.timezone.utc)
 
+    if s.lower().startswith("transit") or s.lower().startswith("slot:"):
+        from .sky import resolve_window_start
+        return resolve_window_start(s)
+
     # Try ISO 8601
     try:
         clean_s = s.replace("Z", "+00:00")
@@ -545,6 +549,27 @@ def resolve_beam_targets(
                 "m0": m,
             })
             continue
+
+        # Check verified targets catalog (SIMBAD parity)
+        try:
+            from .sky import find_verified_target
+            v_src = find_verified_target(lookup_key)
+            az, alt = equatorial_to_horizontal(v_src.ra_deg, v_src.dec_deg, lst_h, lat_deg)
+            l, m, _ = equatorial_to_direction_cosines(v_src.ra_deg, v_src.dec_deg, lst_h, lat_deg)
+            targets.append({
+                "beam": len(targets),
+                "name": v_src.label,
+                "ra_deg": v_src.ra_deg,
+                "dec_deg": v_src.dec_deg,
+                "lst_hours": lst_h,
+                "elevation_deg": alt,
+                "azimuth_deg": az,
+                "l0": l,
+                "m0": m,
+            })
+            continue
+        except Exception:
+            pass
 
         # Check if "Name:RA,Dec" or "RA,Dec"
         name = f"Custom Beam {len(targets)}"
