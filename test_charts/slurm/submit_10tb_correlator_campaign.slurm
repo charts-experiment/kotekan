@@ -4,7 +4,6 @@
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
 #SBATCH --time=06:00:00
 #SBATCH --output=slurm_10tb_corr_%A_%a.log
 #SBATCH --error=slurm_10tb_corr_%A_%a.err
@@ -58,7 +57,7 @@ echo " CUDA Device    : ${CUDA_VISIBLE_DEVICES:-0}"
 echo " Slurm Job ID   : ${SLURM_JOB_ID:-manual}"
 echo " Array Task ID  : ${SLURM_ARRAY_TASK_ID:-0}"
 echo " CPUs Allocated : ${SLURM_CPUS_PER_TASK:-16}"
-echo " Memory         : ${SLURM_MEM_PER_NODE:-64G}"
+echo " Memory         : ${SLURM_MEM_PER_NODE:-186 GiB (Trillium GPU default)}"
 echo " Date           : $(date)"
 echo "======================================================================"
 
