@@ -533,17 +533,27 @@ def execute_kotekan(
             "Please build Kotekan with CMake or pass --kotekan-bin <path>."
         )
 
-    repo_root = config_path.resolve().parents[2]
-    n2k_lib_dir = repo_root / "build" / "external" / "n2k"
+    bin_path = bin_path.resolve()
+    # Resolve build directory and repository root from binary path
+    build_dir = bin_path.parents[1] if len(bin_path.parents) > 1 else bin_path.parent
+    repo_root = bin_path.parents[2] if len(bin_path.parents) > 2 else build_dir.parent
 
     env = os.environ.copy()
-    ld_paths = [str(n2k_lib_dir)]
+    ld_candidates = [
+        build_dir / "external" / "n2k",
+        build_dir / "lib",
+        build_dir / "kotekan",
+        build_dir,
+    ]
+    ld_paths = [str(p) for p in ld_candidates if p.is_dir()]
     if "LD_LIBRARY_PATH" in env:
         ld_paths.append(env["LD_LIBRARY_PATH"])
     env["LD_LIBRARY_PATH"] = ":".join(ld_paths)
 
     cmd = [str(bin_path), "-c", str(config_path)]
     print(f"\n>>> Executing Kotekan: {' '.join(cmd)}")
+    print(f"  * Working directory : {repo_root}")
+    print(f"  * LD_LIBRARY_PATH   : {env['LD_LIBRARY_PATH']}")
 
     t0 = time.perf_counter()
     log_file = None
@@ -551,11 +561,13 @@ def execute_kotekan(
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "w", encoding="utf-8")
 
+    rc = -1
     try:
         proc = subprocess.Popen(
             cmd,
             stdout=log_file or subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            cwd=str(repo_root),
             env=env,
             text=True,
             bufsize=1,
@@ -573,4 +585,17 @@ def execute_kotekan(
 
     elapsed = time.perf_counter() - t0
     print(f">>> Kotekan finished in {elapsed:.2f} s with return code {rc}")
+
+    if rc != 0:
+        print(f"\n[ERROR] Kotekan execution failed with return code {rc}")
+        if log_path and log_path.is_file():
+            try:
+                log_text = log_path.read_text(encoding="utf-8", errors="replace")
+                print(f"[KOTEKAN CORRELATOR LOG DUMP from {log_path}]:")
+                print("-" * 75)
+                print(log_text.strip() or "(Log file was empty)")
+                print("-" * 75)
+            except Exception as e:
+                print(f"[Warning] Could not read log file {log_path}: {e}")
+
     return rc

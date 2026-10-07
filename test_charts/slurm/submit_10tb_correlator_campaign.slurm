@@ -15,23 +15,23 @@
 # Executes a scientifically diverse, 10-TB campaign of realistic baseband
 # generation and Kotekan GPU Tensor Core Correlator (cudaCorrelatorAstron) replay.
 #
-# Simulation Matrix (16 Diverse Runs = 9.995 TB):
-#   - Task 0:  S1_transit_vela          (396.4 GB | 64 ant, 336 ch | Vela SNR meridian transit)
-#   - Task 1:  S1_transit_crab          (396.4 GB | 64 ant, 336 ch | Crab Nebula/pulsar transit)
-#   - Task 2:  S1_transit_sgra          (396.4 GB | 64 ant, 336 ch | Sgr A* / Galactic Center transit)
-#   - Task 3:  S1_transit_cena          (396.4 GB | 64 ant, 336 ch | Centaurus A radio galaxy transit)
-#   - Task 4:  S1_transit_puppisa       (396.4 GB | 64 ant, 336 ch | Puppis A supernova remnant transit)
-#   - Task 5:  S2_frb_low_dm            (495.5 GB | 64 ant, 336 ch | Low-DM High-SNR FRB)
+# Simulation Matrix (16 Diverse Runs = 10.041 TB, 672 Channels Full-Band):
+#   - Task 0:  S1_transit_vela          (396.4 GB | 64 ant, 672 ch | Vela SNR meridian transit)
+#   - Task 1:  S1_transit_crab          (396.4 GB | 64 ant, 672 ch | Crab Nebula/pulsar transit)
+#   - Task 2:  S1_transit_sgra          (396.4 GB | 64 ant, 672 ch | Sgr A* / Galactic Center transit)
+#   - Task 3:  S1_transit_cena          (396.4 GB | 64 ant, 672 ch | Centaurus A radio galaxy transit)
+#   - Task 4:  S1_transit_puppisa       (396.4 GB | 64 ant, 672 ch | Puppis A supernova remnant transit)
+#   - Task 5:  S2_frb_low_dm            (528.5 GB | 64 ant, 672 ch | Low-DM High-SNR FRB)
 #   - Task 6:  S2_frb_high_dm_wide      (660.6 GB | 64 ant, 672 ch | High-DM 672-channel full band FRB)
-#   - Task 7:  S2_frb_extreme_256ant    (528.5 GB | 256 ant, 336 ch| Extreme FRB across 256 antennas)
-#   - Task 8:  S3_pulsar_millisecond    (495.5 GB | 64 ant, 336 ch | Fast ms pulsar train PSR J0437)
-#   - Task 9:  S3_pulsar_canonical      (495.5 GB | 64 ant, 336 ch | Canonical 89ms slow pulsar train)
-#   - Task 10: S4_rfi_multiline         (495.5 GB | 64 ant, 336 ch | Multi-line terrestrial stationary RFI)
-#   - Task 11: S4_rfi_leo_sweep         (495.5 GB | 64 ant, 336 ch | Rapid non-celestial LEO satellite sweep)
+#   - Task 7:  S2_frb_extreme_256ant    (528.5 GB | 256 ant, 672 ch| Extreme FRB across 256 antennas)
+#   - Task 8:  S3_pulsar_millisecond    (528.5 GB | 64 ant, 672 ch | Fast ms pulsar train PSR J0437)
+#   - Task 9:  S3_pulsar_canonical      (528.5 GB | 64 ant, 672 ch | Canonical 89ms slow pulsar train)
+#   - Task 10: S4_rfi_multiline         (528.5 GB | 64 ant, 672 ch | Multi-line terrestrial stationary RFI)
+#   - Task 11: S4_rfi_leo_sweep         (528.5 GB | 64 ant, 672 ch | Rapid non-celestial LEO satellite sweep)
 #   - Task 12: S5_complex_night_64ant   (1057.0 GB | 64 ant, 672 ch| Deep night 2 FRBs + Pulsar + RFI)
 #   - Task 13: S5_complex_day_sun_64ant (1057.0 GB | 64 ant, 672 ch| Active Sun Day FRB + LEO + Solar burst)
-#   - Task 14: S5_complex_256ant_336ch  (1123.0 GB | 256 ant, 336 ch| Full 256-ant array complex scene)
-#   - Task 15: S5_complex_256ant_672ch  (1109.8 GB | 256 ant, 672 ch| Full 256-ant 672-ch dual shard benchmark)
+#   - Task 14: S5_complex_256ant_wide   (1057.0 GB | 256 ant, 672 ch| Full 256-ant array complex scene)
+#   - Task 15: S5_complex_256ant_benchmark (1057.0 GB | 256 ant, 672 ch| Full 256-ant 672-ch dual shard benchmark)
 #
 # Usage:
 #   # 1. Submit full 10-TB campaign as a 16-task Slurm Job Array (parallel across nodes):
@@ -120,7 +120,20 @@ if [ "${BUILD_KOTEKAN}" = "1" ] || [ ! -x "${KOTEKAN_BIN}" ]; then
     cd "${REPO_ROOT}"
 fi
 
-# 5. Prepare Campaign Execution Arguments
+# Export LD_LIBRARY_PATH for n2k, kotekan, and external shared libraries
+BUILD_DIR="${REPO_ROOT}/build"
+export LD_LIBRARY_PATH="${BUILD_DIR}/external/n2k:${BUILD_DIR}/lib:${BUILD_DIR}/kotekan:${LD_LIBRARY_PATH:-}"
+
+# Pre-flight check: smoke test Kotekan binary execution and dynamic linker
+echo ">>> Pre-flight check: testing Kotekan binary..."
+if ! "${KOTEKAN_BIN}" --version >/dev/null 2>&1 && ! "${KOTEKAN_BIN}" --help >/dev/null 2>&1; then
+    echo "[WARNING] Kotekan binary smoke test failed. Inspecting dependencies with ldd:"
+    ldd "${KOTEKAN_BIN}" 2>&1 | head -n 35 || true
+    echo ">>> Direct execution attempt output:"
+    "${KOTEKAN_BIN}" --version || true
+else
+    echo ">>> Kotekan binary smoke test passed successfully."
+fi
 WORKERS="${SLURM_CPUS_PER_TASK:-16}"
 DRY_RUN_FLAG=""
 if [ "${DRY_RUN:-0}" = "1" ]; then
