@@ -553,7 +553,8 @@ def execute_kotekan(
 
     if dry_run or bin_path is None or not bin_path.is_file():
         if dry_run:
-            print(f"[DRY-RUN] Would execute: {bin_path or 'kotekan'} -c {config_path}")
+            bind_addr = os.environ.get("KOTEKAN_BIND_ADDRESS", "127.0.0.1:0")
+            print(f"[DRY-RUN] Would execute: {bin_path or 'kotekan'} -c {config_path} -b {bind_addr}")
             return 0
         raise FileNotFoundError(
             f"Kotekan binary not found at '{bin_path}'. "
@@ -577,7 +578,8 @@ def execute_kotekan(
         ld_paths.append(env["LD_LIBRARY_PATH"])
     env["LD_LIBRARY_PATH"] = ":".join(ld_paths)
 
-    cmd = [str(bin_path), "-c", str(config_path)]
+    bind_addr = os.environ.get("KOTEKAN_BIND_ADDRESS", "127.0.0.1:0")
+    cmd = [str(bin_path), "-c", str(config_path), "-b", bind_addr]
     print(f"\n>>> Executing Kotekan: {' '.join(cmd)}")
     print(f"  * Working directory : {repo_root}")
     print(f"  * LD_LIBRARY_PATH   : {env['LD_LIBRARY_PATH']}")
