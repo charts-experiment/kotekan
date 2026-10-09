@@ -8,6 +8,8 @@ using Mustache
 using Random
 using StaticArrays
 
+include("upchan_taps.jl")
+
 const Memory = IndexSpaces.Memory
 
 idiv(i::Integer, j::Integer) = (@assert iszero(i % j); i ÷ j)
@@ -113,6 +115,11 @@ else
 end
 
 const Ttilde = 4 * 256
+
+# The beamforming weights are recalculated periodically, and handed to the GPU through a ring
+# buffer holding this many of them (the Kotekan buffer depth). How many FPGA samples one set of
+# weights covers is a run-time setting, `frb1_phase_lifetime_in_samples`.
+const TW = 4
 
 # I = 1/(2 · P · M·N · Tds) · Σ_t Σ_pol |Ẽ|²
 # I is the mean beam power per polarisation per real component, in units of the
@@ -2490,6 +2497,9 @@ function fix_ptx_kernel()
                 Dict("type" => "int", "name" => "cuda_number_of_polarizations", "value" => "$P"),
                 Dict("type" => "int", "name" => "cuda_number_of_timesamples", "value" => "$Tbar"),
                 Dict("type" => "int", "name" => "cuda_granularity_number_of_timesamples", "value" => "$Touter"),
+                # Number of PFB taps of the upchannelizers. This defines the time offset of the
+                # upchannelized voltages (see `frb_template.cxx`).
+                Dict("type" => "int", "name" => "cuda_upchan_number_of_taps", "value" => "$upchan_number_of_taps"),
             ],
             "minthreads" => num_threads * num_warps,
             "num_blocks_per_sm" => num_blocks_per_sm,
@@ -2580,17 +2590,26 @@ function fix_ptx_kernel()
                     "name" => "W",
                     "kotekan_name" => "frb_phase_name",
                     "type" => "float16",
+                    # The slowest axis is the ring buffer direction. Its `dimscaling` is a
+                    # placeholder; it is overwritten at run time with the configured
+                    # `frb1_phase_lifetime_in_samples`. The kernel itself still sees a single set
+                    # of weights: the wrapper passes it the element covering the voltage samples
+                    # being processed.
                     "axes" => [
                         Dict("label" => "C", "length" => C, "dimscaling" => 1),
                         Dict("label" => "dishM", "length" => M, "dimscaling" => 1),
                         Dict("label" => "dishN", "length" => N, "dimscaling" => 1),
                         Dict("label" => "P", "length" => P, "dimscaling" => 1),
                         Dict("label" => "Fbar", "length" => Fbar_W, "dimscaling" => 1),
+                        Dict("label" => "TW", "length" => TW, "dimscaling" => 1),
                     ],
                     "isoutput" => false,
                     "hasbuffer" => true,
+                    "hasringbuffer" => true,
                     "isscalar" => false,
-                    "do_once" => true,
+                    "do_once" => false,
+                    "haslifetime" => true,
+                    "lifetime_config" => "frb1_phase_lifetime_in_samples",
                 ),
                 Dict(
                     "name" => "Ebar",

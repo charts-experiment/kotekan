@@ -275,20 +275,35 @@ public:
         return buffer_name_device;
     }
 
+    /// The array layout as a descriptor, for the pipeline graph.
+    std::shared_ptr<const kotekan::FrameDesc> frame_desc() const {
+        return kotekan::GenericNDArray::describe(ndarray.get_value_datatype(),
+                                                 ndarray.get_quantity_name(), ndarray.get_extents(),
+                                                 ndarray.get_dimnames(), ndarray.get_dimscalings());
+    }
+
     // TODO: Distinguish between input and output buffers, then register automatically
-    void register_consumer() {
+    void register_consumer() const {
         if (get_instance_num() == 0) {
             ringbuffer->register_consumer(cuda_command.get_unique_name());
-            cuda_command.register_gpu_buffer_user(
-                {.name = buffer_name, .is_array = true, .does_read = true, .does_write = false});
+            cuda_command.register_gpu_buffer_user({.name = buffer_name_device,
+                                                   .is_array = false,
+                                                   .does_read = true,
+                                                   .does_write = false,
+                                                   .frame_desc = frame_desc(),
+                                                   .signal_buffer = signal_buffer_name});
         }
     }
 
-    void register_producer() {
+    void register_producer() const {
         if (get_instance_num() == 0) {
             ringbuffer->register_producer(cuda_command.get_unique_name());
-            cuda_command.register_gpu_buffer_user(
-                {.name = buffer_name, .is_array = true, .does_read = false, .does_write = true});
+            cuda_command.register_gpu_buffer_user({.name = buffer_name_device,
+                                                   .is_array = false,
+                                                   .does_read = false,
+                                                   .does_write = true,
+                                                   .frame_desc = frame_desc(),
+                                                   .signal_buffer = signal_buffer_name});
         }
     }
 
@@ -431,6 +446,39 @@ public:
         RINGBUF_CHECK(read_valid.size() > 0);
         RINGBUF_CHECK(read_claimed.size() >= 0);
 
+        return 0;
+    }
+
+    // Skip the first `skipped_elements` elements of the ringbuffer, once, before the first
+    // read: claim and release them without reading them. This does nothing once the read head
+    // has moved, so it can be called before every read. (Only the thread that claims from this
+    // ringbuffer moves the read head, so it is 0 exactly until the first claim.)
+    //
+    // Returns 0 if all is good, -1 if we should terminate.
+    int skip_at_start(const std::ptrdiff_t skipped_elements) {
+        RINGBUF_CHECK(skipped_elements >= 0);
+        if (skipped_elements == 0)
+            return 0;
+        const std::ptrdiff_t read_head = peek_read_head();
+        if (read_head < 0)
+            return -1;
+        if (read_head > 0)
+            return 0;
+        // Our callers read at most a quarter of the ringbuffer at a time
+        const std::ptrdiff_t ringbuf_size = ndarray.extent(0);
+        if (!(skipped_elements <= ringbuf_size / 4))
+            FATAL_ERROR("kernel {:s}, buffer {:s}: need to skip {:d} elements, but the "
+                        "ringbuffer holds only {:d}",
+                        cuda_command.get_unique_name(), buffer_name, skipped_elements,
+                        ringbuf_size);
+        const int errcode = wait_and_claim_readable([&](const std::ptrdiff_t available) {
+            return available >= skipped_elements
+                       ? read_descriptor_t{.claimed = skipped_elements, .read = skipped_elements}
+                       : read_descriptor_t{.claimed = 0, .read = 0};
+        });
+        if (errcode < 0)
+            return errcode;
+        finish_read();
         return 0;
     }
 
@@ -597,11 +645,16 @@ public:
     // change over time. This function fills that object in place, so the producer must call it
     // exactly once, on its first frame, before the first `finish_write` publishes data. From then
     // on consumers -- which may run in other threads -- read the object without synchronization,
-    // and rewriting it, even with unchanged values, would race with them.
+    // and rewriting it, even with unchanged values, would race with them. A second call is
+    // therefore a fatal error.
     //
     // A cudaCommand has `buffer_depth` instances sharing the ring buffer, and frame 0 is always
     // handled by instance 0, so guard the call with `instance_num == 0` and a flag.
     void set_metadata(const std::shared_ptr<const chordMetadata>& other_metadata) {
+        if (ringbuffer->get_metadata(0))
+            FATAL_ERROR("ring buffer {:s} already has a metadata object; set it only once, on the "
+                        "first frame",
+                        buffer_name);
         // const std::shared_ptr<metadataObject> mc =
         //     cuda_command.get_device().create_gpu_memory_array_metadata(buffer_name_device, 0,
         //                                                                other_metadata->parent_pool);
