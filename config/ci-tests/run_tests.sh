@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-# Runs Kotekan tests from a directory of YAML configs with timeout protection.
+# Runs Kotekan tests from directories of configs and/or individual configs, with
+# timeout protection. Directories are searched for .yaml, .yml and .j2 configs.
 # Tracks pass/fail/timeout status and provides a summary at the end.
-# Usage: ./run_tests.sh <kotekan_binary> <timeout_duration> <test_config_dir>
+# Usage: ./run_tests.sh <kotekan_binary> <timeout_duration> <test_config_dir|test_config>...
 
 # Check if required arguments are provided
 if [ $# -lt 3 ]; then
-  echo "Usage: $0 <kotekan_binary> <timeout_duration> <test_config_dir>"
+  echo "Usage: $0 <kotekan_binary> <timeout_duration> <test_config_dir|test_config>..."
   echo "Example: $0 ./build-2404/kotekan/kotekan 2m config/ci-tests"
+  echo "Example: $0 ./build-2404/kotekan/kotekan 2m config/ci-tests/cpu_batch/foo.yaml"
   exit 1
 fi
 
 KOTEKAN_BINARY="$1"
 TIMEOUT_DURATION="$2"
-TEST_CONFIG_DIR="$3"
+shift 2
 
 format_duration() {
   local total_seconds=$1
@@ -35,9 +37,23 @@ if [ ! -f "$KOTEKAN_BINARY" ]; then
   exit 1
 fi
 
-# Verify test config directory exists
-if [ ! -d "$TEST_CONFIG_DIR" ]; then
-  echo "Error: Test config directory not found at $TEST_CONFIG_DIR"
+# Collect the configs to run: every config in a directory argument, or the file itself
+CONFIG_FILES=()
+for target in "$@"; do
+  if [ -d "$target" ]; then
+    for config_file in "$target"/*.yaml "$target"/*.yml "$target"/*.j2; do
+      [ -f "$config_file" ] && CONFIG_FILES+=("$config_file")
+    done
+  elif [ -f "$target" ]; then
+    CONFIG_FILES+=("$target")
+  else
+    echo "Error: Test config not found at $target"
+    exit 1
+  fi
+done
+
+if [ ${#CONFIG_FILES[@]} -eq 0 ]; then
+  echo "Error: No .yaml, .yml or .j2 configs found in $*"
   exit 1
 fi
 
@@ -48,14 +64,18 @@ FAILED_TESTS=()
 FAILED_TEST_EXIT_CODES=()
 FAILED_TEST_TIMES=()
 TIMED_OUT_TESTS=()
+TIMED_OUT_TEST_TIMES=()
+TIMED_OUT_TEST_EXIT_CODES=()
 
 # Run tests
-for config_file in "$TEST_CONFIG_DIR"/*.yaml; do
+for config_file in "${CONFIG_FILES[@]}"; do
   echo "Running test with config: $config_file"
   
-  # Run the test with timeout
+  # Run the test with timeout. kotekan only records a SIGTERM and shuts down on its own, so a
+  # process wedged in its own teardown never exits: -k sends SIGKILL after a grace period, and
+  # the exit status is then 137, counted as a failure below rather than hanging the job.
   start_time=$(date +%s)
-  timeout "$TIMEOUT_DURATION" "$KOTEKAN_BINARY" --config "$config_file"
+  timeout -k 30s "$TIMEOUT_DURATION" "$KOTEKAN_BINARY" --config "$config_file"
   EXIT_CODE=$?
   end_time=$(date +%s)
   elapsed=$((end_time - start_time))
@@ -63,6 +83,8 @@ for config_file in "$TEST_CONFIG_DIR"/*.yaml; do
   if [ $EXIT_CODE -eq 124 ]; then
     echo "Test timed out for config: $config_file"
     TIMED_OUT_TESTS+=("$config_file")
+    TIMED_OUT_TEST_EXIT_CODES+=("$EXIT_CODE")
+    TIMED_OUT_TEST_TIMES+=("$elapsed")
   elif [ $EXIT_CODE -ne 0 ]; then
     echo "Test failed for config: $config_file with exit code $EXIT_CODE"
     FAILED_TESTS+=("$config_file")
@@ -106,8 +128,9 @@ fi
 
 if [ ${#TIMED_OUT_TESTS[@]} -gt 0 ]; then
   echo "Timed out tests:"
-  for test in "${TIMED_OUT_TESTS[@]}"; do
-    echo "  - $test"
+  for i in "${!TIMED_OUT_TESTS[@]}"; do
+    duration=$(format_duration "${TIMED_OUT_TEST_TIMES[$i]}")
+    echo "  - ${TIMED_OUT_TESTS[$i]} (exit code: ${TIMED_OUT_TEST_EXIT_CODES[$i]}, duration: $duration)"
   done
   echo ""
 fi

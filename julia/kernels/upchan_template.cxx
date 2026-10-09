@@ -13,6 +13,7 @@
 #include "chordMetadata.hpp"
 #include "cudaCommand.hpp"
 #include "cudaDeviceInterface.hpp"
+#include "cudaUtils.hpp"
 #include "div.hpp"
 
 #include <algorithm>
@@ -21,13 +22,15 @@
 #include <cstring>
 #include <fmt.hpp>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 using kotekan::bufferContainer;
 using kotekan::Config;
-using kotekan::round_down, kotekan::div_noremainder, kotekan::div, kotekan::mod;
+using kotekan::round_down, kotekan::round_up, kotekan::div_noremainder, kotekan::div,
+    kotekan::mod;
 
 namespace {
 template<typename T, std::size_t D>
@@ -106,6 +109,15 @@ private:
     // How many frequencies we will process
     const int Fmin, Fmax;
 
+    // The largest upchannelization factor used in this run. All upchannelizers of a run label
+    // their output with the same time offset `T_offset = (M-1) * max_upchannelization_factor / 2`
+    // (in input samples), so that their outputs are aligned in time. See `wait_on_precondition`.
+    const int max_upchannelization_factor;
+    // Output time offset relative to the input, in input samples
+    const std::ptrdiff_t T_offset;
+    // Number of input samples we skip at startup
+    const std::ptrdiff_t T_skip;
+
     {{#kernel_arguments}}
         // {{{name}}}: {{{kotekan_name}}}
         static constexpr const char *{{{name}}}_quantity = "{{{name}}}";
@@ -127,6 +139,11 @@ private:
                     {{{length}}},
                 {{/axes}}
             };
+            static constexpr std::array<std::ptrdiff_t, {{{name}}}_rank> {{{name}}}_dimscalings = {
+                {{#axes}}
+                    {{{dimscaling}}},
+                {{/axes}}
+            };
             static constexpr auto {{{name}}}_calc_stride = [](int dim) {
                 std::ptrdiff_t str = 1;
                 for (int d = 0; d < dim; ++d)
@@ -141,7 +158,6 @@ private:
             };
             static constexpr std::ptrdiff_t {{{name}}}_length = {{{name}}}_strides[{{{name}}}_rank];
             static constexpr std::ptrdiff_t {{{name}}}_length_in_bytes = type_total_bytes({{{name}}}_type) * {{{name}}}_length;
-            static_assert({{{name}}}_length_in_bytes <= std::ptrdiff_t(std::numeric_limits<int>::max()) + 1);
         {{/isscalar}}
         //
     {{/kernel_arguments}}
@@ -173,6 +189,9 @@ private:
         {{/isscalar}}
     {{/kernel_arguments}}
 
+    // Set once, on the first frame; see `NDArrayRingBuffer::set_metadata`
+    bool did_set_metadata;
+
     // To avoid trailing comma below
     int dummy;
 };
@@ -188,6 +207,9 @@ cuda{{{kernel_name}}}::cuda{{{kernel_name}}}(Config& config,
         "{{{kernel_name}}}", "{{{kernel_name}}}.ptx"),
     Fmin(config.get<int>(unique_name, "Fmin")),
     Fmax(config.get<int>(unique_name, "Fmax")),
+    max_upchannelization_factor(config.get<int>(unique_name, "max_upchannelization_factor")),
+    T_offset((cuda_number_of_taps - 1) * std::ptrdiff_t(max_upchannelization_factor) / 2),
+    T_skip(T_offset - (cuda_number_of_taps - 1) * std::ptrdiff_t(cuda_upchannelization_factor) / 2),
 
     poison_buffers(config.get_default<bool>(unique_name, "poison_buffers", false)),
 
@@ -207,37 +229,61 @@ cuda{{{kernel_name}}}::cuda{{{kernel_name}}}(Config& config,
             {{#hasbuffer}}
                 {{#hasringbuffer}}
                     {{{name}}}_buffer(
-                        {{{name}}}_name, {{{name}}}_quantity, reverse({{{name}}}_lengths), reverse({{{name}}}_labels), *this),
+                        {{{name}}}_name,
+                        {{{name}}}_quantity,
+                        reverse({{{name}}}_lengths),
+                        reverse({{{name}}}_labels),
+                        reverse({{{name}}}_dimscalings),
+                        *this
+                    ),
                 {{/hasringbuffer}}
                 {{^hasringbuffer}}
                     {{{name}}}_buffer(
-                        {{{name}}}_name, {{{name}}}_quantity, reverse({{{name}}}_lengths), reverse({{{name}}}_labels), *this
+                        {{{name}}}_name,
+                        {{{name}}}_quantity,
+                        reverse({{{name}}}_lengths),
+                        reverse({{{name}}}_labels),
+                        reverse({{{name}}}_dimscalings),
+                        *this
                         {{#do_once}}
                             , buffer_type_t::do_once
                         {{/do_once}}
-                        ),
+                    ),
                 {{/hasringbuffer}}
             {{/hasbuffer}}
             {{^hasbuffer}}
                 {{{name}}}_buffer(
-                    {{{name}}}_name, {{{name}}}_quantity, reverse({{{name}}}_lengths), reverse({{{name}}}_labels), *this),
+                    {{{name}}}_name,
+                    {{{name}}}_quantity,
+                    reverse({{{name}}}_lengths),
+                    reverse({{{name}}}_labels),
+                    reverse({{{name}}}_dimscalings),
+                    *this
+                ),
                 host_{{{name}}}_buffer({{{name}}}_length),
             {{/hasbuffer}}
         {{/isscalar}}
     {{/kernel_arguments}}
 
+    did_set_metadata(false),
     dummy()                      // avoid trailing comma
 {
+    if (!(max_upchannelization_factor >= cuda_upchannelization_factor
+          && (cuda_number_of_taps - 1) * max_upchannelization_factor % 2 == 0))
+        FATAL_ERROR("Kernel {{{kernel_name}}} has upchannelization factor {:d} and {:d} taps; "
+                    "max_upchannelization_factor={:d} must not be smaller, and "
+                    "(taps-1)*max_upchannelization_factor must be even",
+                    int(cuda_upchannelization_factor), int(cuda_number_of_taps),
+                    max_upchannelization_factor);
+    assert(T_skip >= 0);
+
     // Register host memory
     {{#kernel_arguments}}
         {{^isscalar}}
             {{^hasbuffer}}
-                {
-                    const cudaError_t ierr = cudaHostRegister(host_{{{name}}}_buffer.data(),
-                                                              host_{{{name}}}_buffer.size() * sizeof *host_{{{name}}}_buffer.data(),
-                                                              0);
-                    assert(ierr == cudaSuccess);
-                }
+                CHECK_CUDA_ERROR(cudaHostRegister(host_{{{name}}}_buffer.data(),
+                                                  host_{{{name}}}_buffer.size() * sizeof *host_{{{name}}}_buffer.data(),
+                                                  0));
             {{/hasbuffer}}
         {{/isscalar}}
     {{/kernel_arguments}}
@@ -260,10 +306,12 @@ cuda{{{kernel_name}}}::cuda{{{kernel_name}}}(Config& config,
 
     set_command_type(gpuCommandType::KERNEL);
 
-    // Only one of the instances of this pipeline stage needs to build the kernel
-    if (instance_num == 0) {
+    // Build the PTX once per device: the kernels live in this device's `runtime_kernels`, shared
+    // by the `buffer_depth` instances of this command (building twice is fatal), while a stage on
+    // another GPU has its own device. (A static flag would be shared by the stages of all GPUs.)
+    if (!device.runtime_kernels.count("{{{kernel_name}}}_" + std::string(kernel_symbol))) {
         const std::vector<std::string> opts = {
-            "--gpu-name=sm_86",
+            "--gpu-name={{{cuda_arch}}}",
             "--verbose",
         };
         device.build_ptx("lib/cuda/generated/{{{kernel_name}}}.ptx", {kernel_symbol}, opts, "{{{kernel_name}}}_");
@@ -278,8 +326,7 @@ std::int64_t cuda{{{kernel_name}}}::num_consumed_elements(std::int64_t num_avail
     return num_processed_elements(num_available_elements) - cuda_algorithm_overlap;
 }
 std::int64_t cuda{{{kernel_name}}}::num_produced_elements(std::int64_t num_available_elements) const {
-    assert(num_consumed_elements(num_available_elements) % cuda_upchannelization_factor == 0);
-    return num_consumed_elements(num_available_elements) / cuda_upchannelization_factor;
+    return div_noremainder(num_consumed_elements(num_available_elements), cuda_upchannelization_factor);
 }
 
 std::int64_t cuda{{{kernel_name}}}::num_processed_elements(std::int64_t num_available_elements) const {
@@ -293,15 +340,31 @@ int cuda{{{kernel_name}}}::wait_on_precondition() {
             return errcode;
     }
 
-    // Wait for data to be available in input ringbuffer
     const std::ptrdiff_t T_ringbuf = E_buffer.get_ndarray().extent(0);
     const std::ptrdiff_t T_read_max = T_ringbuf / 4;
+
+    // Output sample `tbar` is calculated from the `M * U` input samples starting at `U * tbar`.
+    // Timestamps point to the beginning of a sample, so the output sample centred on this
+    // window begins at input sample `U * tbar + (M-1) * U / 2`. To align the outputs of all
+    // upchannelizers of a run we skip `T_skip` input samples once, at startup, so that every
+    // upchannelizer's output begins at input sample `T_offset`, independent of `U`.
+    {
+        const int errcode = E_buffer.skip_at_start(T_skip);
+        if (errcode < 0)
+            return errcode;
+    }
+
+    // Wait for data to be available in input ringbuffer
     std::ptrdiff_t T_read = -1;
     {
         const int errcode = E_buffer.wait_and_claim_readable([&](const std::ptrdiff_t T_available) {
             using std::min;
             T_read = min(T_available, T_read_max);
-            return read_descriptor_t{.claimed = num_consumed_elements(T_read), .read = num_processed_elements(T_read)};
+            // Ensure that we make progress: If we cannot claim any elements then we
+            // must not read any elements either, and instead wait for more data.
+            const std::ptrdiff_t T_claimed = num_consumed_elements(T_read);
+            const std::ptrdiff_t T_processed = T_claimed == 0 ? 0 : num_processed_elements(T_read);
+            return read_descriptor_t{.claimed = T_claimed, .read = T_processed};
         });
         if (errcode < 0)
             return errcode;
@@ -329,7 +392,6 @@ cudaEvent_t cuda{{{kernel_name}}}::execute(cudaPipelineState& /*pipestate*/, con
     {{/kernel_arguments}}
 
     // Since we use a ring buffer we need to set the metadata only once
-    static bool did_set_metadata = false;
     if (instance_num == 0 && !did_set_metadata) {
         did_set_metadata = true;
 
@@ -348,9 +410,13 @@ cudaEvent_t cuda{{{kernel_name}}}::execute(cudaPipelineState& /*pipestate*/, con
         auto Ebar_meta = Ebar_buffer.get_metadata();
 
         const auto E_nfreq = E_meta->get_nfreq();
+        // `Fmin` and `Fmax` come from the config; they select the coarse frequencies this
+        // kernel upchannelizes and must lie inside the input buffer.
+        if (!(0 <= Fmin && Fmin <= Fmax && Fmax <= E_nfreq))
+            FATAL_ERROR("Invalid frequency span [{:d},{:d}) for kernel {{{kernel_name}}}: input "
+                        "buffer E holds {:d} frequencies",
+                        Fmin, Fmax, E_nfreq);
         const auto Ebar_nfreq = cuda_upchannelization_factor * (Fmax - Fmin);
-        assert(Ebar_nfreq >= 0);
-        assert(Ebar_nfreq <= cuda_upchannelization_factor * E_nfreq);
 
         const auto E_freq_upchan_factor = E_meta->get_freq_upchan_factor();
         std::vector<int> Ebar_freq_upchan_factor(Ebar_nfreq);
@@ -384,19 +450,40 @@ cudaEvent_t cuda{{{kernel_name}}}::execute(cudaPipelineState& /*pipestate*/, con
 
         const auto G_meta = G_buffer.get_metadata();
         const auto G_nfreq = G_meta->get_nfreq();
-        assert(G_nfreq == Ebar_nfreq);
+        // Mismatched gains would scale each frequency by another frequency's gain.
+        if (G_nfreq != Ebar_nfreq)
+            FATAL_ERROR("Gain buffer G holds {:d} frequencies, but kernel {{{kernel_name}}} "
+                        "produces {:d}",
+                        G_nfreq, Ebar_nfreq);
         const auto G_coarse_freq = G_meta->get_coarse_freq();
         for (int freq = 0; freq < Ebar_nfreq; ++freq)
-            assert(Ebar_coarse_freq.at(freq) == G_coarse_freq.at(freq));
+            if (Ebar_coarse_freq.at(freq) != G_coarse_freq.at(freq))
+                FATAL_ERROR("Gain buffer G is for coarse frequency {:d} at index {:d}, but kernel "
+                            "{{{kernel_name}}} produces coarse frequency {:d} there",
+                            G_coarse_freq.at(freq), freq, Ebar_coarse_freq.at(freq));
 
-        assert(E_meta->dim[E_rank - 1 - E_index_F] == E_nfreq);
-        assert(G_meta->dim[G_rank - 1 - G_index_Fbar] >= G_nfreq);
-        assert(Ebar_meta->dim[Ebar_rank - 1 - Ebar_index_Fbar] >= Ebar_nfreq);
+        // The buffers must be large enough for the frequencies we are about to read and write.
+        if (E_meta->dim[E_rank - 1 - E_index_F] != E_nfreq)
+            FATAL_ERROR("Input buffer E reports {:d} frequencies, but its frequency dimension has "
+                        "extent {:d}",
+                        E_nfreq, E_meta->dim[E_rank - 1 - E_index_F]);
+        if (G_meta->dim[G_rank - 1 - G_index_Fbar] < G_nfreq)
+            FATAL_ERROR("Gain buffer G holds {:d} frequencies, but its frequency dimension has "
+                        "extent {:d}",
+                        G_nfreq, G_meta->dim[G_rank - 1 - G_index_Fbar]);
+        if (Ebar_meta->dim[Ebar_rank - 1 - Ebar_index_Fbar] < Ebar_nfreq)
+            FATAL_ERROR("Kernel {{{kernel_name}}} produces {:d} frequencies, but the frequency "
+                        "dimension of its output buffer Ebar has extent {:d}",
+                        Ebar_nfreq, Ebar_meta->dim[Ebar_rank - 1 - Ebar_index_Fbar]);
 
-        // Since we use a ring buffer we do not need to update `meta->fpga_seq_num`
+        // Output sample `tbar` begins at input sample `T_offset + U * tbar` (see
+        // `wait_on_precondition`). We set the metadata only once since we use a ring buffer.
+        if (E_meta->has_fpga_seq_num())
+            Ebar_meta->set_fpga_seq_num(E_meta->get_fpga_seq_num() + T_offset * E_time_downsampling_fpga);
     } // if !did_set_metadata
 
-    assert(Ebar_buffer.has_metadata());
+    if (!Ebar_buffer.has_metadata())
+        FATAL_ERROR("Output buffer Ebar has no metadata; kernel {{{kernel_name}}} cannot run");
 
     const char* exc_arg = "exception";
     {{#kernel_arguments}}
@@ -443,8 +530,13 @@ cudaEvent_t cuda{{{kernel_name}}}::execute(cudaPipelineState& /*pipestate*/, con
     Fmin_arg = Fmin;
     Fmax_arg = Fmax;
     const int blocks = blocks_per_frequency * (Fmax - Fmin);
-    assert(0 <= blocks);
-    assert(blocks <= max_blocks);
+    // `blocks` is both the CUDA grid size and the extent of the block dimension of the `info`
+    // buffer. Launching more than `max_blocks` blocks would make the kernel write its status
+    // words past the end of that device allocation.
+    if (!(0 <= blocks && blocks <= max_blocks))
+        FATAL_ERROR("Kernel {{{kernel_name}}} would launch {:d} blocks, but the `info` buffer "
+                    "holds only {:d} (Fmin={:d}, Fmax={:d}, blocks_per_frequency={:d})",
+                    blocks, int(max_blocks), Fmin, Fmax, int(blocks_per_frequency));
 
     // Copy inputs to device memory
     {{#kernel_arguments}}
@@ -462,7 +554,7 @@ cudaEvent_t cuda{{{kernel_name}}}::execute(cudaPipelineState& /*pipestate*/, con
     {{/kernel_arguments}}
 
     if (poison_buffers) {
-        Ebar_buffer.set_to_poison(0x00, 0, Fmax - Fmin);
+        Ebar_buffer.set_to_poison({{{ebar_poison_byte}}}, 0, cuda_upchannelization_factor * (Fmax - Fmin));
         info_buffer.set_to_poison(0xff);
 
         // Initialize host-side buffer arrays
@@ -544,7 +636,7 @@ cudaEvent_t cuda{{{kernel_name}}}::execute(cudaPipelineState& /*pipestate*/, con
             }
         }
 
-        Ebar_buffer.check_for_poison(0x00, 0, Fmax - Fmin);
+        Ebar_buffer.check_for_poison({{{ebar_poison_byte}}}, 0, cuda_upchannelization_factor * (Fmax - Fmin));
     } // if (poison_buffers)
 
     return record_end_event();

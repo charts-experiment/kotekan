@@ -2,16 +2,15 @@
 
 #include "chordMetadata.hpp"  // for chordMetadata
 #include "cudaUtils.hpp"      // for CHECK_CUDA_ERROR
-#include "cuda_runtime_api.h" // for cudaHostGetFlags, cudaMemcpyAsync, cudaHostRegister, cudaH...
+#include "cuda_runtime_api.h" // for cudaMemcpyAsync, cudaHostGetFlags, cudaHostUnregister
 #include "gpuCommand.hpp"     // for gpuCommandType
 #include "kotekanLogging.hpp" // for DEBUG
 
 #include "fmt.hpp" // for compile_string_to_view
 
-#include <algorithm>   // for max
 #include <assert.h>    // for assert
-#include <cstddef>     // for size_t, ptrdiff_t
-#include <memory>      // for allocator, shared_ptr, __shared_ptr_access, dynamic_pointe...
+#include <cstddef>     // for ptrdiff_t
+#include <memory>      // for shared_ptr, __shared_ptr_access, dynamic_pointer_cast, mak...
 #include <optional>    // for optional
 #include <stdexcept>   // for runtime_error
 #include <stdint.h>    // for uint8_t
@@ -61,17 +60,16 @@ cudaCopyToRingbuffer::cudaCopyToRingbuffer(Config& config, const std::string& un
 
     set_command_type(gpuCommandType::COPY_IN);
 
-    gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_output, false, false, true));
+    register_gpu_buffer_user({.name = _gpu_mem_output,
+                              .is_array = false,
+                              .does_read = false,
+                              .does_write = true,
+                              .signal_buffer = signal_buffer->buffer_name});
 }
 
 cudaCopyToRingbuffer::~cudaCopyToRingbuffer() {
-    if (in_buffer && in_buffer->frame_size) {
-        uint flags;
-        // only unregister if it's already been registered
-        if (cudaSuccess == cudaHostGetFlags(&flags, in_buffer->frames[instance_num])) {
-            CHECK_CUDA_ERROR(cudaHostUnregister(in_buffer->frames[instance_num]));
-        }
-    }
+    if (in_buffer)
+        unregister_host_buffer(in_buffer);
 }
 
 int cudaCopyToRingbuffer::wait_on_precondition() {

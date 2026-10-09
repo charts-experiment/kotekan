@@ -55,14 +55,7 @@ FakeN2::FakeN2(Config& config, const std::string& unique_name, bufferContainer& 
     out_buf->register_producer(unique_name);
 
     // Get N2 parameters from the buffer's frame descriptor (set by bufferFactory)
-    auto frame_desc = out_buf->get_frame_description();
-    if (!frame_desc) {
-        FATAL_ERROR("Buffer {:s} does not have a frame descriptor set", out_buf->buffer_name);
-    }
-    auto n2_desc = std::dynamic_pointer_cast<const kotekan::N2FrameDesc>(frame_desc);
-    if (!n2_desc) {
-        FATAL_ERROR("Buffer {:s} does not have an N2FrameDesc", out_buf->buffer_name);
-    }
+    auto n2_desc = out_buf->require_frame_desc<kotekan::N2FrameDesc>();
     num_elements = n2_desc->get_num_elements();
     num_eigenvectors = n2_desc->get_num_ev();
     n2_layout = n2_desc->get_n2_layout();
@@ -96,6 +89,15 @@ FakeN2::FakeN2(Config& config, const std::string& unique_name, bufferContainer& 
 
     // Get end_interrupt option
     end_interrupt = config.get_default<bool>(unique_name, "end_interrupt", false);
+
+    // Elements to report as bad in the frames' flags
+    flagged_inputs = config.get_default<std::vector<size_t>>(unique_name, "flagged_inputs", {});
+    flag_start_frame = config.get_default<int64_t>(unique_name, "flag_start_frame", 0);
+    for (auto i : flagged_inputs) {
+        if (i >= num_elements)
+            FATAL_ERROR("The `flagged_inputs` entry {:d} is out of range for {:d} elements.", i,
+                        num_elements);
+    }
 
     // Validate buffer frame size matches the descriptor (should always match if bufferFactory set
     // it)
@@ -192,6 +194,8 @@ void FakeN2::main_thread() {
             meta->n_valid_fpga_ticks = delta_seq;
             // Set number of rfi ticks (default to 0)
             meta->n_rfi_fpga_ticks = 0;
+            meta->n_rfi_only_fpga_ticks = 0;
+            meta->n_pl_fpga_ticks = 0;
 
             DEBUG("Output frame seq={:d} time_ns={:d}", meta->fpga_start_tick,
                   meta->frame_start_time_ns);
@@ -203,12 +207,12 @@ void FakeN2::main_thread() {
 
             struct EOP bin_start_eop = tel.get_EOP_at_time(tel.to_time(fpga_seq + t * delta_seq));
             meta->bin_start_ERA_deg = bin_start_eop.ERA_deg;
-            meta->bin_start_LAST = -1;
+            meta->bin_start_ERAL_deg = tel.get_ERAL_deg(bin_start_eop);
 
             struct EOP bin_end_eop =
                 tel.get_EOP_at_time(tel.to_time(fpga_seq + t * delta_seq + delta_seq));
             meta->bin_end_ERA_deg = bin_end_eop.ERA_deg;
-            meta->bin_end_LAST = -1;
+            meta->bin_end_ERAL_deg = tel.get_ERAL_deg(bin_end_eop);
 
             DEBUG("Creating N2FrameView.");
             DEBUG("  N2Meta: n_el {}, n_prod {}, n_ev {}", num_elements,
@@ -220,7 +224,7 @@ void FakeN2::main_thread() {
             // Fill out the non-visibility data sections, these can always be
             // overwritten, it just means that the patterns don't have to bother
             // filling them out if they don't care.
-            fill_non_vis(output_frame);
+            fill_non_vis(output_frame, frame_count + (int64_t)t);
 
             // Fill out the frame with the selected pattern
             pattern->fill(output_frame);
@@ -279,7 +283,7 @@ void FakeN2::main_thread() {
 }
 
 
-void FakeN2::fill_non_vis(N2FrameView& frame) {
+void FakeN2::fill_non_vis(N2FrameView& frame, int64_t time_index) {
     // Set ev section
     for (uint32_t i = 0; i < num_eigenvectors; i++) {
         for (uint32_t j = 0; j < num_elements; j++) {
@@ -301,8 +305,13 @@ void FakeN2::fill_non_vis(N2FrameView& frame) {
         }
     }
 
-    // Set flags and gains
+    // Set flags and gains. 1.0 is a good element; the configured elements are
+    // reported bad once the time index reaches flag_start_frame.
     std::fill(frame.flags.begin(), frame.flags.end(), 1.0);
+    if (time_index >= flag_start_frame) {
+        for (auto i : flagged_inputs)
+            frame.flags[i] = 0.0;
+    }
     std::fill(frame.gain.begin(), frame.gain.end(), 1.0);
 }
 
@@ -320,8 +329,8 @@ ReplaceN2::ReplaceN2(Config& config, const std::string& unique_name,
     out_buf->register_producer(unique_name);
 
     // Validate that input and output buffers have compatible N2 frame descriptors
-    auto in_desc = in_buf->get_frame_description();
-    auto out_desc = out_buf->get_frame_description();
+    auto in_desc = in_buf->get_frame_desc();
+    auto out_desc = out_buf->get_frame_desc();
     if (!in_desc || !out_desc) {
         FATAL_ERROR("ReplaceN2: Input and output buffers must have frame descriptors set");
     }

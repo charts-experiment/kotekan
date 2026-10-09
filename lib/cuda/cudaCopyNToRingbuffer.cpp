@@ -10,13 +10,12 @@
 
 #include "fmt.hpp" // for compile_string_to_view, join
 
-#include <algorithm>   // for max
 #include <cassert>     // for assert
-#include <memory>      // for shared_ptr, __shared_ptr_access, allocator, dynamic_pointe...
+#include <memory>      // for shared_ptr, __shared_ptr_access, dynamic_pointer_cast, mak...
 #include <optional>    // for optional
 #include <stdexcept>   // for runtime_error
 #include <stdint.h>    // for int64_t, uint8_t
-#include <sys/types.h> // for size_t, uint
+#include <sys/types.h> // for uint
 #include <tuple>       // for tuple, make_tuple
 #include <vector>      // for vector
 
@@ -59,18 +58,17 @@ cudaCopyNToRingbuffer::cudaCopyNToRingbuffer(Config& config, const std::string& 
         signal_buffer->register_producer(unique_name);
 
     set_command_type(gpuCommandType::COPY_IN);
-    gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_output, false, false, true));
+    register_gpu_buffer_user({.name = _gpu_mem_output,
+                              .is_array = false,
+                              .does_read = false,
+                              .does_write = true,
+                              .signal_buffer = signal_buffer->buffer_name});
 }
 
 cudaCopyNToRingbuffer::~cudaCopyNToRingbuffer() {
     for (auto buf : in_buffers) {
         assert(buf);
-        if (buf->frame_size) {
-            uint flags;
-            if (cudaSuccess == cudaHostGetFlags(&flags, buf->frames[instance_num])) {
-                CHECK_CUDA_ERROR(cudaHostUnregister(buf->frames[instance_num]));
-            }
-        }
+        unregister_host_buffer(buf);
     }
 }
 
@@ -157,13 +155,20 @@ cudaEvent_t cudaCopyNToRingbuffer::execute(cudaPipelineState& /*pipestate*/,
 
         // Set the shape of the array
         assert(meta_in0->dims == 3);
-        assert(meta_in0->dim[0] == 1);     // F
-        assert(meta_in0->dim[1] == 16384); // T
+        assert(meta_in0->get_dimension_name(0) == "F");
+        assert(meta_in0->dim[0] == 1);
+        assert(meta_in0->dim_scaling[0] == 1);
+        assert(meta_in0->get_dimension_name(1) == "T");
+        assert(meta_in0->dim[1] == 16384);
+        assert(meta_in0->dim_scaling[1] == 1);
+        assert(meta_in0->get_dimension_name(2) == "E");
+        // assert(meta_in0->dim[2] == ...);
+        assert(meta_in0->dim_scaling[2] == 1);
         meta_ring->dims = 4;
-        meta_ring->set_array_dimension(0, _gpu_buffer_depth, "Thi16384");
-        meta_ring->set_array_dimension(1, in_buffers.size(), "F");
-        meta_ring->set_array_dimension(2, meta_in0->dim[1], "Tlo16384");
-        meta_ring->set_array_dimension(3, meta_in0->dim[2], "E");
+        meta_ring->set_array_dimension(0, _gpu_buffer_depth, "Thi16384", 16384);
+        meta_ring->set_array_dimension(1, in_buffers.size(), "F", 1);
+        meta_ring->set_array_dimension(2, meta_in0->dim[1], "Tlo16384", 1);
+        meta_ring->set_array_dimension(3, meta_in0->dim[2], "E", 1);
         meta_ring->set_strides_simple();
 
         // Set the data type

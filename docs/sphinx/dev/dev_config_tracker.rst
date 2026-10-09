@@ -4,14 +4,40 @@ ConfigTracker
 Overview
 --------
 ``ConfigTracker`` is a singleton service that records the *startup-time* configuration
-JSONs of all Kotekan instances participating in a pipeline. Each unique
-``(host, port)`` pair has exactly one configuration entry, keyed by a canonical
-hash of the JSON (with any blocks containing ``kotekan_update_endpoint`` pruned).
+JSONs of all Kotekan instances participating in a pipeline. The tracker keeps the
+node's own *local* config separate from configs received from upstream peers:
 
-The tracker exposes two REST endpoints:
+- The local config is identified by its JSON content alone (hash over the JSON,
+  no host:port). This avoids any dependence on which IP this node decides to
+  publish itself under, since a downstream peer may see this node from a
+  different address.
+- Each upstream entry is keyed by the ``(host, port)`` this node observed when
+  it dialed the peer, with the hash baking in that ``(host, port)`` so two
+  distinct peers with identical configs still produce distinct hashes.
+- Blocks containing ``kotekan_update_endpoint`` are pruned before hashing.
 
-- ``GET /config_tracker_configs`` — returns the stored configurations (optionally filtered by ``hash`` query arg).
-- ``GET /config_tracker_hashes`` — returns the map of config-hash → ``host:port``.
+An upstream FPGA controller, when ``/config_tracker/fpga_host_info`` points
+at a sibling config block holding ``host`` and ``port``, is registered as a
+regular upstream entry: a single combined ``{"config": ..., "timing": ...}``
+JSON, keyed by the controller's REST ``(host, port)``. The hostname is
+resolved to a canonical IPv4 string up front so downstream peers
+transitively land on the same key. Any change to either part after the
+initial fetch indicates a controller reset. The startup fetch treats such a
+change as fatal; ``checkFpgaTracking()`` re-reads the controller without
+inserting or exiting, so a poller can decide what a deviation means (see
+:ref:`fpga-monitor`). The
+FPGA snapshot rides along on the same propagation
+path as peer kotekan configs, so an HDF5 writer downstream of the
+FPGA-adjacent node sees it as an ordinary upstream entry.
+
+The tracker exposes four REST endpoints:
+
+- ``GET /config_tracker_local`` — returns this node's local ``ConfigInfo``.
+- ``GET /config_tracker_local_hash`` — returns ``{"hash": "..."}`` for the local config.
+- ``GET /config_tracker_upstream_configs`` — returns the stored upstream configurations
+  (optionally filtered by ``hash`` query arg).
+- ``GET /config_tracker_upstream_hashes`` — returns the map of upstream config-hash →
+  ``{host, port}``.
 
 Why this exists
 ^^^^^^^^^^^^^^^
@@ -19,12 +45,39 @@ Downstream writers can persist the configuration that produced their data.
 Instead of shipping full configs with every frame, the sender only flags changes.
 The receiver then pulls missing configs via REST and caches them locally using the tracker.
 
-Config key
-----------
-The tracker is enabled by default. To disable it globally, set ``config_tracker: false`` in the
-*top-level* of your config (not inside a stage block). Stages that support it (e.g. ``bufferSend``,
-``bufferRecv``) respect this global setting unless explicitly overridden with a stage-local
-``use_config_tracker``.
+Config block
+------------
+The tracker is enabled by default. Its behaviour is configured by an optional top-level
+``config_tracker`` object (NOT a bare bool — that form is no longer accepted)::
+
+  fpga_controller:
+      host: chive.site.chord-observatory.ca
+      port: 54321
+      config_endpoint: /config              # FPGA controller config path
+      timing_endpoint: /get-frame0-time     # FPGA controller timing path
+
+  config_tracker:
+      enabled: true                         # default; set false to disable globally
+      fpga_host_info: /fpga_controller      # optional; if set, fetch FPGA snapshot at startup
+      upstream_fetch_retries: 2             # retries per HTTP request
+      upstream_fetch_timeout_seconds: 10    # per-attempt HTTP timeout
+
+The retry/timeout policy applies to every upstream fetch — the one-shot FPGA
+controller fetch at startup, the per-frame peer fetches triggered by
+``bufferRecv``'s wire flag, and the repeat reads made by ``checkFpgaTracking()``.
+After retries are exhausted, the first two are fatal (no silent skip);
+``checkFpgaTracking()`` reports the failure to its caller instead.
+
+The controller's two endpoint paths live on the controller block itself so the
+Telescope (which reads ``timing_endpoint`` from the same block via
+``gps_host_info`` and uses it as the default for ``gps_endpoint``) and the
+ConfigTracker share one source of truth.
+
+Stages that support the tracker (``bufferSend``, ``bufferRecv``) read their per-stage
+``use_config_tracker`` first; if unset, they fall back to ``/config_tracker/enabled``;
+otherwise they default to ``true``. ``enabled: false`` should be coordinated across the
+pipeline — a peer dialing a disabled node sees 404 on the REST endpoints (logged-and-
+continued, but noisy).
 
 Tracker-combined-hash
 ---------------------
@@ -35,9 +88,11 @@ since the last transmission.
 
 Prometheus metrics
 ------------------
-- ``kotekan_config_tracker_configs_total`` — current number of stored configs.
-- ``kotekan_config_tracker_config_present{host,port,hash}`` — labels identify each stored
+- ``kotekan_config_tracker_configs_total`` — current number of stored configs (local + upstream).
+- ``kotekan_config_tracker_config_present{host,port,hash}`` — labels identify each stored upstream
   ``host:port`` + hash; value is ``1`` while present.
+- ``kotekan_config_tracker_local_config_present{hash}`` — labels identify the local config's hash;
+  value is ``1`` while present.
 - ``kotekan_config_tracker_hash_changes_total`` and
   ``kotekan_config_tracker_last_change_timestamp_seconds`` — change counter and last-change time
   when the combined tracker hash updates or the tracker is reset.
@@ -48,8 +103,8 @@ Operational Flow
 ----------------
 
 1. **Startup registration**
-   The local node registers its config with the tracker as a part of kotekan startup, and 
-   the tracker exposes the REST endpoints.
+   The local node sets its config via ``setLocalConfig`` as part of kotekan startup, and the
+   tracker exposes the REST endpoints.
 
 2. **Sending data**
    A sender (using ``bufferSend``) compares its current tracker-combined-hash to the one last
@@ -58,9 +113,17 @@ Operational Flow
 
 3. **Receiving data**
    Upon seeing ``config_tracker_update = true``, the receiver calls
-   ``getUpstreamConfigs(client_ip, client_port)`` to retrieve any missing configs.
+   ``getUpstreamConfigs(client_ip, client_port)``. The two-step protocol then:
+
+   1. Fetches ``/config_tracker_local`` from the peer, re-keys that ``ConfigInfo`` under
+      the ``(client_ip, client_port)`` actually dialed, and stores it as an upstream entry.
+      The dialed address is the validated identity from this node's perspective, regardless
+      of how the peer self-named.
+   2. Fetches ``/config_tracker_upstream_hashes`` and pulls any missing entries via
+      ``/config_tracker_upstream_configs?hash=...``, validating each against its advertised hash.
+      FPGA controller snapshots are ordinary upstream entries and ride along on this same path.
+
    (See the full `doxygen docs <html/>`_ or code for implementation details.)
-   The receiver blocks further processing until required configs are present locally.
 
 Threading & Safety
 ------------------
@@ -69,14 +132,54 @@ Threading & Safety
 - Hash collisions are unlikely in practice. If a different hash is found at the same endpoint,
   execution aborts to avoid state contamination.
 
+.. _fpga-monitor:
+
+Monitoring the FPGA controller
+------------------------------
+The tracker reads the FPGA controller once, at startup, and hands that snapshot
+to every downstream node. Nothing re-reads it afterwards, so a controller that
+is reprogrammed or resynced mid-acquisition leaves the pipeline describing data
+it no longer produced.
+
+The ``FPGAMonitor`` stage closes that gap. It re-reads the two endpoints the
+tracker registered, at the address the tracker resolved, and compares them
+against the record. It requires ``/config_tracker/fpga_host_info`` to be set on
+the same instance::
+
+  fpga_monitor:
+      kotekan_stage: FPGAMonitor
+      poll_interval_seconds: 5     # default
+      fetch_timeout_seconds: 5     # default; keep below poll_interval_seconds
+      fatal_on_change: true        # default
+      fatal_on_unreachable: false  # default
+      max_consecutive_failures: 3  # default
+
+A deviation from the record is fatal by default: every config the tracker has
+already propagated downstream is wrong from that point on. A controller that
+cannot be read is tolerated instead, escalating from a warning to an error after
+``max_consecutive_failures`` polls in a row, so a REST restart does not end an
+acquisition.
+
+Nothing is ever written back to the tracker by a poll — the record stays the
+snapshot taken at startup.
+
 Per-Connection REST Ports
 -------------------------
 When receiving frames over the network, ``bufferRecv`` may need to pull upstream configurations
 from the sender's REST server (only when the config tracker is enabled).
 
-- Default: the receiver assumes the sender's REST server is on port ``12048`` (``PORT_REST_SERVER``).
-- Override: use the stage config key ``upstream_rest_endpoints`` to specify non‑standard ports
-  per client. Entries are matched against the client IP as seen by ``bufferRecv``.
+Nothing on the wire carries the sender's REST port, so it has to come from
+config on the receiving side.
+
+- Default: the port this instance's own REST server is bound to, i.e. whatever
+  ``--bind-address`` gave it. A fleet launched on one port therefore agrees with
+  no extra config.
+- ``upstream_rest_port``: states that port explicitly. Set it when the senders
+  bind a different port than this receiver does — the two are unrelated, and the
+  default only happens to be right when they match.
+- ``upstream_rest_endpoints``: per-client overrides as ``"host:port"`` entries,
+  matched against the client IP as seen by ``bufferRecv``. These win over
+  ``upstream_rest_port``.
 
 Example::
 
@@ -84,13 +187,19 @@ Example::
     type: bufferRecv
     listen_port: 11024
     use_config_tracker: true
+    upstream_rest_port: 12050
     upstream_rest_endpoints:
       - "10.1.2.3:13000"
       - "192.168.5.10:14080"
 
 Notes
-- This setting is only meaningful when ``use_config_tracker: true``.
-- If a client IP:port is not listed, the default port ``12048`` is used for the IP.
+
+- These settings are only meaningful when ``use_config_tracker: true``.
+- If a client IP is not listed in ``upstream_rest_endpoints``, ``upstream_rest_port``
+  is used for it.
+- The default changed: receivers previously always assumed ``12048``. A receiver
+  bound to another port while its senders stay on ``12048`` now needs
+  ``upstream_rest_port: 12048`` set explicitly.
 
 Enabling or disabling the tracker
 ---------------------------------

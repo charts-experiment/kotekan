@@ -14,6 +14,7 @@
 
 #include "fmt.hpp" // for compile_string_to_view, format, fmt
 
+#include <json.hpp>  // for basic_json, iter_impl, json
 #include <stdexcept> // for runtime_error
 #include <stdint.h>  // for uint32_t
 

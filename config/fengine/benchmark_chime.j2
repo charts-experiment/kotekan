@@ -7,19 +7,14 @@
 ################################################################################
 
 ---
-log_level: warn
-
-# buffer_status:
-#   kotekan_stage: bufferStatus
-#   time_delay: 10000000          # μs
-#   print_full_status: true
-
-fengine_num_frames: 1
-fengine_repeat_count: 100
-
-skip_julia: true
+log_level: info
 
 base_dir: data/fengine_benchmark_chime # unused
+prefix_hostname: false
+prefix_host_rank: true
+
+# Copy to the host only what output_benchmark*.j2 consumes
+{% set benchmark = True %}
 
 {% include "include/defs.j2" %}
 {% include "include/fengine_chime.j2" %}
@@ -30,9 +25,9 @@ base_dir: data/fengine_benchmark_chime # unused
 {% include "include/bb_chime.j2" %}
 {% include "include/upchan_chime.j2" %}
 {% include "include/frb_chime.j2" %}
+{% include "include/upchan_hfb_chime.j2" %}
+{% include "include/hfb_chime.j2" %}
 
-{% include "include/sources_chime.j2" %}
-{% include "include/fengine_init.j2" %}
-
-{% include "include/output_benchmark.j2" %}
+{% include "include/invent_voltage_chime.j2" %}
+{% include "include/output_benchmark_chime.j2" %}
 ...

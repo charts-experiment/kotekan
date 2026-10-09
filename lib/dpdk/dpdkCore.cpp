@@ -1,7 +1,21 @@
 #include "dpdkCore.hpp"
 
-#include <algorithm>               // for max
-#include <cinttypes>               // for uint32_t, uint16_t, int32_t, uint8_t
+#include "Config.hpp"                  // for Config
+#include "PipelineGraph.hpp"           // for PipelineGraph, GraphNode
+#include "StageFactory.hpp"            // for REGISTER_KOTEKAN_STAGE
+#include "captureHandler.hpp"          // for captureHandler
+#include "crs16BoardCaptureWorker.hpp" // for crs16BoardCaptureWorker
+#include "crs16BoardDistributor.hpp"   // for crs16BoardDistributor
+#include "crs1BoardCaptureWorker.hpp"  // for crs1BoardCaptureWorker
+#include "crs1BoardDistributor.hpp"    // for crs1BoardDistributor
+#include "iceBoardShuffle.hpp"         // for iceBoardShuffle
+#include "iceBoardStandard.hpp"        // for iceBoardStandard
+#include "iceBoardVDIF.hpp"            // for iceBoardVDIF
+#include "numaPolicy.hpp"              // for ScopedNumaPolicy
+
+#include "fmt.hpp"  // for format, compile_string_to_view, fmt, format_string
+#include "json.hpp" // for basic_json, json, iter_impl
+
 #include <functional>              // for bind, function
 #include <numa.h>                  // for numa_node_of_cpu, numa_num_configured_nodes
 #include <rte_branch_prediction.h> // for unlikely
@@ -9,34 +23,27 @@
 #include <rte_eal.h>               // for rte_eal_init
 #include <rte_errno.h>             // for rte_strerror, per_lcore__rte_errno, rte_errno
 #include <rte_ether.h>             // for rte_ether_addr
-#include <rte_launch.h>            // for rte_eal_mp_remote_launch, rte_eal_mp_wait_lcore, rte_...
+#include <rte_launch.h>            // for rte_eal_mp_remote_launch, rte_eal_mp_wait_lcore
 #include <rte_lcore.h>             // for rte_lcore_count, rte_lcore_id
-#include <rte_mbuf.h>              // for rte_pktmbuf_free, rte_pktmbuf_init, rte_pktmbuf_pool_...
+#include <rte_mbuf.h>              // for rte_pktmbuf_free, rte_pktmbuf_init, rte_pktmbuf_p...
 #include <rte_mbuf_core.h>         // for rte_mbuf
 #include <rte_mempool.h>           // for rte_mempool_create, rte_mempool_free
 #include <rte_memzone.h>           // for rte_memzone_max_set
+#include <rte_ring.h>              // for rte_ring_create, rte_ring_dequeue_burst
+#include <set>                     // for set
 #include <stdexcept>               // for runtime_error
-#include <stdio.h>                 // for fprintf, size_t, stderr
-#include <stdlib.h>                // for malloc, free
+#include <stdio.h>                 // for fprintf, NULL, size_t, stderr
+#include <stdlib.h>                // for free, malloc
 #include <string.h>                // for memset
 #include <sys/types.h>             // for uint
 #include <unistd.h>                // for sleep
 #include <vector>                  // for vector
 
-// cinttypes needed by some CentOS systems.
-#include "Config.hpp"           // for Config
-#include "StageFactory.hpp"     // for REGISTER_KOTEKAN_STAGE
-#include "captureHandler.hpp"   // for captureHandler
-#include "iceBoardShuffle.hpp"  // for iceBoardShuffle
-#include "iceBoardStandard.hpp" // for iceBoardStandard
-#include "iceBoardVDIF.hpp"     // for iceBoardVDIF
+// CHARTS RFSoC capture handlers
 #include "rfsocHandlerNoClk.hpp"
 #include "rfsocHandlerShuffle.hpp"
 #include "rfsocHandlerCPT.hpp"
 #include "rfsocHandlerBaseband.hpp"
-
-#include "fmt.hpp"  // for compile_string_to_view, format, fmt, format_string
-#include "json.hpp" // for basic_json, iter_impl, json
 
 using nlohmann::json;
 using std::string;
@@ -52,7 +59,17 @@ REGISTER_KOTEKAN_STAGE(dpdkCore);
 static bool __eal_initalized = false;
 
 dpdkCore::dpdkCore(Config& config, const string& unique_name, bufferContainer& buffer_container) :
-    Stage(config, unique_name, buffer_container, std::bind(&dpdkCore::main_thread, this)) {
+    Stage(config, unique_name, buffer_container, std::bind(&dpdkCore::main_thread, this)),
+    nic_rx_packets_total_metric(kotekan::prometheus::Metrics::instance().add_gauge(
+        "kotekan_dpdk_nic_rx_packets_total", unique_name, {"port"})),
+    nic_rx_missed_total_metric(kotekan::prometheus::Metrics::instance().add_gauge(
+        "kotekan_dpdk_nic_rx_missed_total", unique_name, {"port"})),
+    nic_rx_errors_total_metric(kotekan::prometheus::Metrics::instance().add_gauge(
+        "kotekan_dpdk_nic_rx_errors_total", unique_name, {"port"})),
+    nic_rx_nombuf_total_metric(kotekan::prometheus::Metrics::instance().add_gauge(
+        "kotekan_dpdk_nic_rx_nombuf_total", unique_name, {"port"})),
+    nic_link_up_metric(kotekan::prometheus::Metrics::instance().add_gauge(
+        "kotekan_dpdk_nic_link_up", unique_name, {"port"})) {
 
     uint32_t num_mbufs = config.get_default<uint32_t>(unique_name, "num_mbufs", 1024);
     const uint32_t mbuf_cache_size =
@@ -63,6 +80,7 @@ dpdkCore::dpdkCore(Config& config, const string& unique_name, bufferContainer& b
 
     num_mem_channels = config.get_default<uint32_t>(unique_name, "num_mem_channels", 4);
     init_mem_alloc = config.get_default<std::string>(unique_name, "init_mem_alloc", "256");
+    lcore_start_delay = config.get_default<uint32_t>(unique_name, "lcore_start_delay", 40);
 
     // Setup the lcore mappings
     // Basically this is mapping the DPDK EAL framework way of assigning threads
@@ -76,6 +94,10 @@ dpdkCore::dpdkCore(Config& config, const string& unique_name, bufferContainer& b
 
     num_system_ports = rte_eth_dev_count_avail();
 
+    // Storage for the per-port NIC hardware stats and link state polling.
+    last_eth_stats.resize(num_system_ports);
+    link_is_up.resize(num_system_ports, false);
+
     // This default works well for ICE boards,
     // but we might change this to something more genertic
     memset((void*)&port_conf, 0, sizeof(struct rte_eth_conf));
@@ -86,32 +108,62 @@ dpdkCore::dpdkCore(Config& config, const string& unique_name, bufferContainer& b
         RTE_ETH_RX_OFFLOAD_KEEP_CRC | RTE_ETH_RX_OFFLOAD_IPV4_CKSUM | RTE_ETH_RX_OFFLOAD_UDP_CKSUM;
 
 
-    const uint32_t mbuf_data_size =
+    // Change hardcoded 2048 to support jumbo frames if configured
+    // We add RTE_PKTMBUF_HEADROOM to max_rx_pkt_len to ensure the payload fits comfortably
+    // or simply use a fixed large size like 9600 if max_rx_pkt_len is high.
+    uint32_t configured_mbuf_size =
         config.get_default<uint32_t>(unique_name, "mbuf_data_size", 2048);
-    const uint32_t mbuf_size = mbuf_data_size + sizeof(struct rte_mbuf) + RTE_PKTMBUF_HEADROOM;
-    INFO("DPDK mbuf data size: {:d} bytes, mbuf size: {:d} bytes", mbuf_data_size, mbuf_size);
 
-    // Convert the lcore to port map into a simple c style struct
-    // This is basically done to remove overhead in the critial packet processing loop.
-    // TODO check there are no ports assigned twice
-    lcore_port_list = (struct portList*)malloc(num_lcores * sizeof(struct portList));
-    CHECK_MEM(lcore_port_list);
+    // If the user hasn't explicitly set mbuf_data_size, but has set a large max_rx_pkt_len,
+    // we should probably default to the larger size to avoid scatter-gather.
+    if (configured_mbuf_size == 2048 && max_rx_pkt_len > 2048) {
+        configured_mbuf_size = max_rx_pkt_len + RTE_PKTMBUF_HEADROOM;
+        // Align to 1024 for sanity, though not strictly required
+        configured_mbuf_size = ((configured_mbuf_size + 1023) / 1024) * 1024;
+    }
+
+    const uint32_t max_data_size = configured_mbuf_size;
+    const uint32_t mbuf_size = max_data_size + sizeof(struct rte_mbuf) + RTE_PKTMBUF_HEADROOM;
+    INFO("DPDK mbuf data size: {:d} bytes, mbuf size: {:d} bytes", max_data_size, mbuf_size);
+
     int lcore_id = 0;
-    num_ports = 0;
     json lcore_port_map = config.get_value(unique_name, "lcore_port_map");
+    std::set<uint32_t> unique_ports;
     for (vector<int> ports : lcore_port_map) {
-        lcore_port_list[lcore_id].ports = (uint32_t*)malloc(ports.size() * sizeof(uint32_t));
-        CHECK_MEM(lcore_port_list[lcore_id].ports);
-        int port_id = 0;
+        lcore_port_list.push_back(vector<uint32_t>());
         for (uint32_t port : ports) {
-            lcore_port_list[lcore_id].ports[port_id++] = port;
+            lcore_port_list[lcore_id].push_back(port);
+            unique_ports.insert(port);
         }
-        lcore_port_list[lcore_id].num_ports = ports.size();
-        num_ports += ports.size();
         lcore_id++;
+    }
+    num_ports = unique_ports.size();
+
+    // Allocate worker rings
+    if (config.exists(unique_name, "worker_ring_map")) {
+        json worker_ring_map = config.get_value(unique_name, "worker_ring_map");
+        for (const auto& ring : worker_ring_map) {
+            string ring_name = ring["name"];
+            uint32_t num_slots = ring["num_slots"];
+            int socket_id = ring["socket_id"];
+
+            DEBUG("Creating worker ring '{:s}' with {:d} slots on socket {:d}", ring_name,
+                  num_slots, socket_id);
+
+            // TODO Possibly make the flags configurable?
+            // We are assuming single producer single consumer for now.
+            struct rte_ring* r = rte_ring_create(ring_name.c_str(), num_slots, socket_id,
+                                                 RING_F_SP_ENQ | RING_F_SC_DEQ);
+            if (r == nullptr) {
+                throw std::runtime_error("Cannot create worker ring: "
+                                         + std::string(rte_strerror(rte_errno)));
+            }
+            worker_rings.push_back(r);
+        }
     }
 
     create_handlers(buffer_container);
+    create_workers(buffer_container);
 
     if (num_ports > num_system_ports) {
         throw std::runtime_error(
@@ -137,8 +189,8 @@ dpdkCore::dpdkCore(Config& config, const string& unique_name, bufferContainer& b
                     "lcore_id '" + to_string(lcore_id)
                     + "' failed to map to numa node, is this a valid CPU core id?");
             }
-            if (numa_node_of_cpu(lcore_id) == node_id) {
-                num_ports_on_node += lcore_port_list[j].num_ports;
+            if (numa_node_of_cpu(lcore_id) == node_id && j < lcore_port_list.size()) {
+                num_ports_on_node += lcore_port_list.at(j).size();
             }
         }
         DEBUG("Number of ports on numa node {:d}: {:d}", node_id, num_ports_on_node);
@@ -152,6 +204,8 @@ dpdkCore::dpdkCore(Config& config, const string& unique_name, bufferContainer& b
                 throw std::runtime_error("Cannot create DPDK mbuf pool: "
                                          + std::string(rte_strerror(rte_errno)));
             }
+            INFO("Created mbuf pool on node {:d} with {:d} mbufs of size {:d} bytes", node_id,
+                 num_mbufs * num_ports_on_node, mbuf_size);
         }
         mbuf_pools.push_back(pool);
     }
@@ -198,7 +252,8 @@ void dpdkCore::create_handlers(bufferContainer& buffer_container) {
         } else if (handler_name == "iceBoardVDIF") {
             handlers[port] = new iceBoardVDIF(config, handler_unique_name, buffer_container, port);
         } else if (handler_name == "captureHandler") {
-            handlers[port] = new captureHandler(config, handler_unique_name, buffer_container, port);
+            handlers[port] =
+                new captureHandler(config, handler_unique_name, buffer_container, port);
         } else if (handler_name == "rfsocHandlerCPT") {
             handlers[port] = new rfsocHandlerCPT(config, handler_unique_name, buffer_container, port);
         } else if (handler_name == "rfsocHandlerNoClk") {
@@ -207,6 +262,12 @@ void dpdkCore::create_handlers(bufferContainer& buffer_container) {
             handlers[port] = new rfsocHandlerShuffle(config, handler_unique_name, buffer_container, port);
         } else if (handler_name == "rfsocHandlerBaseband") {
             handlers[port] = new rfsocHandlerBaseband(config, handler_unique_name, buffer_container, port);
+        } else if (handler_name == "crs1BoardDistributor") {
+            handlers[port] = new crs1BoardDistributor(config, handler_unique_name, buffer_container,
+                                                      port, worker_rings);
+        } else if (handler_name == "crs16BoardDistributor") {
+            handlers[port] = new crs16BoardDistributor(config, handler_unique_name,
+                                                       buffer_container, port, worker_rings);
         } else if (handler_name == "none") {
             handlers[port] = nullptr;
         } else {
@@ -216,6 +277,41 @@ void dpdkCore::create_handlers(bufferContainer& buffer_container) {
 
         port++;
     }
+}
+
+void dpdkCore::create_workers(bufferContainer& buffer_container) {
+    // Create the workers
+    // Does not use the factory model because this is header only.
+    if (!config.exists(unique_name, "workers"))
+        return;
+    vector<json> workers_block = config.get<std::vector<json>>(unique_name, "workers");
+    workers.resize(workers_block.size());
+    uint32_t worker_id = 0;
+    for (json& worker : workers_block) {
+
+        string worker_name = worker["dpdk_handler"];
+        string worker_unique_name = fmt::format(fmt("{:s}/workers/{:d}"), unique_name, worker_id);
+
+        if (worker_name == "crs1BoardCaptureWorker") {
+            workers[worker_id] = new crs1BoardCaptureWorker(
+                config, worker_unique_name, buffer_container, worker_id, worker_rings);
+        } else if (worker_name == "crs16BoardCaptureWorker") {
+            workers[worker_id] = new crs16BoardCaptureWorker(
+                config, worker_unique_name, buffer_container, worker_id, worker_rings);
+        } else if (worker_name == "none") {
+            workers[worker_id] = nullptr;
+        } else {
+            throw std::runtime_error(
+                fmt::format(fmt("The dpdk worker type '{:s}' does not exist."), worker_name));
+        }
+        if (workers[worker_id] != nullptr)
+            INFO("Created DPDK worker '{:s}' with ID {:d}", worker_name, worker_id);
+        else
+            FATAL_ERROR("DPDK worker '{:s}' with ID {:d} is nullptr", worker_name, worker_id);
+
+        worker_id++;
+    }
+    active_workers = worker_id;
 }
 
 void dpdkCore::dpdk_init(vector<int> lcore_cpu_map, uint32_t main_lcore_cpu) {
@@ -271,7 +367,17 @@ void dpdkCore::dpdk_init(vector<int> lcore_cpu_map, uint32_t main_lcore_cpu) {
     // Initialize the Environment Abstraction Layer (EAL).
     // Currently closing DPDKs EAL isn't offically supported,
     // so we only do it once.
+    INFO("Initializing DPDK EAL with arguments:");
+    for (const auto& arg : str_args) {
+        INFO("  {:s}", arg);
+    }
     if (!__eal_initalized) {
+        // The EAL places its hugepage memory per socket, and starts one thread
+        // per lcore that inherits this thread's memory policy. StageFactory
+        // binds that policy to this stage's NUMA node while the constructor
+        // runs, which would pull the lcores on other nodes onto it: let DPDK
+        // do its own placement.
+        kotekan::ScopedNumaPolicy own_placement(kotekan::ScopedNumaPolicy::system_default);
         int ret = rte_eal_init(argc2, argv2_vec.data());
         if (ret < 0)
             throw std::runtime_error(
@@ -297,11 +403,80 @@ void dpdkCore::main_thread() {
                 handlers[i]->update_stats();
         }
 
-        // TODO Check port status
+        // Poll the NIC hardware counters and link state for each port.
+        update_port_stats();
     }
 
     // Wait for the lcores to join
     rte_eal_mp_wait_lcore();
+}
+
+void dpdkCore::update_port_stats() {
+
+    for (uint32_t port = 0; port < num_system_ports; ++port) {
+        if (handlers[port] == nullptr)
+            continue;
+
+        // Check the link state (without blocking on the PHY).
+        struct rte_eth_link link;
+        if (rte_eth_link_get_nowait(port, &link) == 0) {
+            const bool up = (link.link_status == RTE_ETH_LINK_UP);
+            if (up != link_is_up[port]) {
+                if (up) {
+                    INFO("Port {:d}: link is UP at {:d} Mbps", port, link.link_speed);
+                } else {
+                    ERROR("Port {:d}: link went DOWN! The NIC, cable, or switch port may have "
+                          "reset.",
+                          port);
+                }
+                link_is_up[port] = up;
+            }
+        }
+
+        // Read the NIC hardware counters.
+        struct rte_eth_stats stats;
+        if (rte_eth_stats_get(port, &stats) != 0)
+            continue;
+
+        // imissed counts packets that arrived at the NIC but were dropped because
+        // the rx ring was full, i.e. the lcore didn't service this port fast enough.
+        // Guard against counter resets (e.g. a link/NIC reset), which would
+        // otherwise underflow the unsigned delta into a bogus WARN.
+        const uint64_t missed_delta = stats.imissed >= last_eth_stats[port].imissed
+                                          ? stats.imissed - last_eth_stats[port].imissed
+                                          : 0;
+        if (missed_delta > 0) {
+            WARN("Port {:d}: NIC dropped {:d} packets since the last poll (~1s) because the rx "
+                 "ring was full (lcore stalled or too slow); total missed: {:d}",
+                 port, missed_delta, stats.imissed);
+        }
+
+        const uint64_t error_delta = stats.ierrors >= last_eth_stats[port].ierrors
+                                         ? stats.ierrors - last_eth_stats[port].ierrors
+                                         : 0;
+        if (error_delta > 0) {
+            WARN("Port {:d}: NIC reported {:d} rx errors since the last poll (~1s); total: {:d}",
+                 port, error_delta, stats.ierrors);
+        }
+
+        const uint64_t nombuf_delta = stats.rx_nombuf >= last_eth_stats[port].rx_nombuf
+                                          ? stats.rx_nombuf - last_eth_stats[port].rx_nombuf
+                                          : 0;
+        if (nombuf_delta > 0) {
+            WARN("Port {:d}: {:d} rx mbuf allocation failures since the last poll (~1s); "
+                 "increase num_mbufs; total: {:d}",
+                 port, nombuf_delta, stats.rx_nombuf);
+        }
+
+        std::vector<std::string> port_label = {to_string(port)};
+        nic_rx_packets_total_metric.labels(port_label).set(stats.ipackets);
+        nic_rx_missed_total_metric.labels(port_label).set(stats.imissed);
+        nic_rx_errors_total_metric.labels(port_label).set(stats.ierrors);
+        nic_rx_nombuf_total_metric.labels(port_label).set(stats.rx_nombuf);
+        nic_link_up_metric.labels(port_label).set(link_is_up[port] ? 1 : 0);
+
+        last_eth_stats[port] = stats;
+    }
 }
 
 dpdkCore::~dpdkCore() {
@@ -363,6 +538,12 @@ int32_t dpdkCore::port_init(uint8_t port, uint32_t lcore_id) {
         return retval;
     }
 
+    // Prime the stats baseline so the first poll in update_port_stats() reports
+    // deltas relative to now rather than the port's cumulative pre-start counters.
+    if (rte_eth_stats_get(port, &last_eth_stats[port]) != 0)
+        WARN("Port {:d}: could not read initial NIC stats; first stats poll may over-report deltas",
+             port);
+
     // Report the port MAC address.
     // TODO record the MAC address for export to JSON
     rte_ether_addr addr;
@@ -391,13 +572,45 @@ int dpdkCore::lcore_rx(void* args) {
         throw std::runtime_error("lcore mapping error");
     }
 
+    // If we have no map for this lcore, it must be a worker lcore.
+    if (lcore >= core->lcore_port_list.size()) {
+        uint32_t worker_id = lcore - core->lcore_port_list.size();
+        INFO_NON_OO("Starting worker: worker_id {:d}, lcore {:d}", worker_id, lcore);
+
+        // Cache the worker pointer and ring pointer locally; neither changes at runtime.
+        dpdkRXhandler* local_worker = core->workers.at(worker_id);
+        rte_ring* local_ring = core->worker_rings.at(worker_id);
+
+        while (!core->stop_thread) {
+            uint16_t num_rx =
+                rte_ring_dequeue_burst(local_ring, (void**)mbufs, core->burst_size, NULL);
+
+            if (num_rx == 0)
+                continue;
+
+            for (uint16_t j = 0; j < num_rx; ++j) {
+                if (unlikely(local_worker->handle_packet(mbufs[j]) != 0)) {
+                    rte_pktmbuf_free(mbufs[j]);
+                    goto exit_loop;
+                }
+                rte_pktmbuf_free(mbufs[j]);
+            }
+        }
+    exit_loop:
+
+        INFO_NON_OO("Exiting worker: worker_id {:d}, lcore {:d}", worker_id, lcore);
+        core->active_workers--;
+        if (core->active_workers == 0) {
+            core->stop_thread = true;
+        }
+        return 0;
+    }
+
     // The list of ports this thread processes
-    struct dpdkCore::portList port_list = core->lcore_port_list[lcore];
-    const uint32_t num_local_ports = port_list.num_ports;
-    const uint32_t* ports = port_list.ports;
+    const std::vector<uint32_t>& ports = core->lcore_port_list.at(lcore);
     const uint32_t burst_size = core->burst_size;
 
-    for (uint32_t i = 0; i < num_local_ports; ++i) {
+    for (uint32_t i = 0; i < ports.size(); ++i) {
         uint32_t port = ports[i];
         if (core->handlers[port] == nullptr) {
             WARN_NON_OO("No valid handler provided for port {:d}", port);
@@ -405,26 +618,56 @@ int dpdkCore::lcore_rx(void* args) {
         }
     }
 
-    // TODO Figure out why this sleep is need.  It seems like the when starting the E810
+    // TODO Figure out why this sleep is needed.  It seems like when starting the E810
     // ports, there is a delay between when they are started in DPDK and when they become
-    // ready.  There might be a function to check their readness state we could query?
-    sleep(40);
-    while (!core->stop_thread) {
-        for (uint32_t i = 0; i < num_local_ports; ++i) {
-            uint32_t port = ports[i];
+    // ready.  There might be a function to check their readiness state we could query?
+    INFO_NON_OO("DPDK Sleeping for {} seconds before starting network handlers",
+                core->lcore_start_delay);
+    sleep(core->lcore_start_delay);
+    const uint32_t num_local_ports = ports.size();
 
-            const uint16_t num_rx = rte_eth_rx_burst(port, 0, mbufs, burst_size);
+    // Enforce that all handlers on this lcore are either all distributors or all
+    // non-distributors.
+    const bool is_distributor_lcore = core->handlers[ports[0]]->is_distributor();
+    for (uint32_t i = 1; i < num_local_ports; ++i) {
+        if (core->handlers[ports[i]]->is_distributor() != is_distributor_lcore) {
+            throw std::runtime_error(
+                "All handlers on a single lcore must be either all distributors or all "
+                "non-distributors. Mixed lcores are not supported.");
+        }
+    }
 
-            for (uint16_t j = 0; j < num_rx; ++j) {
+    // Cache handler pointers locally. The handlers array does not change at runtime.
+    std::vector<dpdkRXhandler*> local_handlers(num_local_ports);
+    for (uint32_t i = 0; i < num_local_ports; ++i) {
+        local_handlers[i] = core->handlers[ports[i]];
+    }
 
-                // Process the packet with the required handler
-                // NOTE: Ideally this wouldn't be a call to a virtual function,
-                // but it's an overhead that's hard to avoid here.
-                if (unlikely(core->handlers[port]->handle_packet(mbufs[j]) != 0)) {
-                    goto exit_lcore;
+    if (is_distributor_lcore) {
+        // Distributor handlers take ownership of the mbuf; do not free here.
+        // Instead the free happens in the worker (above)
+        while (!core->stop_thread) {
+            for (uint32_t i = 0; i < num_local_ports; ++i) {
+                uint32_t port = ports[i];
+                const uint16_t num_rx = rte_eth_rx_burst(port, 0, mbufs, burst_size);
+                for (uint16_t j = 0; j < num_rx; ++j) {
+                    if (unlikely(local_handlers[i]->handle_packet(mbufs[j]) != 0)) {
+                        goto exit_lcore;
+                    }
                 }
-
-                rte_pktmbuf_free(mbufs[j]);
+            }
+        }
+    } else {
+        while (!core->stop_thread) {
+            for (uint32_t i = 0; i < num_local_ports; ++i) {
+                uint32_t port = ports[i];
+                const uint16_t num_rx = rte_eth_rx_burst(port, 0, mbufs, burst_size);
+                for (uint16_t j = 0; j < num_rx; ++j) {
+                    if (unlikely(local_handlers[i]->handle_packet(mbufs[j]) != 0)) {
+                        goto exit_lcore;
+                    }
+                    rte_pktmbuf_free(mbufs[j]);
+                }
             }
         }
     }
@@ -432,26 +675,34 @@ exit_lcore:
     return 0;
 }
 
-std::string dpdkCore::dot_string(const std::string& prefix) const {
-    std::string dot = fmt::format("{:s}subgraph \"cluster_{:s}\" {{\n", prefix, get_unique_name());
+void dpdkCore::add_graph_details(kotekan::PipelineGraph& graph) const {
+    const std::string name = get_unique_name();
 
-    dot += fmt::format("{:s}{:s}style=filled;\n", prefix, prefix);
-    dot += fmt::format("{:s}{:s}color=lightgrey;\n", prefix, prefix);
-    dot += fmt::format("{:s}{:s}node [style=filled,color=white];\n", prefix, prefix);
-    dot += fmt::format("{:s}{:s}label = \"{:s}\";\n", prefix, prefix, get_unique_name());
+    auto& stage_node = graph.add_node(name);
+    auto& cluster = graph.add_cluster(name);
+    cluster.label = fmt::format(fmt("{:s} ({:d} ports)"), kotekan::leaf_name(name), num_ports);
+    cluster.set_attr("style", "rounded,filled")
+        .set_attr("fillcolor", kotekan::graph_device_fill)
+        .set_attr("color", kotekan::graph_device_line);
+    // Keep whatever grouping the pipeline put this stage in as the region's parent.
+    cluster.parent = stage_node.cluster;
+
+    // The stage node itself belongs in the region, so that the buffer edges added
+    // centrally land inside the box rather than on an empty node beside it.
+    stage_node.cluster = cluster.id;
 
     for (uint i = 0; i < num_ports; ++i) {
-        dot += fmt::format("{:s}{:s} \"{:s}\" [shape=box];\n", prefix, prefix,
-                           handlers[i]->unique_name);
+        auto& handler = graph.add_node(handlers[i]->unique_name);
+        handler.add_line(kotekan::leaf_name(handlers[i]->unique_name));
+        handler.cluster = cluster.id;
+        handler.set_category(kotekan::GraphCategory::Io);
+
+        // Port node ids carry the stage, so several dpdkCore stages each with a
+        // port 0 stay distinct.
+        const std::string port_id = fmt::format("{:s}/port_{:d}", name, i);
+        graph.add_node(port_id)
+            .add_line(fmt::format(fmt("port {:d}"), i))
+            .set_category(kotekan::GraphCategory::Endpoint);
+        graph.add_edge(port_id, handlers[i]->unique_name);
     }
-
-    dot += fmt::format("{:s}}}\n", prefix);
-
-    for (uint i = 0; i < num_ports; ++i) {
-        dot += fmt::format("{:s}port_{:d} [shape=doubleoctagon style=filled,color=lightblue];\n",
-                           prefix, i);
-        dot += fmt::format("{:s}port_{:d} -> \"{:s}\";\n", prefix, i, handlers[i]->unique_name);
-    }
-
-    return dot;
 }
