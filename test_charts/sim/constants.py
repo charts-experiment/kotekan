@@ -107,6 +107,14 @@ TIME_PER_SPECTRUM_US: float = FPGA_TIME_RESOLUTION_US
 TIME_PER_SPECTRUM_S: float = FPGA_TIME_RESOLUTION_US * 1e-6
 SAMPLE_RATE_HZ: float = CHARTS_CHANNEL_WIDTH_HZ
 
+# Digitizer operating point: per-component (Re/Im) channel-noise sigma in LSB at
+# the reference temperature T_ref. Calibrated against the F-engine reference
+# chain (sim/fengine.py, Julia parity): the 15-level (±7) round-clamp quantizer
+# has its minimum SNR loss (~0.06 dB) at sigma ≈ 2.9 LSB; 2.0 LSB is chosen to
+# keep headroom for bright sources (loss ~0.09 dB, well inside the < 0.5 dB
+# equivalence bound of AGENTS.md §3).
+DIGITIZER_NOMINAL_SIGMA_LSB: float = 2.0
+
 
 # ---------------------------------------------------------------------------
 # 3. Frequency Grid & Sharding

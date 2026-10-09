@@ -45,6 +45,7 @@ from sim.generator import (
 )
 from sim.noise_model import AnalogChainParams, ChartsNoiseModel
 from sim.pipeline import (
+    create_accumulate_yaml,
     create_beam_tracker_yaml,
     create_correlator_yaml,
     parse_beam_targets,
@@ -150,9 +151,13 @@ class TestChartsSimulationSuite(unittest.TestCase):
         self.assertTrue(yaml_out.is_file())
         content = yaml_out.read_text(encoding="utf-8")
         self.assertIn("kotekan_stage: rawFileRead", content)
-        self.assertIn("kotekan_stage: cudaShuffleAstron", content)
-        self.assertIn("kotekan_stage: cudaCorrelatorAstron", content)
+        self.assertIn("buf: network_capture_buf", content)
+        self.assertIn("prefix_hostname: false", content)
+        self.assertIn("kotekan_stage: cudaProcess", content)
+        self.assertIn("name: cudaShuffleAstron", content)
+        self.assertIn("name: cudaCorrelatorAstron", content)
         self.assertIn("kotekan_stage: rawFileWrite", content)
+        self.assertIn("in_buf: host_correlation_buffer", content)
         self.assertIn("num_elements: 64", content)
         self.assertIn("num_blocks: 528", content)
 
@@ -173,10 +178,50 @@ class TestChartsSimulationSuite(unittest.TestCase):
 
         self.assertTrue(yaml_out.is_file())
         content = yaml_out.read_text(encoding="utf-8")
-        self.assertIn("kotekan_stage: cudaAntennaMask", content)
-        self.assertIn("kotekan_stage: cudaDirectBeamTrackerCommand", content)
+        self.assertIn("kotekan_stage: cudaProcess", content)
+        self.assertIn("name: cudaAntennaMaskCommand", content)
+        self.assertIn("name: cudaDirectBeamTrackerCommand", content)
         self.assertIn("max_beams: 4", content)
         self.assertIn("Crab", content)
+
+    def test_beam_tracker_legacy_v5_rejected(self):
+        """Beam Tracker V5 is legacy and must be rejected with ValueError."""
+        yaml_out = self.temp_dir / "tracker_v5.yaml"
+        targets = parse_beam_targets("Crab:83.633,22.014", max_beams=4)
+        with self.assertRaises(ValueError) as ctx:
+            create_beam_tracker_yaml(
+                yaml_path=yaml_out,
+                baseband_dir=self.temp_dir,
+                baseband_name="test_sim",
+                tracker_dir=self.temp_dir / "tracker",
+                tracker_name="beams_test",
+                num_frames=10,
+                beam_targets=targets,
+                stage_type="v5",
+            )
+        self.assertIn("legacy and unsupported", str(ctx.exception))
+
+    def test_accumulate_yaml_generation(self):
+        """Test generating Kotekan correlator + chartsAccumulate YAML configuration."""
+        yaml_out = self.temp_dir / "accum.yaml"
+        create_accumulate_yaml(
+            yaml_path=yaml_out,
+            baseband_dir=self.temp_dir,
+            baseband_name="test_sim",
+            output_dir=self.temp_dir / "accum",
+            num_frames=10,
+            num_elements=64,
+            num_local_freq=336,
+            samples_per_data_set=1536,
+            num_frames_to_accumulate=5,
+        )
+
+        self.assertTrue(yaml_out.is_file())
+        content = yaml_out.read_text(encoding="utf-8")
+        self.assertIn("kotekan_stage: cudaProcess", content)
+        self.assertIn("name: cudaCorrelatorAstron", content)
+        self.assertIn("kotekan_stage: chartsAccumulate", content)
+        self.assertIn("num_frames_to_accumulate: 5", content)
 
     def test_direct_tracker_cadence_and_power_benchmark(self):
         """Test Direct Beam Tracker benchmark under physical 5.12 ms cadence."""

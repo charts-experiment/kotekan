@@ -24,6 +24,8 @@ from typing import Dict, Optional, Tuple, Union
 
 import numpy as np
 
+from .constants import DIGITIZER_NOMINAL_SIGMA_LSB
+
 # Physical constants
 K_BOLTZMANN = 1.380649e-23     # J / K
 C_LIGHT = 299_792_458.0        # m / s
@@ -68,9 +70,11 @@ class AnalogChainParams:
     t_ground_k: float = 290.0
     ground_spillover_fraction: float = 0.02
 
-    # Digitizer calibration
-    t_ref_k: float = 50.0          # Reference temperature mapped to sigma = 1.0 LSB
-    sigma_ref_lsb: float = 1.0     # Nominal 4-bit ADC standard deviation at T_ref
+    # Digitizer calibration: T_ref maps to DIGITIZER_NOMINAL_SIGMA_LSB per
+    # component (Re/Im), matching the F-engine reference operating point
+    # (sim/fengine.py; quantizer SNR loss ~0.09 dB, AGENTS.md §3 bound < 0.5 dB).
+    t_ref_k: float = 50.0
+    sigma_ref_lsb: float = DIGITIZER_NOMINAL_SIGMA_LSB
 
 
 class ChartsNoiseModel:
