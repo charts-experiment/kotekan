@@ -48,10 +48,12 @@ cudaOutputData::cudaOutputData(Config& config, const std::string& unique_name,
     if (output_buffer->frame_size) {
         uint flags;
         // only register the memory if it isn't already...
-        if (cudaErrorInvalidValue
-            == cudaHostGetFlags(&flags, output_buffer->frames[instance_num])) {
-            CHECK_CUDA_ERROR(cudaHostRegister(output_buffer->frames[instance_num],
-                                              output_buffer->frame_size, 0));
+        const auto host_status = cudaHostGetFlags(&flags, output_buffer->frames[instance_num]);
+        if (host_status == cudaErrorInvalidValue) {
+            (void)cudaGetLastError(); // expected unregistered-pointer probe
+            CHECK_CUDA_ERROR(cudaHostRegister(output_buffer->frames[instance_num], output_buffer->frame_size, 0));
+        } else {
+            CHECK_CUDA_ERROR(host_status);
         }
     }
 
@@ -70,9 +72,13 @@ cudaOutputData::~cudaOutputData() {
     if (output_buffer->frame_size) {
         uint flags;
         // only register the memory if it isn't already...
-        if (cudaErrorInvalidValue
-            == cudaHostGetFlags(&flags, output_buffer->frames[instance_num])) {
+        const auto host_status = cudaHostGetFlags(&flags, output_buffer->frames[instance_num]);
+        if (host_status == cudaSuccess) {
             CHECK_CUDA_ERROR(cudaHostUnregister(output_buffer->frames[instance_num]));
+        } else if (host_status == cudaErrorInvalidValue) {
+            (void)cudaGetLastError(); // memory may already have been unregistered
+        } else {
+            CHECK_CUDA_ERROR(host_status);
         }
     }
 }

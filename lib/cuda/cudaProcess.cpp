@@ -109,8 +109,13 @@ void cudaProcess::queue_commands(int gpu_frame_counter) {
 void cudaProcess::register_host_memory(Buffer* host_buffer) {
     // Register the host memory in buffers with the Cuda run time.
     for (int i = 0; i < host_buffer->num_frames; i++) {
-        cudaHostRegister(host_buffer->frames[i], host_buffer->aligned_frame_size,
-                         cudaHostRegisterDefault);
+        const auto status = cudaHostRegister(host_buffer->frames[i], host_buffer->aligned_frame_size,
+                                             cudaHostRegisterDefault);
+        if (status == cudaErrorHostMemoryAlreadyRegistered) {
+            (void)cudaGetLastError(); // copy-command constructors registered this slot
+        } else {
+            CHECK_CUDA_ERROR(status);
+        }
         DEBUG("Registered frame: {:s}[{:d}]", host_buffer->buffer_name, i);
     }
 }
