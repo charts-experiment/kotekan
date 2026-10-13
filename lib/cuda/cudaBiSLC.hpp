@@ -110,8 +110,8 @@ inline bool invert_complex_matrix(
         return true;
     }
 
-    // General Gauss-Jordan elimination with partial pivoting for B <= 8
-    constexpr std::size_t MAX_B = 8;
+    // General Gauss-Jordan elimination with partial pivoting for B <= 16
+    constexpr std::size_t MAX_B = 16;
     if (B > MAX_B) return false;
 
     std::complex<float> aug[MAX_B][2 * MAX_B];

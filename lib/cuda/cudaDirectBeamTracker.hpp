@@ -14,7 +14,7 @@
 
 namespace kotekan {
 
-constexpr std::size_t MAX_DIRECT_BEAMS = 8;
+constexpr std::size_t MAX_DIRECT_BEAMS = 16;
 constexpr std::size_t MAX_DIRECT_ANTENNAS = charts::constants::charts_total_antennas;
 
 // 3D vector for directions
