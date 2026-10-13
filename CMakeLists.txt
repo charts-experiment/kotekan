@@ -18,6 +18,7 @@ endif()
 set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -Xcompiler -Wall")
 
 include(cmake/Features/FeatureGPU.cmake)
+include(cmake/Features/FeatureChartsBeamformer.cmake)
 include(cmake/Features/FeatureDPDK.cmake)
 
 set(_ktk_airspy_reason "disabled")
@@ -84,6 +85,7 @@ add_subdirectory(config)
 
 # Testing with boost
 if(${WITH_BOOST_TESTS})
+    enable_testing()
     set(_BOOST_TESTS_DIR
         tests/boost/
         CACHE INTERNAL "Path to boost test sources")

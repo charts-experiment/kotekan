@@ -11,6 +11,7 @@
 #include "oneHotMetadata.hpp"   // for oneHotMetadata
 #include "visBuffer.hpp"        // for VisMetadata
 #include "chartsMetadata.hpp"
+#include "chartsBeamMetadata.hpp"
 
 #include "fmt.hpp" // for compile_string_to_view, format, fmt
 
@@ -109,6 +110,9 @@ std::shared_ptr<metadataPool> metadataFactory::new_pool(const std::string& pool_
     if (pool_type == "chartsMetadata") {
         return metadataPool::create(num_metadata_objects, sizeof(chartsMetadata), location,
                                 pool_type);
+    }
+    if (pool_type == "chartsBeamMetadata") {
+        return metadataPool::create(num_metadata_objects, sizeof(chartsBeamMetadata), location, pool_type);
     }
     // No metadata found
     throw std::runtime_error(fmt::format(fmt("No metadata object named: {:s}"), pool_type));

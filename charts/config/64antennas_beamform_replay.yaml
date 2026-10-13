@@ -1,0 +1,180 @@
+# Coarse float32 replay: pre-zeroed one-frame rawFileWrite-format voltage/mask inputs.
+# Requires canonical per-shard weights and charts.weights.v1 manifests.
+# Independent file readers do not reproduce DPDK raw/mask publication ordering, so
+# zeroSamples is not inserted here. Live ingest retains its existing zeroSamples stage.
+# The validator overrides paths and dimensions for compact acceptance cases.
+type: config
+log_level: info
+cpu_affinity: []
+num_elements: 64
+num_beams: 64
+samples_per_data_set: 15360
+integration_spectra: 320
+buffer_depth: 3
+profiling: false
+frame_arrival_period: samples_per_data_set / 300000.0
+replay_frames: 6
+raw_pool:
+  kotekan_metadata_pool: chartsMetadata
+  num_metadata_objects: 32
+beam_pool:
+  kotekan_metadata_pool: chartsBeamMetadata
+  num_metadata_objects: 32
+voltage_0:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: samples_per_data_set * 336 * num_elements
+  numa_node: 0
+  mlock_frames: false
+  use_hugepages: false
+  metadata_pool: raw_pool
+missing_0:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: samples_per_data_set
+  numa_node: 0
+  mlock_frames: false
+  use_hugepages: false
+  metadata_pool: raw_pool
+intensity_0:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: ((samples_per_data_set + integration_spectra - 1) / integration_spectra)
+    * 336 * num_beams * 4
+  numa_node: 0
+  mlock_frames: false
+  use_hugepages: false
+  metadata_pool: beam_pool
+read_voltage_0:
+  kotekan_stage: rawFileRead
+  buf: voltage_0
+  base_dir: /tmp/charts-beamformer-replay
+  file_name: voltage.shard0
+  file_ext: bin
+  prefix_hostname: false
+  end_interrupt: false
+read_missing_0:
+  kotekan_stage: rawFileRead
+  buf: missing_0
+  base_dir: /tmp/charts-beamformer-replay
+  file_name: missing.shard0
+  file_ext: bin
+  prefix_hostname: false
+  end_interrupt: false
+gpu_0:
+  kotekan_stage: cudaProcess
+  gpu_id: 0
+  buffer_depth: 3
+  in_buffers:
+    raw: voltage_0
+    missing: missing_0
+  out_buffers:
+    intensity: intensity_0
+  commands:
+  - name: cudaInputData
+    in_buf: raw
+    gpu_mem: charts.voltage.shard0
+  - name: cudaSyncInput
+  - name: cudaChartsBeamformerCommand
+    input_mode: coarse
+    in_buf: raw
+    mask_buf: missing
+    out_buf: intensity
+    shard_id: 0
+    beamformer_kernel: tiled
+    gpu_mem_voltage: charts.voltage.shard0
+    gpu_mem_intensity: charts.intensity.shard0
+    weights_file: /tmp/charts-beamformer-replay/weights.shard0.bin
+    weights_manifest: /tmp/charts-beamformer-replay/weights.shard0.json
+  - name: cudaSyncOutput
+  - name: cudaOutputData
+    gpu_mem: charts.intensity.shard0
+    out_buf: intensity
+write_0:
+  kotekan_stage: rawFileWrite
+  in_buf: intensity_0
+  base_dir: /tmp/charts-beamformer-replay
+  file_name: intensity.shard0
+  file_ext: bin
+  prefix_hostname: false
+  num_frames_per_file: 1
+  exit_after_n_files: replay_frames
+voltage_1:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: samples_per_data_set * 336 * num_elements
+  numa_node: 0
+  mlock_frames: false
+  use_hugepages: false
+  metadata_pool: raw_pool
+missing_1:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: samples_per_data_set
+  numa_node: 0
+  mlock_frames: false
+  use_hugepages: false
+  metadata_pool: raw_pool
+intensity_1:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: ((samples_per_data_set + integration_spectra - 1) / integration_spectra)
+    * 336 * num_beams * 4
+  numa_node: 0
+  mlock_frames: false
+  use_hugepages: false
+  metadata_pool: beam_pool
+read_voltage_1:
+  kotekan_stage: rawFileRead
+  buf: voltage_1
+  base_dir: /tmp/charts-beamformer-replay
+  file_name: voltage.shard1
+  file_ext: bin
+  prefix_hostname: false
+  end_interrupt: false
+read_missing_1:
+  kotekan_stage: rawFileRead
+  buf: missing_1
+  base_dir: /tmp/charts-beamformer-replay
+  file_name: missing.shard1
+  file_ext: bin
+  prefix_hostname: false
+  end_interrupt: false
+gpu_1:
+  kotekan_stage: cudaProcess
+  gpu_id: 0
+  buffer_depth: 3
+  in_buffers:
+    raw: voltage_1
+    missing: missing_1
+  out_buffers:
+    intensity: intensity_1
+  commands:
+  - name: cudaInputData
+    in_buf: raw
+    gpu_mem: charts.voltage.shard1
+  - name: cudaSyncInput
+  - name: cudaChartsBeamformerCommand
+    input_mode: coarse
+    in_buf: raw
+    mask_buf: missing
+    out_buf: intensity
+    shard_id: 1
+    beamformer_kernel: tiled
+    gpu_mem_voltage: charts.voltage.shard1
+    gpu_mem_intensity: charts.intensity.shard1
+    weights_file: /tmp/charts-beamformer-replay/weights.shard1.bin
+    weights_manifest: /tmp/charts-beamformer-replay/weights.shard1.json
+  - name: cudaSyncOutput
+  - name: cudaOutputData
+    gpu_mem: charts.intensity.shard1
+    out_buf: intensity
+write_1:
+  kotekan_stage: rawFileWrite
+  in_buf: intensity_1
+  base_dir: /tmp/charts-beamformer-replay
+  file_name: intensity.shard1
+  file_ext: bin
+  prefix_hostname: false
+  num_frames_per_file: 1
+  exit_after_n_files: replay_frames

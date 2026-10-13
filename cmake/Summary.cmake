@@ -201,6 +201,12 @@ endif()
 kfeature_header("GPU Features")
 # Alphabetical: CUDA, HIP, OpenCL
 kfeature_row("CUDA" "${USE_CUDA}" "${CUDA_REASON}" OFF USE_CUDA)
+set(CHARTS_BEAMFORMER_REASON "disabled")
+if(USE_CHARTS_BEAMFORMER)
+    set(CHARTS_BEAMFORMER_REASON "enabled: ${CHARTS_BEAMFORMER_SOURCE_DIR}")
+endif()
+kfeature_row("CHARTS beamformer" "${USE_CHARTS_BEAMFORMER}" "${CHARTS_BEAMFORMER_REASON}"
+             OFF USE_CHARTS_BEAMFORMER)
 kfeature_row("HIP" "${USE_HIP}" "${HIP_REASON}" OFF USE_HIP)
 kfeature_row("OpenCL" "${USE_OPENCL}" "${OPENCL_REASON}" OFF USE_OPENCL)
 

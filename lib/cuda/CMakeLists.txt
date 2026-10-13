@@ -153,3 +153,8 @@ target_include_directories(kotekan_cuda PUBLIC .)
 target_compile_options(kotekan_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
 
 add_dependencies(kotekan_cuda kotekan_gpu)
+
+kotekan_add_charts_beamformer()
+if(USE_CHARTS_BEAMFORMER)
+    target_sources(kotekan_cuda PRIVATE cudaChartsBeamformerCommand.cpp)
+endif()
