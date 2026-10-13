@@ -3,9 +3,9 @@
 
 #include "Config.hpp"
 #include "bufferContainer.hpp"
+#include "cudaBiSLC.hpp"
 #include "cudaCommand.hpp"
 #include "cudaDeviceInterface.hpp"
-#include "cudaBiSLC.hpp"
 #include "driver_types.h"
 
 #include <cstdint>
@@ -23,8 +23,7 @@ namespace kotekan {
  */
 class cudaBiSLCCommand : public cudaCommand {
 public:
-    cudaBiSLCCommand(Config& config, const std::string& unique_name,
-                     bufferContainer& host_buffers,
+    cudaBiSLCCommand(Config& config, const std::string& unique_name, bufferContainer& host_buffers,
                      cudaDeviceInterface& device, int inst);
     ~cudaBiSLCCommand() override;
 

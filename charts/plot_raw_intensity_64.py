@@ -24,7 +24,6 @@ from pathlib import Path
 
 import numpy as np
 
-
 DEFAULT_SPECTRA_PER_FRAME = 15360
 DEFAULT_CHANNELS = 336
 DEFAULT_ELEMENTS = 64
@@ -100,7 +99,9 @@ def read_raw_metadata(path: Path, metadata_endian: str) -> tuple[int, int, int]:
             raise ValueError(f"{path}: truncated metadata")
 
     # chartsMetadata starts with int32 frame_counter, four padding bytes, then int64 fpga_seq.
-    fpga_seq = struct.unpack_from(f"{prefix}q", metadata, 8)[0] if metadata_size >= 16 else -1
+    fpga_seq = (
+        struct.unpack_from(f"{prefix}q", metadata, 8)[0] if metadata_size >= 16 else -1
+    )
     return fpga_seq, metadata_size, 4 + metadata_size
 
 
@@ -166,7 +167,9 @@ def candidate_files(args: argparse.Namespace, handler: int) -> list[Path]:
 
     files = sorted(args.data_dir.glob(pattern))
     if not files:
-        raise SystemExit(f"No handler {handler} files matched {args.data_dir / pattern}")
+        raise SystemExit(
+            f"No handler {handler} files matched {args.data_dir / pattern}"
+        )
     return files
 
 
@@ -189,7 +192,9 @@ def select_file_groups(
         for path in files:
             fpga_seq, _, _ = read_raw_metadata(path, args.metadata_endian)
             if fpga_seq < 0:
-                raise SystemExit(f"Cannot index {path}: metadata has no FPGA sequence number")
+                raise SystemExit(
+                    f"Cannot index {path}: metadata has no FPGA sequence number"
+                )
             groups.append(
                 FrameGroup(
                     paths=(path,),
@@ -207,7 +212,9 @@ def select_file_groups(
         for path in files_by_handler[handler]:
             fpga_seq, _, _ = read_raw_metadata(path, args.metadata_endian)
             if fpga_seq < 0:
-                raise SystemExit(f"Cannot align {path}: metadata has no FPGA sequence number")
+                raise SystemExit(
+                    f"Cannot align {path}: metadata has no FPGA sequence number"
+                )
             if fpga_seq in seen_sequences:
                 raise SystemExit(
                     f"Duplicate FPGA sequence {fpga_seq} for handler {handler}: "
@@ -270,6 +277,7 @@ def select_file_groups(
         )
     return handlers, groups
 
+
 def scale_intensity(values: np.ndarray, scale: str, db_floor: float) -> np.ndarray:
     if scale == "linear":
         return values
@@ -303,11 +311,16 @@ def plot_frequency_maps(
     max_display = scale_intensity(max_intensity, scale, db_floor)
     label = "Intensity [I^2 + Q^2]" if scale == "linear" else "Intensity [dB]"
 
-    figure, axes = plt.subplots(2, 1, figsize=(13, 9), sharex=True, constrained_layout=True)
+    figure, axes = plt.subplots(
+        2, 1, figsize=(13, 9), sharex=True, constrained_layout=True
+    )
     for axis, values, title in zip(
         axes,
         (mean_display, max_display),
-        ("Mean intensity over selected spectra", "Maximum intensity over selected spectra"),
+        (
+            "Mean intensity over selected spectra",
+            "Maximum intensity over selected spectra",
+        ),
     ):
         image = axis.imshow(
             values,
@@ -353,11 +366,16 @@ def plot_time_maps(
     if time_stop <= time_start:
         time_stop = time_start + 1.0
 
-    figure, axes = plt.subplots(2, 1, figsize=(13, 9), sharex=True, constrained_layout=True)
+    figure, axes = plt.subplots(
+        2, 1, figsize=(13, 9), sharex=True, constrained_layout=True
+    )
     for axis, values, title in zip(
         axes,
         (mean_display, max_display),
-        ("Mean intensity per time bin and antenna", "Maximum intensity per time bin and antenna"),
+        (
+            "Mean intensity per time bin and antenna",
+            "Maximum intensity per time bin and antenna",
+        ),
     ):
         image = axis.imshow(
             values,
@@ -444,7 +462,9 @@ def parse_args() -> argparse.Namespace:
         default="all",
         help="Physical antennas: all, a comma list, or ranges such as 0-7,31,63",
     )
-    parser.add_argument("--channel-start", type=int, default=0, help="First local channel")
+    parser.add_argument(
+        "--channel-start", type=int, default=0, help="First local channel"
+    )
     parser.add_argument("--channel-stop", type=int, help="Exclusive last local channel")
     parser.add_argument(
         "--start-spectrum",
@@ -457,7 +477,9 @@ def parse_args() -> argparse.Namespace:
         type=int,
         help="Exclusive last spectrum in the concatenated selected files",
     )
-    parser.add_argument("--spectra-per-frame", type=int, default=DEFAULT_SPECTRA_PER_FRAME)
+    parser.add_argument(
+        "--spectra-per-frame", type=int, default=DEFAULT_SPECTRA_PER_FRAME
+    )
     parser.add_argument("--channels", type=int, default=DEFAULT_CHANNELS)
     parser.add_argument("--elements", type=int, default=DEFAULT_ELEMENTS)
     parser.add_argument(
@@ -494,11 +516,20 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--scale", choices=("linear", "db"), default="db")
     parser.add_argument("--db-floor", type=float, default=-60.0)
-    parser.add_argument("--color-min", type=float, help="Fixed heatmap lower color limit")
-    parser.add_argument("--color-max", type=float, help="Fixed heatmap upper color limit")
-    parser.add_argument("--spectra-grid", action="store_true", help="Also create antenna panels")
     parser.add_argument(
-        "--grid-stat", choices=("mean", "max"), default="mean", help="Statistic for panels"
+        "--color-min", type=float, help="Fixed heatmap lower color limit"
+    )
+    parser.add_argument(
+        "--color-max", type=float, help="Fixed heatmap upper color limit"
+    )
+    parser.add_argument(
+        "--spectra-grid", action="store_true", help="Also create antenna panels"
+    )
+    parser.add_argument(
+        "--grid-stat",
+        choices=("mean", "max"),
+        default="mean",
+        help="Statistic for panels",
     )
     parser.add_argument("--output-prefix", type=Path)
     return parser.parse_args()
@@ -528,7 +559,9 @@ def main() -> None:
     args = parse_args()
 
     # argparse's parser.error is only needed for consistent user-facing validation.
-    validation_parser = argparse.ArgumentParser(prog=Path(__file__).name, add_help=False)
+    validation_parser = argparse.ArgumentParser(
+        prog=Path(__file__).name, add_help=False
+    )
     validate_args(args, validation_parser)
 
     try:
@@ -538,7 +571,9 @@ def main() -> None:
 
     handlers, file_groups = select_file_groups(args)
     possible_spectra = sum(group.spectra for group in file_groups)
-    stop_spectrum = args.stop_spectrum if args.stop_spectrum is not None else possible_spectra
+    stop_spectrum = (
+        args.stop_spectrum if args.stop_spectrum is not None else possible_spectra
+    )
     if not args.start_spectrum < stop_spectrum <= possible_spectra:
         raise SystemExit(
             "Spectrum range must satisfy 0 <= start < stop <= "
@@ -553,14 +588,14 @@ def main() -> None:
     global_channels = np.concatenate(
         [handler * args.channels + local_channels for handler in handlers]
     )
-    frequency_mhz = (
-        DEFAULT_FREQ0_MHZ + global_channels * DEFAULT_CHANNEL_WIDTH_MHZ
-    )
+    frequency_mhz = DEFAULT_FREQ0_MHZ + global_channels * DEFAULT_CHANNEL_WIDTH_MHZ
     output_local_channels = np.tile(local_channels, len(handlers))
     selected_channels = len(global_channels)
 
     frequency_sum = np.zeros((len(antennas), selected_channels), dtype=np.float64)
-    frequency_max = np.full((len(antennas), selected_channels), -np.inf, dtype=np.float32)
+    frequency_max = np.full(
+        (len(antennas), selected_channels), -np.inf, dtype=np.float32
+    )
     included_spectra = 0
     zero_spectra = 0
     inspected_spectra = 0
@@ -603,7 +638,9 @@ def main() -> None:
             file_sequences.append(fpga_seq)
             metadata_sizes.append(metadata_size)
 
-        expected_offsets = tuple(group.fpga_start - sequence for sequence in file_sequences)
+        expected_offsets = tuple(
+            group.fpga_start - sequence for sequence in file_sequences
+        )
         if expected_offsets != group.handler_offsets:
             raise SystemExit(
                 "Internal alignment error: metadata changed while reading files; "
@@ -638,7 +675,9 @@ def main() -> None:
                 zero_by_handler.append(np.all(raw_part == 0, axis=(1, 2)))
 
             raw_all_elements = (
-                np.concatenate(raw_parts, axis=1) if len(raw_parts) > 1 else raw_parts[0]
+                np.concatenate(raw_parts, axis=1)
+                if len(raw_parts) > 1
+                else raw_parts[0]
             )
             # A combined spectrum is incomplete if either handler is entirely zero.
             any_handler_zero = np.any(np.stack(zero_by_handler, axis=0), axis=0)
@@ -658,9 +697,7 @@ def main() -> None:
             if valid_count > 0:
                 valid_power = power[valid]
                 frequency_sum += np.sum(valid_power, axis=0, dtype=np.float64).T
-                frequency_max = np.maximum(
-                    frequency_max, np.max(valid_power, axis=0).T
-                )
+                frequency_max = np.maximum(frequency_max, np.max(valid_power, axis=0).T)
                 included_spectra += valid_count
                 time_mean = np.mean(valid_power, axis=(0, 1), dtype=np.float64)
                 time_max = np.max(valid_power, axis=(0, 1))
@@ -671,7 +708,9 @@ def main() -> None:
             fpga_center = group.fpga_start + 0.5 * (start + stop)
             if time_origin_fpga is None:
                 time_origin_fpga = float(group.fpga_start + start)
-            time_centers.append((fpga_center - time_origin_fpga) / args.spectra_per_second)
+            time_centers.append(
+                (fpga_center - time_origin_fpga) / args.spectra_per_second
+            )
             time_mean_rows.append(time_mean)
             time_max_rows.append(time_max)
             time_zero_fraction.append(float(np.mean(any_handler_zero)))
@@ -754,7 +793,9 @@ def main() -> None:
             )
             print(f"Saved {grid_path}")
     except ImportError as error:
-        raise SystemExit("matplotlib is required to generate intensity plots") from error
+        raise SystemExit(
+            "matplotlib is required to generate intensity plots"
+        ) from error
 
     np.savez(
         npz_path,

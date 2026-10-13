@@ -87,7 +87,8 @@ void rawFileRead::main_thread() {
             if (loop_files && file_num > 0 && (max_repeats < 0 || repeats_done < max_repeats)) {
                 repeats_done++;
                 file_num = 0;
-                INFO("rawFileRead: Loop repeat {:d}/{:d}, rewinding to file 0.", repeats_done, max_repeats);
+                INFO("rawFileRead: Loop repeat {:d}/{:d}, rewinding to file 0.", repeats_done,
+                     max_repeats);
                 continue;
             }
             // Interrupt Kotekan if run out of files to read.

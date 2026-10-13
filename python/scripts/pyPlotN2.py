@@ -8,7 +8,6 @@ import matplotlib.pyplot as plt
 import sys, json
 import time
 
-
 header = json.loads(sys.stdin.readline())
 
 target = open("result", "w")

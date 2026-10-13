@@ -60,13 +60,26 @@ class TestKotekanConstants(unittest.TestCase):
         self.assertTrue(HEADER_PATH.exists(), f"Header {HEADER_PATH} must exist")
         content = HEADER_PATH.read_text(encoding="utf-8")
 
-        self.assertIn("inline constexpr double speed_of_light_m_per_s = 299'792'458.0;", content)
+        self.assertIn(
+            "inline constexpr double speed_of_light_m_per_s = 299'792'458.0;", content
+        )
         self.assertIn("inline constexpr double k_dm = 4148.741601;", content)
-        self.assertIn("inline constexpr float charts_channel_width_hz = 300'000.0F;", content)
-        self.assertIn("inline constexpr std::size_t charts_full_band_channels = 672;", content)
-        self.assertIn("inline constexpr std::size_t charts_local_channels = charts_full_band_channels / charts_shard_count;", content)
-        self.assertIn("inline constexpr double charts_caren_lat_deg = -33.4211146;", content)
-        self.assertIn("inline constexpr double charts_caren_lon_deg = -70.8634710;", content)
+        self.assertIn(
+            "inline constexpr float charts_channel_width_hz = 300'000.0F;", content
+        )
+        self.assertIn(
+            "inline constexpr std::size_t charts_full_band_channels = 672;", content
+        )
+        self.assertIn(
+            "inline constexpr std::size_t charts_local_channels = charts_full_band_channels / charts_shard_count;",
+            content,
+        )
+        self.assertIn(
+            "inline constexpr double charts_caren_lat_deg = -33.4211146;", content
+        )
+        self.assertIn(
+            "inline constexpr double charts_caren_lon_deg = -70.8634710;", content
+        )
         self.assertIn("inline constexpr double charts_caren_alt_m = 458.0;", content)
 
 

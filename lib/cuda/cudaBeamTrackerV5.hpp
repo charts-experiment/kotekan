@@ -2,16 +2,15 @@
 #define CUDA_BEAM_TRACKER_V5_HPP
 
 #include "DataType.hpp" // for kotekan::int4x2_t
+#include "chartsConstants.hpp"
 
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cuda_runtime.h>
 #include <memory>
 #include <vector>
-#include <cuda_runtime.h>
-
-#include "chartsConstants.hpp"
 
 namespace kotekan {
 
@@ -40,9 +39,9 @@ struct CelestialTarget {
 
 // Telescope geographic site location (defaults to CHARTS Carén site)
 struct SiteLocation {
-    double lat_deg = charts::constants::charts_caren_lat_deg;   // Latitude (degrees)
+    double lat_deg = charts::constants::charts_caren_lat_deg; // Latitude (degrees)
     double lon_deg = charts::constants::charts_caren_lon_deg; // Longitude (degrees)
-    double alt_m = charts::constants::charts_caren_alt_m;       // Altitude (meters)
+    double alt_m = charts::constants::charts_caren_alt_m;     // Altitude (meters)
 };
 
 // Trajectory definition
@@ -69,8 +68,7 @@ struct BeamTrackerConfig {
             const unsigned int col = (i < 64) ? (i & 7U) : (i & 15U);
             const unsigned int row = (i < 64) ? (i >> 3U) : (i >> 4U);
             antenna_positions[i] = make_float3(static_cast<float>(col) * spacing_m,
-                                              static_cast<float>(row) * spacing_m,
-                                              0.0f);
+                                               static_cast<float>(row) * spacing_m, 0.0f);
         }
     }
     void set_antenna_grid(std::size_t n_ant, float spacing) {
@@ -79,8 +77,7 @@ struct BeamTrackerConfig {
             const unsigned int col = (n_ant <= 64) ? (i & 7U) : (i & 15U);
             const unsigned int row = (n_ant <= 64) ? (i >> 3U) : (i >> 4U);
             antenna_positions[i] = make_float3(static_cast<float>(col) * spacing_m,
-                                              static_cast<float>(row) * spacing_m,
-                                              0.0f);
+                                               static_cast<float>(row) * spacing_m, 0.0f);
         }
     }
 };
@@ -103,8 +100,7 @@ struct MultiBeamTrackerConfig {
             const unsigned int col = (i < 64) ? (i & 7U) : (i & 15U);
             const unsigned int row = (i < 64) ? (i >> 3U) : (i >> 4U);
             antenna_positions[i] = make_float3(static_cast<float>(col) * spacing_m,
-                                              static_cast<float>(row) * spacing_m,
-                                              0.0f);
+                                               static_cast<float>(row) * spacing_m, 0.0f);
         }
     }
     void set_antenna_grid(std::size_t n_ant, float spacing) {
@@ -113,14 +109,14 @@ struct MultiBeamTrackerConfig {
             const unsigned int col = (n_ant <= 64) ? (i & 7U) : (i & 15U);
             const unsigned int row = (n_ant <= 64) ? (i >> 3U) : (i >> 4U);
             antenna_positions[i] = make_float3(static_cast<float>(col) * spacing_m,
-                                              static_cast<float>(row) * spacing_m,
-                                              0.0f);
+                                               static_cast<float>(row) * spacing_m, 0.0f);
         }
     }
 };
 
 /**
- * @brief Astrometry helper: Converts Celestial (RA, Dec) + Local Sidereal Time to Topocentric Direction Cosines (l, m, n) and rates (dl, dm).
+ * @brief Astrometry helper: Converts Celestial (RA, Dec) + Local Sidereal Time to Topocentric
+ * Direction Cosines (l, m, n) and rates (dl, dm).
  *
  * @param ra_deg            Right ascension in degrees
  * @param dec_deg           Declination in degrees
@@ -129,13 +125,9 @@ struct MultiBeamTrackerConfig {
  * @param sample_period_s   Time sample duration (dt in seconds)
  * @param out_traj          Trajectory struct to populate
  */
-inline void compute_celestial_trajectory(
-    double ra_deg,
-    double dec_deg,
-    double lst_hours,
-    double lat_deg,
-    double sample_period_s,
-    BeamTrackerTrajectory& out_traj) {
+inline void compute_celestial_trajectory(double ra_deg, double dec_deg, double lst_hours,
+                                         double lat_deg, double sample_period_s,
+                                         BeamTrackerTrajectory& out_traj) {
 
     constexpr double DEG_TO_RAD = M_PI / 180.0;
     constexpr double HOURS_TO_RAD = M_PI / 12.0;
@@ -162,11 +154,10 @@ inline void compute_celestial_trajectory(
     const double dl_dt = -cos_dec * cos_ha * EARTH_ROT_RATE_RAD_S;
     const double dm_dt = sin_lat * cos_dec * sin_ha * EARTH_ROT_RATE_RAD_S;
 
-    out_traj.direction_start = Direction3D{static_cast<float>(l), static_cast<float>(m), static_cast<float>(n)};
+    out_traj.direction_start =
+        Direction3D{static_cast<float>(l), static_cast<float>(m), static_cast<float>(n)};
     out_traj.direction_rate_per_sample = DirectionRate2D{
-        static_cast<float>(dl_dt * sample_period_s),
-        static_cast<float>(dm_dt * sample_period_s)
-    };
+        static_cast<float>(dl_dt * sample_period_s), static_cast<float>(dm_dt * sample_period_s)};
     out_traj.celestial_target.ra_deg = ra_deg;
     out_traj.celestial_target.dec_deg = dec_deg;
     out_traj.celestial_target.is_set = true;
@@ -175,22 +166,20 @@ inline void compute_celestial_trajectory(
 /**
  * @brief Launch the V5 Beam Tracker kernel for a single beam with complex voltage output.
  */
-void launch_beam_tracker_v5(
-    const int4x2_t* d_packed,
-    float2* d_voltages,
-    std::size_t n_time,
-    std::size_t n_freq,
-    std::size_t n_ant,
-    const std::vector<double>& frequencies_hz,
-    const BeamTrackerConfig& config,
-    cudaStream_t stream = nullptr,
-    std::size_t window_offset = 0);
+void launch_beam_tracker_v5(const int4x2_t* d_packed, float2* d_voltages, std::size_t n_time,
+                            std::size_t n_freq, std::size_t n_ant,
+                            const std::vector<double>& frequencies_hz,
+                            const BeamTrackerConfig& config, cudaStream_t stream = nullptr,
+                            std::size_t window_offset = 0);
 
 /**
- * @brief Launch the V5 Beam Tracker kernel for multiple dynamic beams with pre-allocated complex voltage output slots.
+ * @brief Launch the V5 Beam Tracker kernel for multiple dynamic beams with pre-allocated complex
+ * voltage output slots.
  *
- * @param d_packed              Device pointer to packed input voltages [time][freq][antenna] (int4x2_t)
- * @param d_voltages            Device pointer to output complex formed beams [time][freq][max_beams_allocated] (float2: real, imag)
+ * @param d_packed              Device pointer to packed input voltages [time][freq][antenna]
+ * (int4x2_t)
+ * @param d_voltages            Device pointer to output complex formed beams
+ * [time][freq][max_beams_allocated] (float2: real, imag)
  * @param n_time                Number of time samples
  * @param n_freq                Number of frequency channels
  * @param n_ant                 Number of antennas (32, 64, 128, or 256)
@@ -200,43 +189,31 @@ void launch_beam_tracker_v5(
  * @param stream                CUDA stream
  * @param window_offset         Time window index offset
  */
-void launch_beam_tracker_v5_multibeam(
-    const int4x2_t* d_packed,
-    float2* d_voltages,
-    std::size_t n_time,
-    std::size_t n_freq,
-    std::size_t n_ant,
-    std::size_t max_beams_allocated,
-    const std::vector<double>& frequencies_hz,
-    const MultiBeamTrackerConfig& config,
-    cudaStream_t stream = nullptr,
-    std::size_t window_offset = 0);
+void launch_beam_tracker_v5_multibeam(const int4x2_t* d_packed, float2* d_voltages,
+                                      std::size_t n_time, std::size_t n_freq, std::size_t n_ant,
+                                      std::size_t max_beams_allocated,
+                                      const std::vector<double>& frequencies_hz,
+                                      const MultiBeamTrackerConfig& config,
+                                      cudaStream_t stream = nullptr, std::size_t window_offset = 0);
 
 /**
  * @brief Persistent Batched Beam Tracker Stream with optional CUDA graph execution.
  */
 class CudaBeamTrackerV5Stream {
 public:
-    CudaBeamTrackerV5Stream(
-        std::size_t n_time_per_batch,
-        std::size_t n_freq,
-        std::size_t n_ant,
-        const std::vector<double>& frequencies_hz,
-        const BeamTrackerConfig& config);
+    CudaBeamTrackerV5Stream(std::size_t n_time_per_batch, std::size_t n_freq, std::size_t n_ant,
+                            const std::vector<double>& frequencies_hz,
+                            const BeamTrackerConfig& config);
     ~CudaBeamTrackerV5Stream();
 
     CudaBeamTrackerV5Stream(const CudaBeamTrackerV5Stream&) = delete;
     CudaBeamTrackerV5Stream& operator=(const CudaBeamTrackerV5Stream&) = delete;
 
-    void process_batch(
-        std::size_t window_offset,
-        const int4x2_t* host_packed,
-        float2* host_voltages);
+    void process_batch(std::size_t window_offset, const int4x2_t* host_packed,
+                       float2* host_voltages);
 
-    void process_batch_device(
-        std::size_t window_offset,
-        const int4x2_t* d_packed,
-        float2* d_voltages);
+    void process_batch_device(std::size_t window_offset, const int4x2_t* d_packed,
+                              float2* d_voltages);
 
     float last_kernel_time_ms() const;
 

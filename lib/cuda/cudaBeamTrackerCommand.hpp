@@ -18,13 +18,13 @@ namespace kotekan {
 
 /**
  * @class cudaBeamTrackerCommand
- * @brief cudaCommand stage plugin for running the V5 Multi-Beam Tracker in cudaProcess with live REST control and Astrometry tracking.
+ * @brief cudaCommand stage plugin for running the V5 Multi-Beam Tracker in cudaProcess with live
+ * REST control and Astrometry tracking.
  */
 class cudaBeamTrackerCommand : public cudaCommand {
 public:
     cudaBeamTrackerCommand(Config& config, const std::string& unique_name,
-                           bufferContainer& host_buffers,
-                           cudaDeviceInterface& device, int inst);
+                           bufferContainer& host_buffers, cudaDeviceInterface& device, int inst);
     ~cudaBeamTrackerCommand() override = default;
 
     cudaEvent_t execute(cudaPipelineState& pipestate,

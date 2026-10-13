@@ -13,37 +13,210 @@ import json
 import argparse
 import numpy as np
 import matplotlib
-matplotlib.use('Agg')
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-def generate_report_and_plots(json_path: str, plot_path: str = "direct_vs_v5_benchmark_comparison.png", md_path: str = "tracker_benchmark_report.md"):
+
+def generate_report_and_plots(
+    json_path: str,
+    plot_path: str = "direct_vs_v5_benchmark_comparison.png",
+    md_path: str = "tracker_benchmark_report.md",
+):
     print("=" * 80)
     print(f" Parsing Benchmark Data from: {json_path}")
     print("=" * 80)
 
     if not os.path.exists(json_path):
-        print(f"[WARN] File {json_path} not found. Synthesizing representative benchmark data for demonstration...")
+        print(
+            f"[WARN] File {json_path} not found. Synthesizing representative benchmark data for demonstration..."
+        )
         data = {
             "gpu_device": "NVIDIA H100 PCIe (Trillium)",
             "n_iterations": 15,
             "frame_budget_ms": 51.2,
             "records": [
-                {"n_ant": 32, "n_time": 15360, "n_freq": 672, "n_beams": 1, "v5_kernel_ms": 0.421, "v5_eff_gb_s": 845.2, "direct_kernel_ms": 0.285, "direct_eff_gb_s": 1248.6, "speedup_ratio": 1.48, "direct_budget_pct": 0.56, "direct_realtime_factor": 179.6, "numerical_parity_pass": True, "max_numerical_err": 0.00012},
-                {"n_ant": 32, "n_time": 15360, "n_freq": 672, "n_beams": 2, "v5_kernel_ms": 0.835, "v5_eff_gb_s": 851.0, "direct_kernel_ms": 0.312, "direct_eff_gb_s": 1420.3, "speedup_ratio": 2.68, "direct_budget_pct": 0.61, "direct_realtime_factor": 164.1, "numerical_parity_pass": True, "max_numerical_err": 0.00012},
-                {"n_ant": 32, "n_time": 15360, "n_freq": 672, "n_beams": 4, "v5_kernel_ms": 1.662, "v5_eff_gb_s": 855.4, "direct_kernel_ms": 0.380, "direct_eff_gb_s": 1780.5, "speedup_ratio": 4.37, "direct_budget_pct": 0.74, "direct_realtime_factor": 134.7, "numerical_parity_pass": True, "max_numerical_err": 0.00012},
-
-                {"n_ant": 64, "n_time": 15360, "n_freq": 672, "n_beams": 1, "v5_kernel_ms": 0.812, "v5_eff_gb_s": 875.1, "direct_kernel_ms": 0.540, "direct_eff_gb_s": 1315.4, "speedup_ratio": 1.50, "direct_budget_pct": 1.05, "direct_realtime_factor": 94.8, "numerical_parity_pass": True, "max_numerical_err": 0.00015},
-                {"n_ant": 64, "n_time": 15360, "n_freq": 672, "n_beams": 2, "v5_kernel_ms": 1.615, "v5_eff_gb_s": 880.2, "direct_kernel_ms": 0.595, "direct_eff_gb_s": 1520.1, "speedup_ratio": 2.71, "direct_budget_pct": 1.16, "direct_realtime_factor": 86.1, "numerical_parity_pass": True, "max_numerical_err": 0.00015},
-                {"n_ant": 64, "n_time": 15360, "n_freq": 672, "n_beams": 4, "v5_kernel_ms": 3.220, "v5_eff_gb_s": 882.0, "direct_kernel_ms": 0.725, "direct_eff_gb_s": 1890.3, "speedup_ratio": 4.44, "direct_budget_pct": 1.42, "direct_realtime_factor": 70.6, "numerical_parity_pass": True, "max_numerical_err": 0.00015},
-
-                {"n_ant": 128, "n_time": 15360, "n_freq": 672, "n_beams": 1, "v5_kernel_ms": 1.610, "v5_eff_gb_s": 882.5, "direct_kernel_ms": 1.050, "direct_eff_gb_s": 1352.0, "speedup_ratio": 1.53, "direct_budget_pct": 2.05, "direct_realtime_factor": 48.8, "numerical_parity_pass": True, "max_numerical_err": 0.00018},
-                {"n_ant": 128, "n_time": 15360, "n_freq": 672, "n_beams": 2, "v5_kernel_ms": 3.205, "v5_eff_gb_s": 886.0, "direct_kernel_ms": 1.160, "direct_eff_gb_s": 1560.2, "speedup_ratio": 2.76, "direct_budget_pct": 2.27, "direct_realtime_factor": 44.1, "numerical_parity_pass": True, "max_numerical_err": 0.00018},
-                {"n_ant": 128, "n_time": 15360, "n_freq": 672, "n_beams": 4, "v5_kernel_ms": 6.390, "v5_eff_gb_s": 888.4, "direct_kernel_ms": 1.410, "direct_eff_gb_s": 1945.0, "speedup_ratio": 4.53, "direct_budget_pct": 2.75, "direct_realtime_factor": 36.3, "numerical_parity_pass": True, "max_numerical_err": 0.00018},
-
-                {"n_ant": 256, "n_time": 15360, "n_freq": 672, "n_beams": 1, "v5_kernel_ms": 3.190, "v5_eff_gb_s": 890.3, "direct_kernel_ms": 2.040, "direct_eff_gb_s": 1390.8, "speedup_ratio": 1.56, "direct_budget_pct": 3.98, "direct_realtime_factor": 25.1, "numerical_parity_pass": True, "max_numerical_err": 0.00021},
-                {"n_ant": 256, "n_time": 15360, "n_freq": 672, "n_beams": 2, "v5_kernel_ms": 6.360, "v5_eff_gb_s": 892.4, "direct_kernel_ms": 2.260, "direct_eff_gb_s": 1602.4, "speedup_ratio": 2.81, "direct_budget_pct": 4.41, "direct_realtime_factor": 22.7, "numerical_parity_pass": True, "max_numerical_err": 0.00021},
-                {"n_ant": 256, "n_time": 15360, "n_freq": 672, "n_beams": 4, "v5_kernel_ms": 12.710, "v5_eff_gb_s": 894.0, "direct_kernel_ms": 2.750, "direct_eff_gb_s": 1995.5, "speedup_ratio": 4.62, "direct_budget_pct": 5.37, "direct_realtime_factor": 18.6, "numerical_parity_pass": True, "max_numerical_err": 0.00021},
-            ]
+                {
+                    "n_ant": 32,
+                    "n_time": 15360,
+                    "n_freq": 672,
+                    "n_beams": 1,
+                    "v5_kernel_ms": 0.421,
+                    "v5_eff_gb_s": 845.2,
+                    "direct_kernel_ms": 0.285,
+                    "direct_eff_gb_s": 1248.6,
+                    "speedup_ratio": 1.48,
+                    "direct_budget_pct": 0.56,
+                    "direct_realtime_factor": 179.6,
+                    "numerical_parity_pass": True,
+                    "max_numerical_err": 0.00012,
+                },
+                {
+                    "n_ant": 32,
+                    "n_time": 15360,
+                    "n_freq": 672,
+                    "n_beams": 2,
+                    "v5_kernel_ms": 0.835,
+                    "v5_eff_gb_s": 851.0,
+                    "direct_kernel_ms": 0.312,
+                    "direct_eff_gb_s": 1420.3,
+                    "speedup_ratio": 2.68,
+                    "direct_budget_pct": 0.61,
+                    "direct_realtime_factor": 164.1,
+                    "numerical_parity_pass": True,
+                    "max_numerical_err": 0.00012,
+                },
+                {
+                    "n_ant": 32,
+                    "n_time": 15360,
+                    "n_freq": 672,
+                    "n_beams": 4,
+                    "v5_kernel_ms": 1.662,
+                    "v5_eff_gb_s": 855.4,
+                    "direct_kernel_ms": 0.380,
+                    "direct_eff_gb_s": 1780.5,
+                    "speedup_ratio": 4.37,
+                    "direct_budget_pct": 0.74,
+                    "direct_realtime_factor": 134.7,
+                    "numerical_parity_pass": True,
+                    "max_numerical_err": 0.00012,
+                },
+                {
+                    "n_ant": 64,
+                    "n_time": 15360,
+                    "n_freq": 672,
+                    "n_beams": 1,
+                    "v5_kernel_ms": 0.812,
+                    "v5_eff_gb_s": 875.1,
+                    "direct_kernel_ms": 0.540,
+                    "direct_eff_gb_s": 1315.4,
+                    "speedup_ratio": 1.50,
+                    "direct_budget_pct": 1.05,
+                    "direct_realtime_factor": 94.8,
+                    "numerical_parity_pass": True,
+                    "max_numerical_err": 0.00015,
+                },
+                {
+                    "n_ant": 64,
+                    "n_time": 15360,
+                    "n_freq": 672,
+                    "n_beams": 2,
+                    "v5_kernel_ms": 1.615,
+                    "v5_eff_gb_s": 880.2,
+                    "direct_kernel_ms": 0.595,
+                    "direct_eff_gb_s": 1520.1,
+                    "speedup_ratio": 2.71,
+                    "direct_budget_pct": 1.16,
+                    "direct_realtime_factor": 86.1,
+                    "numerical_parity_pass": True,
+                    "max_numerical_err": 0.00015,
+                },
+                {
+                    "n_ant": 64,
+                    "n_time": 15360,
+                    "n_freq": 672,
+                    "n_beams": 4,
+                    "v5_kernel_ms": 3.220,
+                    "v5_eff_gb_s": 882.0,
+                    "direct_kernel_ms": 0.725,
+                    "direct_eff_gb_s": 1890.3,
+                    "speedup_ratio": 4.44,
+                    "direct_budget_pct": 1.42,
+                    "direct_realtime_factor": 70.6,
+                    "numerical_parity_pass": True,
+                    "max_numerical_err": 0.00015,
+                },
+                {
+                    "n_ant": 128,
+                    "n_time": 15360,
+                    "n_freq": 672,
+                    "n_beams": 1,
+                    "v5_kernel_ms": 1.610,
+                    "v5_eff_gb_s": 882.5,
+                    "direct_kernel_ms": 1.050,
+                    "direct_eff_gb_s": 1352.0,
+                    "speedup_ratio": 1.53,
+                    "direct_budget_pct": 2.05,
+                    "direct_realtime_factor": 48.8,
+                    "numerical_parity_pass": True,
+                    "max_numerical_err": 0.00018,
+                },
+                {
+                    "n_ant": 128,
+                    "n_time": 15360,
+                    "n_freq": 672,
+                    "n_beams": 2,
+                    "v5_kernel_ms": 3.205,
+                    "v5_eff_gb_s": 886.0,
+                    "direct_kernel_ms": 1.160,
+                    "direct_eff_gb_s": 1560.2,
+                    "speedup_ratio": 2.76,
+                    "direct_budget_pct": 2.27,
+                    "direct_realtime_factor": 44.1,
+                    "numerical_parity_pass": True,
+                    "max_numerical_err": 0.00018,
+                },
+                {
+                    "n_ant": 128,
+                    "n_time": 15360,
+                    "n_freq": 672,
+                    "n_beams": 4,
+                    "v5_kernel_ms": 6.390,
+                    "v5_eff_gb_s": 888.4,
+                    "direct_kernel_ms": 1.410,
+                    "direct_eff_gb_s": 1945.0,
+                    "speedup_ratio": 4.53,
+                    "direct_budget_pct": 2.75,
+                    "direct_realtime_factor": 36.3,
+                    "numerical_parity_pass": True,
+                    "max_numerical_err": 0.00018,
+                },
+                {
+                    "n_ant": 256,
+                    "n_time": 15360,
+                    "n_freq": 672,
+                    "n_beams": 1,
+                    "v5_kernel_ms": 3.190,
+                    "v5_eff_gb_s": 890.3,
+                    "direct_kernel_ms": 2.040,
+                    "direct_eff_gb_s": 1390.8,
+                    "speedup_ratio": 1.56,
+                    "direct_budget_pct": 3.98,
+                    "direct_realtime_factor": 25.1,
+                    "numerical_parity_pass": True,
+                    "max_numerical_err": 0.00021,
+                },
+                {
+                    "n_ant": 256,
+                    "n_time": 15360,
+                    "n_freq": 672,
+                    "n_beams": 2,
+                    "v5_kernel_ms": 6.360,
+                    "v5_eff_gb_s": 892.4,
+                    "direct_kernel_ms": 2.260,
+                    "direct_eff_gb_s": 1602.4,
+                    "speedup_ratio": 2.81,
+                    "direct_budget_pct": 4.41,
+                    "direct_realtime_factor": 22.7,
+                    "numerical_parity_pass": True,
+                    "max_numerical_err": 0.00021,
+                },
+                {
+                    "n_ant": 256,
+                    "n_time": 15360,
+                    "n_freq": 672,
+                    "n_beams": 4,
+                    "v5_kernel_ms": 12.710,
+                    "v5_eff_gb_s": 894.0,
+                    "direct_kernel_ms": 2.750,
+                    "direct_eff_gb_s": 1995.5,
+                    "speedup_ratio": 4.62,
+                    "direct_budget_pct": 5.37,
+                    "direct_realtime_factor": 18.6,
+                    "numerical_parity_pass": True,
+                    "max_numerical_err": 0.00021,
+                },
+            ],
         }
     else:
         with open(json_path, "r") as f:
@@ -60,13 +233,17 @@ def generate_report_and_plots(json_path: str, plot_path: str = "direct_vs_v5_ben
 
     # 1. Generate Plots
     fig, axs = plt.subplots(2, 2, figsize=(15, 11))
-    fig.suptitle(f"CHARTS Beamformer Benchmark Comparison: Direct vs. V5 Baseline\nHardware: {gpu_device} (Frame Budget = 51.2 ms)", fontsize=13, fontweight='bold')
+    fig.suptitle(
+        f"CHARTS Beamformer Benchmark Comparison: Direct vs. V5 Baseline\nHardware: {gpu_device} (Frame Budget = 51.2 ms)",
+        fontsize=13,
+        fontweight="bold",
+    )
 
     # Color palettes
-    v5_color = '#3498db'
-    direct_color = '#e74c3c'
-    speedup_color = '#2ecc71'
-    bw_color = '#9b59b6'
+    v5_color = "#3498db"
+    direct_color = "#e74c3c"
+    speedup_color = "#2ecc71"
+    bw_color = "#9b59b6"
 
     # (A) Latency vs Antenna Count (4 Beams)
     ax_lat = axs[0, 0]
@@ -77,31 +254,76 @@ def generate_report_and_plots(json_path: str, plot_path: str = "direct_vs_v5_ben
 
     x = np.arange(len(ants_4b))
     width = 0.35
-    ax_lat.bar(x - width/2, v5_lat_4b, width, label='V5 Baseline (Window=320)', color=v5_color, edgecolor='black', alpha=0.9)
-    ax_lat.bar(x + width/2, direct_lat_4b, width, label='Direct Tracker (Fused Warp)', color=direct_color, edgecolor='black', alpha=0.9)
-    ax_lat.axhline(51.2, color='red', linestyle='--', label='Real-time Frame Budget (51.2 ms)', lw=1.5)
-    ax_lat.set_xlabel("Antenna Elements (N_ant)", fontweight='bold')
-    ax_lat.set_ylabel("Kernel Execution Time (ms)", fontweight='bold')
-    ax_lat.set_title("Kernel Latency for 4 Concurrent Beams (Lower is Better)", fontweight='bold')
+    ax_lat.bar(
+        x - width / 2,
+        v5_lat_4b,
+        width,
+        label="V5 Baseline (Window=320)",
+        color=v5_color,
+        edgecolor="black",
+        alpha=0.9,
+    )
+    ax_lat.bar(
+        x + width / 2,
+        direct_lat_4b,
+        width,
+        label="Direct Tracker (Fused Warp)",
+        color=direct_color,
+        edgecolor="black",
+        alpha=0.9,
+    )
+    ax_lat.axhline(
+        51.2,
+        color="red",
+        linestyle="--",
+        label="Real-time Frame Budget (51.2 ms)",
+        lw=1.5,
+    )
+    ax_lat.set_xlabel("Antenna Elements (N_ant)", fontweight="bold")
+    ax_lat.set_ylabel("Kernel Execution Time (ms)", fontweight="bold")
+    ax_lat.set_title(
+        "Kernel Latency for 4 Concurrent Beams (Lower is Better)", fontweight="bold"
+    )
     ax_lat.set_xticks(x)
     ax_lat.set_xticklabels([f"{a} Antennas" for a in ants_4b])
-    ax_lat.legend(loc='upper left')
-    ax_lat.grid(True, alpha=0.3, axis='y')
+    ax_lat.legend(loc="upper left")
+    ax_lat.grid(True, alpha=0.3, axis="y")
 
     for i in range(len(ants_4b)):
-        ax_lat.annotate(f"{v5_lat_4b[i]:.2f}ms", (x[i] - width/2, v5_lat_4b[i]), ha='center', va='bottom', fontsize=8.5)
-        ax_lat.annotate(f"{direct_lat_4b[i]:.2f}ms", (x[i] + width/2, direct_lat_4b[i]), ha='center', va='bottom', fontsize=8.5, fontweight='bold')
+        ax_lat.annotate(
+            f"{v5_lat_4b[i]:.2f}ms",
+            (x[i] - width / 2, v5_lat_4b[i]),
+            ha="center",
+            va="bottom",
+            fontsize=8.5,
+        )
+        ax_lat.annotate(
+            f"{direct_lat_4b[i]:.2f}ms",
+            (x[i] + width / 2, direct_lat_4b[i]),
+            ha="center",
+            va="bottom",
+            fontsize=8.5,
+            fontweight="bold",
+        )
 
     # (B) Speedup Factor (Direct vs V5) across Antenna & Beam configurations
     ax_speed = axs[0, 1]
     for b in beam_counts:
         rec_b = [r for r in records if r["n_beams"] == b]
-        ax_speed.plot([r["n_ant"] for r in rec_b], [r["speedup_ratio"] for r in rec_b], marker='o', lw=2.2, label=f"{b} Beam{'s' if b > 1 else ''}")
-    ax_speed.set_xlabel("Antenna Elements (N_ant)", fontweight='bold')
-    ax_speed.set_ylabel("Speedup Ratio (T_V5 / T_Direct)", fontweight='bold')
-    ax_speed.set_title("Speedup Factor over V5 Baseline (Higher is Better)", fontweight='bold')
+        ax_speed.plot(
+            [r["n_ant"] for r in rec_b],
+            [r["speedup_ratio"] for r in rec_b],
+            marker="o",
+            lw=2.2,
+            label=f"{b} Beam{'s' if b > 1 else ''}",
+        )
+    ax_speed.set_xlabel("Antenna Elements (N_ant)", fontweight="bold")
+    ax_speed.set_ylabel("Speedup Ratio (T_V5 / T_Direct)", fontweight="bold")
+    ax_speed.set_title(
+        "Speedup Factor over V5 Baseline (Higher is Better)", fontweight="bold"
+    )
     ax_speed.set_xticks(ant_counts)
-    ax_speed.legend(title="Concurrent Beams", loc='lower right')
+    ax_speed.legend(title="Concurrent Beams", loc="lower right")
     ax_speed.grid(True, alpha=0.3)
     ax_speed.set_ylim(bottom=1.0)
 
@@ -112,11 +334,25 @@ def generate_report_and_plots(json_path: str, plot_path: str = "direct_vs_v5_ben
     v5_256 = [r["v5_kernel_ms"] for r in rec_256]
     direct_256 = [r["direct_kernel_ms"] for r in rec_256]
 
-    ax_multi.plot(b_256, v5_256, marker='s', lw=2.0, color=v5_color, label="V5 Baseline (Linear DRAM re-read)")
-    ax_multi.plot(b_256, direct_256, marker='^', lw=2.5, color=direct_color, label="Direct Tracker (Fused Warp Tiling)")
-    ax_multi.set_xlabel("Number of Concurrent Beams", fontweight='bold')
-    ax_multi.set_ylabel("Kernel Execution Time (ms)", fontweight='bold')
-    ax_multi.set_title("Multi-Beam Scaling at 256 Antennas", fontweight='bold')
+    ax_multi.plot(
+        b_256,
+        v5_256,
+        marker="s",
+        lw=2.0,
+        color=v5_color,
+        label="V5 Baseline (Linear DRAM re-read)",
+    )
+    ax_multi.plot(
+        b_256,
+        direct_256,
+        marker="^",
+        lw=2.5,
+        color=direct_color,
+        label="Direct Tracker (Fused Warp Tiling)",
+    )
+    ax_multi.set_xlabel("Number of Concurrent Beams", fontweight="bold")
+    ax_multi.set_ylabel("Kernel Execution Time (ms)", fontweight="bold")
+    ax_multi.set_title("Multi-Beam Scaling at 256 Antennas", fontweight="bold")
     ax_multi.set_xticks(beam_counts)
     ax_multi.legend()
     ax_multi.grid(True, alpha=0.3)
@@ -129,15 +365,31 @@ def generate_report_and_plots(json_path: str, plot_path: str = "direct_vs_v5_ben
     direct_bw = [r["direct_eff_gb_s"] for r in rec_4b_bw]
 
     x_bw = np.arange(len(ants_bw))
-    ax_bw.bar(x_bw - width/2, v5_bw, width, label='V5 Effective BW', color='#7f8c8d', edgecolor='black', alpha=0.85)
-    ax_bw.bar(x_bw + width/2, direct_bw, width, label='Direct Effective BW (Register Fused)', color=bw_color, edgecolor='black', alpha=0.9)
-    ax_bw.set_xlabel("Antenna Elements (N_ant)", fontweight='bold')
-    ax_bw.set_ylabel("Effective Bandwidth (GB/s)", fontweight='bold')
-    ax_bw.set_title("Effective Compute Throughput (4 Beams)", fontweight='bold')
+    ax_bw.bar(
+        x_bw - width / 2,
+        v5_bw,
+        width,
+        label="V5 Effective BW",
+        color="#7f8c8d",
+        edgecolor="black",
+        alpha=0.85,
+    )
+    ax_bw.bar(
+        x_bw + width / 2,
+        direct_bw,
+        width,
+        label="Direct Effective BW (Register Fused)",
+        color=bw_color,
+        edgecolor="black",
+        alpha=0.9,
+    )
+    ax_bw.set_xlabel("Antenna Elements (N_ant)", fontweight="bold")
+    ax_bw.set_ylabel("Effective Bandwidth (GB/s)", fontweight="bold")
+    ax_bw.set_title("Effective Compute Throughput (4 Beams)", fontweight="bold")
     ax_bw.set_xticks(x_bw)
     ax_bw.set_xticklabels([f"{a} Antennas" for a in ants_bw])
-    ax_bw.legend(loc='lower right')
-    ax_bw.grid(True, alpha=0.3, axis='y')
+    ax_bw.legend(loc="lower right")
+    ax_bw.grid(True, alpha=0.3, axis="y")
 
     plt.tight_layout()
     plt.savefig(plot_path, dpi=180)
@@ -146,47 +398,91 @@ def generate_report_and_plots(json_path: str, plot_path: str = "direct_vs_v5_ben
 
     # 2. Generate Markdown Report
     with open(md_path, "w") as f:
-        f.write("# CHARTS Beamformer Benchmark: Direct Beam Tracker vs. Beam Tracker V5\n\n")
+        f.write(
+            "# CHARTS Beamformer Benchmark: Direct Beam Tracker vs. Beam Tracker V5\n\n"
+        )
         f.write(f"**Hardware Environment:** `{gpu_device}`  \n")
-        f.write(f"**Payload Configuration:** `15,360` time samples (Real-time Budget: `51.2 ms`), `672` frequency channels  \n\n")
+        f.write(
+            f"**Payload Configuration:** `15,360` time samples (Real-time Budget: `51.2 ms`), `672` frequency channels  \n\n"
+        )
 
         f.write("## 1. Architectural Summary\n\n")
-        f.write("| Feature | Beam Tracker V5 (Baseline) | Direct Beam Tracker (New) |\n")
+        f.write(
+            "| Feature | Beam Tracker V5 (Baseline) | Direct Beam Tracker (New) |\n"
+        )
         f.write("| :--- | :--- | :--- |\n")
-        f.write("| **Integration Window** | 320 time samples (~1.07 ms piecewise constant) | **Zero window (exact instantaneous weights)** |\n")
-        f.write("| **Phase Drift / Jitter** | Discrete step jumps every 320 samples | **Zero step jumps (continuous or exact grid)** |\n")
-        f.write("| **Multi-Beam Memory Access** | Reads input voltage $B$ times (once per beam) | **Reads input voltage ONCE for up to 4 beams** |\n")
-        f.write("| **Register Architecture** | Standard warp unrolling ($U=8$) | **Fused Warp Tiling ($B_{\\text{tile}}=4, U=4$)** |\n")
-        f.write("| **Cache Hierarchy** | Default L2 stream allocation | **L2 Persisting Cache Policy Window** |\n\n")
+        f.write(
+            "| **Integration Window** | 320 time samples (~1.07 ms piecewise constant) | **Zero window (exact instantaneous weights)** |\n"
+        )
+        f.write(
+            "| **Phase Drift / Jitter** | Discrete step jumps every 320 samples | **Zero step jumps (continuous or exact grid)** |\n"
+        )
+        f.write(
+            "| **Multi-Beam Memory Access** | Reads input voltage $B$ times (once per beam) | **Reads input voltage ONCE for up to 4 beams** |\n"
+        )
+        f.write(
+            "| **Register Architecture** | Standard warp unrolling ($U=8$) | **Fused Warp Tiling ($B_{\\text{tile}}=4, U=4$)** |\n"
+        )
+        f.write(
+            "| **Cache Hierarchy** | Default L2 stream allocation | **L2 Persisting Cache Policy Window** |\n\n"
+        )
 
         f.write("## 2. Performance Comparison Table\n\n")
-        f.write("| Antennas | Beams | V5 Latency (ms) | Direct Latency (ms) | Speedup Ratio | Direct Throughput | Real-Time Headroom | Budget % | Parity |\n")
-        f.write("| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |\n")
+        f.write(
+            "| Antennas | Beams | V5 Latency (ms) | Direct Latency (ms) | Speedup Ratio | Direct Throughput | Real-Time Headroom | Budget % | Parity |\n"
+        )
+        f.write(
+            "| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |\n"
+        )
 
         for r in records:
-            f.write(f"| **{r['n_ant']}** | {r['n_beams']} | {r['v5_kernel_ms']:.3f} ms | **{r['direct_kernel_ms']:.3f} ms** | "
-                    f"**{r['speedup_ratio']:.2f}x** | {r['direct_eff_gb_s']:.1f} GB/s | {r['direct_realtime_factor']:.1f}x | "
-                    f"{r['direct_budget_pct']:.1f}% | {'PASS' if r.get('numerical_parity_pass', True) else 'FAIL'} |\n")
+            f.write(
+                f"| **{r['n_ant']}** | {r['n_beams']} | {r['v5_kernel_ms']:.3f} ms | **{r['direct_kernel_ms']:.3f} ms** | "
+                f"**{r['speedup_ratio']:.2f}x** | {r['direct_eff_gb_s']:.1f} GB/s | {r['direct_realtime_factor']:.1f}x | "
+                f"{r['direct_budget_pct']:.1f}% | {'PASS' if r.get('numerical_parity_pass', True) else 'FAIL'} |\n"
+            )
 
         f.write("\n## 3. Key Findings & Conclusion\n\n")
-        f.write("1. **Substantial Multi-Beam Speedup:** At 4 beams, the Direct Beam Tracker achieves a **~4.3x to 4.6x speedup** across all array scales (32 to 256 antennas) due to multi-beam register fusion eliminating redundant global DRAM reads.\n")
-        f.write("2. **Zero Integration Window Jitter:** Eliminates the ~1.07 ms window approximation of V5, preventing phase decorrelation during fast transient or moving source tracking.\n")
-        f.write("3. **Real-time Headroom:** Even for the full 256-antenna array with 4 simultaneous beams, the Direct Beam Tracker requires only **2.75 ms** out of the **51.2 ms** budget (utilizing just **5.4%** of the frame period, offering an **18.6x real-time speedup**).\n")
+        f.write(
+            "1. **Substantial Multi-Beam Speedup:** At 4 beams, the Direct Beam Tracker achieves a **~4.3x to 4.6x speedup** across all array scales (32 to 256 antennas) due to multi-beam register fusion eliminating redundant global DRAM reads.\n"
+        )
+        f.write(
+            "2. **Zero Integration Window Jitter:** Eliminates the ~1.07 ms window approximation of V5, preventing phase decorrelation during fast transient or moving source tracking.\n"
+        )
+        f.write(
+            "3. **Real-time Headroom:** Even for the full 256-antenna array with 4 simultaneous beams, the Direct Beam Tracker requires only **2.75 ms** out of the **51.2 ms** budget (utilizing just **5.4%** of the frame period, offering an **18.6x real-time speedup**).\n"
+        )
 
     print(f"Markdown benchmark report saved to: {md_path}")
     print("=" * 80)
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Generate benchmark comparison plots and report")
-    parser.add_argument("json_file", nargs="?", default="tracker_benchmark_comparison.json",
-                        help="Path to tracker_benchmark_comparison.json")
-    parser.add_argument("--plot-out", default="direct_vs_v5_benchmark_comparison.png",
-                        help="Path to output comparison plot PNG")
-    parser.add_argument("--md-out", default="tracker_benchmark_report.md",
-                        help="Path to output markdown report")
+    parser = argparse.ArgumentParser(
+        description="Generate benchmark comparison plots and report"
+    )
+    parser.add_argument(
+        "json_file",
+        nargs="?",
+        default="tracker_benchmark_comparison.json",
+        help="Path to tracker_benchmark_comparison.json",
+    )
+    parser.add_argument(
+        "--plot-out",
+        default="direct_vs_v5_benchmark_comparison.png",
+        help="Path to output comparison plot PNG",
+    )
+    parser.add_argument(
+        "--md-out",
+        default="tracker_benchmark_report.md",
+        help="Path to output markdown report",
+    )
     args = parser.parse_args()
 
-    generate_report_and_plots(args.json_file, plot_path=args.plot_out, md_path=args.md_out)
+    generate_report_and_plots(
+        args.json_file, plot_path=args.plot_out, md_path=args.md_out
+    )
+
 
 if __name__ == "__main__":
     main()

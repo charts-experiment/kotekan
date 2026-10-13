@@ -51,8 +51,12 @@ def load_astron_correlator_dump(
             f"File {bin_path} payload size {payload_size} bytes is less than expected {expected_bytes} bytes."
         )
 
-    raw_ints = np.frombuffer(raw, dtype="<i4", count=expected_ints, offset=payload_offset)
-    packed = raw_ints.reshape(num_channels, num_baselines, polarizations, polarizations, 2)
+    raw_ints = np.frombuffer(
+        raw, dtype="<i4", count=expected_ints, offset=payload_offset
+    )
+    packed = raw_ints.reshape(
+        num_channels, num_baselines, polarizations, polarizations, 2
+    )
     c_data = packed[..., 0].astype(np.float64) + 1j * packed[..., 1].astype(np.float64)
 
     # Reconstruct full (channels, num_elements, num_elements) Hermitian matrix
@@ -135,12 +139,18 @@ def inspect_tracker_dump(
 
     payload_size = raw.size - payload_offset
     if payload_size < expected_bytes:
-        raise ValueError(f"Payload size {payload_size} is less than expected {expected_bytes}")
+        raise ValueError(
+            f"Payload size {payload_size} is less than expected {expected_bytes}"
+        )
 
-    raw_floats = np.frombuffer(raw, dtype="<f4", count=expected_floats, offset=payload_offset)
+    raw_floats = np.frombuffer(
+        raw, dtype="<f4", count=expected_floats, offset=payload_offset
+    )
     # Shape: (samples, freq, beams, 2)
     shaped = raw_floats.reshape(samples_per_data_set, num_freq, max_beams, 2)
-    c_voltages = shaped[..., 0].astype(np.float64) + 1j * shaped[..., 1].astype(np.float64)
+    c_voltages = shaped[..., 0].astype(np.float64) + 1j * shaped[..., 1].astype(
+        np.float64
+    )
 
     # Power per beam: average over time and sum over frequency
     beam_powers = np.mean(np.sum(np.abs(c_voltages) ** 2, axis=1), axis=0)

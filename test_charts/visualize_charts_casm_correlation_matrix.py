@@ -55,6 +55,7 @@ from typing import Dict, List, Optional, Tuple
 
 try:
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import numpy as np
@@ -76,6 +77,7 @@ if str(_test_charts_dir) not in sys.path:
 
 try:
     import h5py
+
     HAS_H5PY = True
 except ImportError:
     HAS_H5PY = False
@@ -108,6 +110,7 @@ INT4_LUT = np.array(
 # =============================================================================
 # Antenna Subset Selection for CASM Matrix
 # =============================================================================
+
 
 def select_representative_antennas(
     total_antennas: int = 64,
@@ -148,6 +151,7 @@ def select_representative_antennas(
 # Data Loaders: Correlator Dumps, Baseband Dumps, and Physical Simulation
 # =============================================================================
 
+
 def load_visibilities_from_correlator_dir(
     corr_dir: Path,
     num_elements: int = 64,
@@ -174,15 +178,23 @@ def load_visibilities_from_correlator_dir(
     sampled_files = [bin_files[i] for i in indices]
 
     num_times = len(sampled_files)
-    print(f"Loading {num_times} sampled correlator dumps (out of {total_files} total) from {corr_dir} ...")
+    print(
+        f"Loading {num_times} sampled correlator dumps (out of {total_files} total) from {corr_dir} ..."
+    )
 
-    vis_cube = np.zeros((num_times, num_channels, num_elements, num_elements), dtype=np.complex128)
+    vis_cube = np.zeros(
+        (num_times, num_channels, num_elements, num_elements), dtype=np.complex128
+    )
     for t_idx, fpath in enumerate(sampled_files):
-        vis = load_astron_correlator_dump(fpath, num_elements=num_elements, num_channels=num_channels)
+        vis = load_astron_correlator_dump(
+            fpath, num_elements=num_elements, num_channels=num_channels
+        )
         vis_cube[t_idx] = vis
 
     time_s = np.linspace(0.0, duration_s, num_times)
-    freq_mhz = DEFAULT_FREQUENCY_START_MHZ + np.arange(num_channels) * CHARTS_CHANNEL_WIDTH_MHZ
+    freq_mhz = (
+        DEFAULT_FREQUENCY_START_MHZ + np.arange(num_channels) * CHARTS_CHANNEL_WIDTH_MHZ
+    )
     return vis_cube, time_s, freq_mhz
 
 
@@ -227,7 +239,9 @@ def load_visibilities_from_baseband(
         total_time = num_frames * samples_per_frame
         raw_arr = np.fromfile(baseband_path, dtype=np.uint8)
         # Reshape to (total_time, n_freq, n_ant) then transpose
-        shaped = raw_arr[:total_time * n_freq * n_ant].reshape(total_time, n_freq, n_ant)
+        shaped = raw_arr[: total_time * n_freq * n_ant].reshape(
+            total_time, n_freq, n_ant
+        )
         raw_data = np.transpose(shaped, (2, 1, 0))
         dt_us = FPGA_TIME_RESOLUTION_US
         f_start = DEFAULT_FREQUENCY_START_MHZ
@@ -248,7 +262,9 @@ def load_visibilities_from_baseband(
         v_chunk = voltages[:, :, t_slice]  # (n_ant, n_freq, chunk_len)
         # Cross product: V_ij = sum_t (v_i * conj(v_j)) / chunk_len
         # Einsum: 'ift,jft->fij'
-        vis_cube[c_idx] = np.einsum("ift,jft->fij", v_chunk, np.conj(v_chunk)) / float(chunk_len)
+        vis_cube[c_idx] = np.einsum("ift,jft->fij", v_chunk, np.conj(v_chunk)) / float(
+            chunk_len
+        )
 
     total_duration_s = total_time * dt_us * 1e-6
     time_s = np.linspace(0.0, total_duration_s, actual_chunks)
@@ -272,7 +288,9 @@ def simulate_transit_visibilities(
       - Mutual coupling cross-talk on short baselines (<= 1.2m).
       - Antenna thermal noise and non-linear ADC clipping on saturated feeds.
     """
-    target_key = "sun" if "sun" in scenario else ("vela" if "vela" in scenario else "sgr_a")
+    target_key = (
+        "sun" if "sun" in scenario else ("vela" if "vela" in scenario else "sgr_a")
+    )
     target = ASTRONOMICAL_CATALOG.get(target_key, ASTRONOMICAL_CATALOG["sun"])
 
     pos_x, pos_y = get_charts_64_antenna_positions(num_elements, spacing_m)
@@ -280,7 +298,9 @@ def simulate_transit_visibilities(
     amp = float(target["nominal_amp"])
 
     time_s = np.linspace(0.0, duration_s, num_times)
-    freq_mhz = DEFAULT_FREQUENCY_START_MHZ + np.arange(num_channels) * CHARTS_CHANNEL_WIDTH_MHZ
+    freq_mhz = (
+        DEFAULT_FREQUENCY_START_MHZ + np.arange(num_channels) * CHARTS_CHANNEL_WIDTH_MHZ
+    )
     freq_hz = freq_mhz * 1e6
     two_pi = 2.0 * np.pi
     c_inv = 1.0 / C_LIGHT
@@ -290,7 +310,9 @@ def simulate_transit_visibilities(
     # Transit drift: l(t) shifts primarily East-West with time
     dl_dt = np.cos(np.radians(target["dec_deg"])) * omega_earth
 
-    vis_cube = np.zeros((num_times, num_channels, num_elements, num_elements), dtype=np.complex128)
+    vis_cube = np.zeros(
+        (num_times, num_channels, num_elements, num_elements), dtype=np.complex128
+    )
     rng = np.random.default_rng(42)
 
     # Base noise sigmas per antenna
@@ -304,7 +326,9 @@ def simulate_transit_visibilities(
     sat_feeds = DEFAULT_SATURATED_ANTENNAS if saturate else []
 
     # Mutual coupling cross-talk matrix C_ij(f) for short baselines (<= 1.8m)
-    crosstalk_matrix = np.zeros((num_channels, num_elements, num_elements), dtype=np.complex128)
+    crosstalk_matrix = np.zeros(
+        (num_channels, num_elements, num_elements), dtype=np.complex128
+    )
     if add_crosstalk:
         for i in range(num_elements):
             for j in range(i + 1, num_elements):
@@ -347,9 +371,16 @@ def simulate_transit_visibilities(
                 v_frame[:, a, a] += (sigmas[a] ** 2) * 20.0
             # Cross-noise fluctuations
             noise_cross = (
-                rng.normal(0, 0.04, size=(num_channels, num_elements, num_elements))
-                + 1j * rng.normal(0, 0.04, size=(num_channels, num_elements, num_elements))
-            ) * np.outer(sigmas, sigmas)[None, :, :] * 5.0
+                (
+                    rng.normal(0, 0.04, size=(num_channels, num_elements, num_elements))
+                    + 1j
+                    * rng.normal(
+                        0, 0.04, size=(num_channels, num_elements, num_elements)
+                    )
+                )
+                * np.outer(sigmas, sigmas)[None, :, :]
+                * 5.0
+            )
             v_frame += 0.5 * (noise_cross + np.conj(np.swapaxes(noise_cross, 1, 2)))
 
         # Saturation effects on flagged feeds
@@ -367,6 +398,7 @@ def simulate_transit_visibilities(
 # =============================================================================
 # CASM-Style Triangular Matrix Visualizer
 # =============================================================================
+
 
 def plot_casm_correlation_matrix(
     vis_cube: np.ndarray,
@@ -480,11 +512,15 @@ def plot_casm_correlation_matrix(
                 # Visibility time-frequency slice: V_ij(t, f)
                 # vis_cube shape: (num_times, num_channels, 64, 64)
                 v_ij_tf = vis_cube[:, :, ant_i, ant_j]  # (num_times, num_channels)
-                re_v = np.real(v_ij_tf).T  # Transpose to (num_channels, num_times) -> (Freq, Time)
+                re_v = np.real(
+                    v_ij_tf
+                ).T  # Transpose to (num_channels, num_times) -> (Freq, Time)
 
                 # Normalize by auto-power to make fringes uniform across channels
-                auto_norm = np.sqrt(np.outer(auto_spectra[ant_i], np.ones(len(time_s))) *
-                                    np.outer(auto_spectra[ant_j], np.ones(len(time_s))))
+                auto_norm = np.sqrt(
+                    np.outer(auto_spectra[ant_i], np.ones(len(time_s)))
+                    * np.outer(auto_spectra[ant_j], np.ones(len(time_s)))
+                )
                 norm_re_v = re_v / np.maximum(1e-6, auto_norm)
 
                 # Clip real component to highlight fringe stripes
@@ -525,7 +561,13 @@ def plot_casm_correlation_matrix(
                 dx = pos_x[ant_j] - pos_x[selected_antennas[0]]
                 dy = pos_y[ant_j] - pos_y[selected_antennas[0]]
                 header_text = f"({dx:.1f}m, {dy:.1f}m)"
-                ax.set_title(header_text, fontsize=7.0, color=text_color, pad=4, fontweight="bold")
+                ax.set_title(
+                    header_text,
+                    fontsize=7.0,
+                    color=text_color,
+                    pad=4,
+                    fontweight="bold",
+                )
 
     # Master Title & CASM Caption at bottom
     if title is None:
@@ -541,7 +583,16 @@ def plot_casm_correlation_matrix(
         "frequency (vertical axis) and time (horizontal axis). We plot a clipped real-component of V_ij showing geometric fringe patterns.\n"
         "The impact of cross-talk can be seen in short (<= 1.8 m) baselines. Diagonals show each antenna's unflattened auto-spectrum."
     )
-    fig.text(0.50, 0.025, caption_text, ha="center", va="center", fontsize=9.0, style="italic", color=sub_text_color)
+    fig.text(
+        0.50,
+        0.025,
+        caption_text,
+        ha="center",
+        va="center",
+        fontsize=9.0,
+        style="italic",
+        color=sub_text_color,
+    )
 
     output_png.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(output_png, dpi=180, facecolor=fig.get_facecolor(), edgecolor="none")
@@ -554,6 +605,7 @@ def plot_casm_correlation_matrix(
 # =============================================================================
 # CLI Main Routine
 # =============================================================================
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -579,7 +631,8 @@ def main():
         help="Celestial scenario for simulation or fallback (default: sun_with_noise).",
     )
     parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         type=Path,
         default=None,
         help="Output PNG file path (default: ./dumps_charts_64ant/plots/casm_correlation_matrix_<scenario>.png).",
@@ -591,7 +644,8 @@ def main():
         help="Directory to save generated plots (default: ./dumps_charts_64ant/plots).",
     )
     parser.add_argument(
-        "--num-antennas", "-n",
+        "--num-antennas",
+        "-n",
         type=int,
         default=16,
         help="Number of antennas to include in matrix (default: 16 matching CASM Figure 11; use 8 for fast compact view).",
@@ -631,7 +685,8 @@ def main():
         help="Simulation window duration in seconds (default: 60.0 = 1 minute).",
     )
     parser.add_argument(
-        "--num-channels", "--num-freq",
+        "--num-channels",
+        "--num-freq",
         dest="num_channels",
         type=int,
         default=672,
@@ -650,11 +705,17 @@ def main():
     if args.all_antennas:
         selected_antennas = list(range(64))
     elif args.antennas:
-        selected_antennas = [int(x.strip()) for x in args.antennas.split(",") if x.strip().isdigit()]
+        selected_antennas = [
+            int(x.strip()) for x in args.antennas.split(",") if x.strip().isdigit()
+        ]
     else:
-        selected_antennas = select_representative_antennas(total_antennas=64, num_selected=args.num_antennas)
+        selected_antennas = select_representative_antennas(
+            total_antennas=64, num_selected=args.num_antennas
+        )
 
-    print(f"Selected {len(selected_antennas)} antennas for CASM matrix: {selected_antennas}")
+    print(
+        f"Selected {len(selected_antennas)} antennas for CASM matrix: {selected_antennas}"
+    )
 
     # Determine data source: Correlator Dumps > Baseband Dump > Simulated Transit
     vis_cube = None
@@ -680,11 +741,15 @@ def main():
             vis_cube, time_s, freq_mhz = load_visibilities_from_baseband(args.baseband)
             source_desc = f"Baseband Dump ({args.baseband.name})"
         except Exception as e:
-            print(f"[WARN] Failed to compute correlations from baseband {args.baseband}: {e}")
+            print(
+                f"[WARN] Failed to compute correlations from baseband {args.baseband}: {e}"
+            )
 
     # Fallback to high-fidelity analytical transit simulation with cross-talk
     if vis_cube is None:
-        print(f"Generating physical transit simulation with cross-talk for: {args.scenario} ...")
+        print(
+            f"Generating physical transit simulation with cross-talk for: {args.scenario} ..."
+        )
         vis_cube, time_s, freq_mhz = simulate_transit_visibilities(
             scenario=args.scenario,
             num_elements=64,
@@ -703,7 +768,10 @@ def main():
         stem = args.scenario
         if args.baseband:
             stem = args.baseband.stem.replace("_64ant_5ms", "")
-        output_png = args.plots_dir / f"casm_correlation_matrix_{stem}_{len(selected_antennas)}ant.png"
+        output_png = (
+            args.plots_dir
+            / f"casm_correlation_matrix_{stem}_{len(selected_antennas)}ant.png"
+        )
 
     plot_casm_correlation_matrix(
         vis_cube=vis_cube,

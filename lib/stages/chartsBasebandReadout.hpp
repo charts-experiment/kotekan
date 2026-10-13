@@ -5,8 +5,8 @@
 #include "Stage.hpp"
 #include "buffer.hpp"
 #include "bufferContainer.hpp"
-#include "visUtil.hpp"
 #include "chartsMetadata.hpp"
+#include "visUtil.hpp"
 
 #include <cstdint>
 #include <mutex>
@@ -16,8 +16,8 @@
 // For now hardcoding the trigger request as a struct, but this should be replaced
 struct ChartsTriggerRequest {
     uint64_t event_id;
-    int64_t start_fpga;   // spex index
-    int64_t length_fpga;  // number of specs
+    int64_t start_fpga;  // spex index
+    int64_t length_fpga; // number of specs
 };
 
 class chartsBasebandReadout : public kotekan::Stage {
@@ -30,7 +30,7 @@ public:
 
 private:
     int _num_frames_buffer;
-    int _samples_per_data_set;   // specs per frame
+    int _samples_per_data_set; // specs per frame
     int _num_elements;
     int64_t _max_dump_samples;
     uint64_t _freq_id;
@@ -56,12 +56,9 @@ private:
     void lock_range(int start_frame, int end_frame);
     void unlock_range(int start_frame, int end_frame);
 
-    bool wait_for_data(ChartsTriggerRequest& trigger,
-                       int& dump_start_frame,
-                       int& dump_end_frame);
+    bool wait_for_data(ChartsTriggerRequest& trigger, int& dump_start_frame, int& dump_end_frame);
 
-    bool extract_data(const ChartsTriggerRequest& trigger,
-                      int dump_start_frame,
+    bool extract_data(const ChartsTriggerRequest& trigger, int dump_start_frame,
                       int dump_end_frame);
 };
 

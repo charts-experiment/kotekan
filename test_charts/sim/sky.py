@@ -74,9 +74,11 @@ _VERIFIED_TARGETS_CANDIDATES = [
 # Verified target catalog
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class VerifiedTarget:
     """One SIMBAD-verified catalog target with its confirmed transit."""
+
     label: str
     ra_deg: float
     dec_deg: float
@@ -102,7 +104,9 @@ class VerifiedTarget:
         """Direction cosines (l, m) at the confirmed transit time."""
         lst_h = datetime_to_lst_hours(self.transit_dt)
         l, m, _ = direction_cosines_track(
-            self.ra_deg, self.dec_deg, np.array([self.transit_dt.timestamp()]),
+            self.ra_deg,
+            self.dec_deg,
+            np.array([self.transit_dt.timestamp()]),
             lat_deg=lat_deg,
         )
         return float(l[0]), float(m[0])
@@ -115,7 +119,9 @@ def _default_catalog_path() -> Optional[Path]:
     return None
 
 
-def load_verified_catalog(path: Optional[Union[str, Path]] = None) -> Dict[str, VerifiedTarget]:
+def load_verified_catalog(
+    path: Optional[Union[str, Path]] = None,
+) -> Dict[str, VerifiedTarget]:
     """Loads the SIMBAD-verified target catalog confirmed by the tracker-viewer routine.
 
     Returns a dict keyed by lowercased label, e.g. ``"vela snr / psr b0833-45"``.
@@ -128,7 +134,12 @@ def load_verified_catalog(path: Optional[Union[str, Path]] = None) -> Dict[str, 
     else:
         try:
             from .verified_catalog_data import VERIFIED_TARGETS_RAW
-            data = json.loads(VERIFIED_TARGETS_RAW) if isinstance(VERIFIED_TARGETS_RAW, str) else VERIFIED_TARGETS_RAW
+
+            data = (
+                json.loads(VERIFIED_TARGETS_RAW)
+                if isinstance(VERIFIED_TARGETS_RAW, str)
+                else VERIFIED_TARGETS_RAW
+            )
         except Exception:
             raise FileNotFoundError(
                 "verified_targets.json not found on disk and fallback catalog is unavailable. "
@@ -143,7 +154,9 @@ def load_verified_catalog(path: Optional[Union[str, Path]] = None) -> Dict[str, 
             dec_deg=float(t["dec_deg"]),
             transit_local=str(t.get("transit_local", "")),
             transit_utc=str(t.get("transit_utc", "")),
-            max_alt_deg=float(t["max_alt_deg"]) if t.get("max_alt_deg") is not None else None,
+            max_alt_deg=(
+                float(t["max_alt_deg"]) if t.get("max_alt_deg") is not None else None
+            ),
             rise_local=str(t.get("rise_local", "")),
             set_local=str(t.get("set_local", "")),
             hours_above_mask=float(t.get("hours_above_mask", 0.0)),
@@ -170,13 +183,23 @@ def find_verified_target(
         return cat[key]
 
     # Substring match on label or simbad_id
-    matches = [v for k, v in cat.items() if key in k or (v.simbad_id and key in v.simbad_id.lower())]
+    matches = [
+        v
+        for k, v in cat.items()
+        if key in k or (v.simbad_id and key in v.simbad_id.lower())
+    ]
     if len(matches) == 1:
         return matches[0]
     if len(matches) > 1:
         # Prefer the match where the query appears at a word start
         for v in matches:
-            words = v.label.lower().replace("/", " ").replace("(", " ").replace(")", " ").split()
+            words = (
+                v.label.lower()
+                .replace("/", " ")
+                .replace("(", " ")
+                .replace(")", " ")
+                .split()
+            )
             if any(w.startswith(key) for w in words):
                 return v
         return matches[0]
@@ -185,7 +208,8 @@ def find_verified_target(
     norm_key = "".join(c for c in key if c.isalnum())
     if norm_key:
         norm_matches = [
-            v for k, v in cat.items()
+            v
+            for k, v in cat.items()
             if norm_key in "".join(c for c in k if c.isalnum())
         ]
         if norm_matches:
@@ -199,6 +223,7 @@ def find_verified_target(
 # ---------------------------------------------------------------------------
 # Time-evolving direction cosines (Kotekan parity)
 # ---------------------------------------------------------------------------
+
 
 def direction_cosines_track(
     ra_deg: float,
@@ -283,13 +308,18 @@ def geometric_phase_track(
         generator is $A \exp(-j\phi)$ so that the X-engine's conjugate weights
         ($w = \exp(+j\phi)$, see ``generate_steering_weights_kernel``) cohere.
     """
-    delays = (np.outer(l_track, pos_x_m) + np.outer(m_track, pos_y_m)) / C_LIGHT  # (n_t, n_ant)
-    return (2.0 * math.pi) * (freqs_hz[:, None] * delays[:, None, :])  # (n_t, n_freq, n_ant)
+    delays = (
+        np.outer(l_track, pos_x_m) + np.outer(m_track, pos_y_m)
+    ) / C_LIGHT  # (n_t, n_ant)
+    return (2.0 * math.pi) * (
+        freqs_hz[:, None] * delays[:, None, :]
+    )  # (n_t, n_freq, n_ant)
 
 
 # ---------------------------------------------------------------------------
 # Transit-anchored observation time resolution
 # ---------------------------------------------------------------------------
+
 
 def resolve_window_start(
     time_spec: Optional[Union[str, datetime.datetime, float]],
@@ -321,7 +351,9 @@ def resolve_window_start(
     catalog:
         Pre-loaded verified catalog (loaded on demand otherwise).
     """
-    if time_spec is None or (isinstance(time_spec, str) and time_spec.strip().lower() == "now"):
+    if time_spec is None or (
+        isinstance(time_spec, str) and time_spec.strip().lower() == "now"
+    ):
         return datetime.datetime.now(datetime.timezone.utc)
 
     if isinstance(time_spec, datetime.datetime):
@@ -339,11 +371,15 @@ def resolve_window_start(
         offset_s = 0.0
         head = s.split(":", 1)[0]
         if head.lower() != "transit":
-            offset_s = float(head[len("transit"):])
+            offset_s = float(head[len("transit") :])
         if not body:
-            raise ValueError(f"Transit spec '{s}' needs a target name: 'transit:<Target>'")
+            raise ValueError(
+                f"Transit spec '{s}' needs a target name: 'transit:<Target>'"
+            )
         target = find_verified_target(body, catalog=cat)
-        start = target.transit_dt - datetime.timedelta(seconds=duration_s / 2.0 + offset_s)
+        start = target.transit_dt - datetime.timedelta(
+            seconds=duration_s / 2.0 + offset_s
+        )
         return start
 
     # Routine slot: "slot:09:00" (local solar set-hour, viewer-routine convention)
@@ -354,7 +390,9 @@ def resolve_window_start(
     return _anchor_to_catalog_date(s, catalog)
 
 
-def _catalog_date(catalog: Optional[Dict[str, VerifiedTarget]] = None) -> datetime.datetime:
+def _catalog_date(
+    catalog: Optional[Dict[str, VerifiedTarget]] = None,
+) -> datetime.datetime:
     """The catalog reference date (e.g. 2026-10-07) at 00:00 UTC."""
     cat = catalog if catalog is not None else load_verified_catalog()
     any_target = next(iter(cat.values()))
@@ -426,7 +464,11 @@ def _catalog_local_utc_offset(
         if not match:
             continue
         local_h = int(match.group(1)) + int(match.group(2)) / 60.0
-        utc_h = v.transit_dt.hour + v.transit_dt.minute / 60.0 + v.transit_dt.second / 3600.0
+        utc_h = (
+            v.transit_dt.hour
+            + v.transit_dt.minute / 60.0
+            + v.transit_dt.second / 3600.0
+        )
         offsets.append((utc_h - local_h) % 24.0)
     if not offsets:
         return datetime.timedelta(hours=-CHARTS_LONGITUDE_DEG / 15.0)
@@ -444,14 +486,16 @@ def catalog_transit_summary(
     cat = catalog if catalog is not None else load_verified_catalog()
     entries = []
     for v in cat.values():
-        entries.append({
-            "label": v.label,
-            "ra_deg": v.ra_deg,
-            "dec_deg": v.dec_deg,
-            "transit_utc": v.transit_utc,
-            "transit_local": v.transit_local,
-            "max_alt_deg": v.max_alt_deg,
-            "hours_above_mask": v.hours_above_mask,
-        })
+        entries.append(
+            {
+                "label": v.label,
+                "ra_deg": v.ra_deg,
+                "dec_deg": v.dec_deg,
+                "transit_utc": v.transit_utc,
+                "transit_local": v.transit_local,
+                "max_alt_deg": v.max_alt_deg,
+                "hours_above_mask": v.hours_above_mask,
+            }
+        )
     entries.sort(key=lambda e: e["transit_utc"])
     return entries

@@ -54,7 +54,9 @@ def create_window_replay_yaml(
     """Writes Kotekan YAML configuration for rawFileRead -> cudaCorrelatorAstron -> rawFileWrite."""
     yaml_path.parent.mkdir(parents=True, exist_ok=True)
     block_size = 2
-    num_blocks = (num_elements // block_size) * (num_elements // block_size + 1) // 2  # 528 for 64 elements
+    num_blocks = (
+        (num_elements // block_size) * (num_elements // block_size + 1) // 2
+    )  # 528 for 64 elements
     elements_per_thread_block = 32
 
     content = f"""######################################################################
@@ -171,7 +173,9 @@ write_correlator_output:
         f.write(content)
 
 
-def auto_detect_window_info(window_dir: Path, base_name: Optional[str] = None) -> Tuple[str, int, Optional[Path]]:
+def auto_detect_window_info(
+    window_dir: Path, base_name: Optional[str] = None
+) -> Tuple[str, int, Optional[Path]]:
     """Auto-detects base name, frame count, and metadata file in window directory."""
     if base_name is None:
         meta_files = list(window_dir.glob("*_meta.h5"))
@@ -181,7 +185,9 @@ def auto_detect_window_info(window_dir: Path, base_name: Optional[str] = None) -
         else:
             bin_files = sorted(window_dir.glob("*.bin"))
             if not bin_files:
-                raise FileNotFoundError(f"No .bin or _meta.h5 files found in {window_dir}")
+                raise FileNotFoundError(
+                    f"No .bin or _meta.h5 files found in {window_dir}"
+                )
             # win15UTC_64ant_0000000.bin -> win15UTC_64ant
             first_bin = bin_files[0].stem
             name = "_".join(first_bin.split("_")[:-1])
@@ -205,7 +211,9 @@ def auto_detect_window_info(window_dir: Path, base_name: Optional[str] = None) -
 
 
 def select_key_inspection_frames(
-    num_frames: int, meta_file: Optional[Path] = None, events_file: Optional[Path] = None
+    num_frames: int,
+    meta_file: Optional[Path] = None,
+    events_file: Optional[Path] = None,
 ) -> List[int]:
     """Selects representative frames (first background, event peak, final frame)."""
     selected = [0]
@@ -224,7 +232,11 @@ def select_key_inspection_frames(
         except Exception:
             pass
 
-    if event_out_idx is not None and event_out_idx not in selected and event_out_idx < num_frames:
+    if (
+        event_out_idx is not None
+        and event_out_idx not in selected
+        and event_out_idx < num_frames
+    ):
         selected.append(event_out_idx)
     else:
         mid_idx = num_frames // 2
@@ -254,13 +266,17 @@ def run_window_correlator(
 ):
     """Executes Kotekan correlator replay on 5-minute window frames."""
     window_dir = window_dir.resolve()
-    base_name, detected_frames, meta_file = auto_detect_window_info(window_dir, file_name)
+    base_name, detected_frames, meta_file = auto_detect_window_info(
+        window_dir, file_name
+    )
     n_frames = num_frames or detected_frames
 
     if n_frames <= 0:
         raise ValueError(f"No frames found to correlate in {window_dir}")
 
-    kotekan_executable = (kotekan_bin or (_kotekan_root / "build" / "kotekan" / "kotekan")).resolve()
+    kotekan_executable = (
+        kotekan_bin or (_kotekan_root / "build" / "kotekan" / "kotekan")
+    ).resolve()
     if not kotekan_executable.exists():
         raise FileNotFoundError(f"Kotekan binary not found at: {kotekan_executable}")
 
@@ -305,7 +321,9 @@ def run_window_correlator(
     # 2. Setup Environment & Execute Kotekan
     print(f"\n[2/3] Executing Kotekan AstronCorrelator over {n_frames} frames...")
     env = dict(os.environ)
-    env["LD_LIBRARY_PATH"] = f"{_kotekan_root / 'build' / 'external' / 'n2k'}:{env.get('LD_LIBRARY_PATH', '')}"
+    env["LD_LIBRARY_PATH"] = (
+        f"{_kotekan_root / 'build' / 'external' / 'n2k'}:{env.get('LD_LIBRARY_PATH', '')}"
+    )
 
     if "CUDA_HOME" not in env:
         for var in ["CUDA_ROOT", "EBROOTCUDA", "CUDA_PATH"]:
@@ -314,6 +332,7 @@ def run_window_correlator(
                 break
         if "CUDA_HOME" not in env:
             import shutil
+
             nvcc_bin = shutil.which("nvcc")
             if nvcc_bin:
                 env["CUDA_HOME"] = str(Path(nvcc_bin).resolve().parent.parent)
@@ -325,7 +344,9 @@ def run_window_correlator(
 
     cmd = [str(kotekan_executable), "--config", str(yaml_path)]
     t0 = time.perf_counter()
-    res = subprocess.run(cmd, cwd=str(_kotekan_root), env=env, capture_output=True, text=True)
+    res = subprocess.run(
+        cmd, cwd=str(_kotekan_root), env=env, capture_output=True, text=True
+    )
     t1 = time.perf_counter()
 
     if res.returncode != 0:
@@ -336,21 +357,27 @@ def run_window_correlator(
         print(res.stdout[-2000:] if len(res.stdout) > 2000 else res.stdout)
         sys.exit(1)
 
-    print(f"    Kotekan correlation completed in {(t1 - t0):.2f} s ({(t1 - t0) / max(1, n_frames):.3f} s/frame)")
+    print(
+        f"    Kotekan correlation completed in {(t1 - t0):.2f} s ({(t1 - t0) / max(1, n_frames):.3f} s/frame)"
+    )
 
     # 3. Inspect Selected Frames and Generate Plots
     print("\n[3/3] Inspecting Visibilities & Generating Diagnostic Plots...")
     if inspect_frames_arg == "auto":
         frames_to_inspect = select_key_inspection_frames(n_frames, meta_file=meta_file)
     else:
-        frames_to_inspect = [int(x.strip()) for x in inspect_frames_arg.split(",") if x.strip().isdigit()]
+        frames_to_inspect = [
+            int(x.strip()) for x in inspect_frames_arg.split(",") if x.strip().isdigit()
+        ]
 
     print(f"    Selected frames for inspection: {frames_to_inspect}")
 
     for f_idx in frames_to_inspect:
         corr_file = c_dir / f"{corr_name}_{f_idx:07d}.bin"
         if not corr_file.exists():
-            print(f"    [WARNING] Correlation frame {corr_file.name} not found, skipping inspection.")
+            print(
+                f"    [WARNING] Correlation frame {corr_file.name} not found, skipping inspection."
+            )
             continue
 
         plot_file = p_dir / f"{corr_name}_frame{f_idx:07d}_inspection.png"
@@ -373,17 +400,57 @@ def run_window_correlator(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CHARTS 5-Minute Window Correlator Replay Runner")
-    parser.add_argument("--window-dir", type=str, required=True, help="Directory containing window .bin and _meta.h5")
-    parser.add_argument("--file-name", type=str, default=None, help="Base name of stream files")
-    parser.add_argument("--num-frames", type=int, default=None, help="Number of frames to correlate (default: auto)")
-    parser.add_argument("--kotekan-bin", type=str, default=None, help="Path to kotekan binary")
-    parser.add_argument("--corr-dir", type=str, default=None, help="Output directory for correlation dumps")
-    parser.add_argument("--plots-dir", type=str, default=None, help="Output directory for diagnostic plots")
-    parser.add_argument("--configs-dir", type=str, default=None, help="Output directory for generated YAML configs")
-    parser.add_argument("--antennas", type=int, default=64, help="Number of antennas (default: 64)")
-    parser.add_argument("--num-freq", type=int, default=672, help="Frequency channels (default: 672)")
-    parser.add_argument("--samples-per-frame", type=int, default=1536, help="Samples per frame (default: 1536)")
+    parser = argparse.ArgumentParser(
+        description="CHARTS 5-Minute Window Correlator Replay Runner"
+    )
+    parser.add_argument(
+        "--window-dir",
+        type=str,
+        required=True,
+        help="Directory containing window .bin and _meta.h5",
+    )
+    parser.add_argument(
+        "--file-name", type=str, default=None, help="Base name of stream files"
+    )
+    parser.add_argument(
+        "--num-frames",
+        type=int,
+        default=None,
+        help="Number of frames to correlate (default: auto)",
+    )
+    parser.add_argument(
+        "--kotekan-bin", type=str, default=None, help="Path to kotekan binary"
+    )
+    parser.add_argument(
+        "--corr-dir",
+        type=str,
+        default=None,
+        help="Output directory for correlation dumps",
+    )
+    parser.add_argument(
+        "--plots-dir",
+        type=str,
+        default=None,
+        help="Output directory for diagnostic plots",
+    )
+    parser.add_argument(
+        "--configs-dir",
+        type=str,
+        default=None,
+        help="Output directory for generated YAML configs",
+    )
+    parser.add_argument(
+        "--antennas", type=int, default=64, help="Number of antennas (default: 64)"
+    )
+    parser.add_argument(
+        "--num-freq", type=int, default=672, help="Frequency channels (default: 672)"
+    )
+    parser.add_argument(
+        "--samples-per-frame",
+        type=int,
+        default=1536,
+        help="Samples per frame (default: 1536)",
+    )
     parser.add_argument(
         "--inspect-frames",
         type=str,

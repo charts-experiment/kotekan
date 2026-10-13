@@ -1,14 +1,14 @@
-#include "cudaDirectBeamTracker.hpp"
 #include "chartsConstants.hpp"
+#include "cudaDirectBeamTracker.hpp"
 #include "cudaUtils.hpp"
 
-#include <cuda_runtime.h>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <cuda_runtime.h>
 #include <iomanip>
 #include <iostream>
 #include <numeric>
@@ -54,8 +54,7 @@ std::vector<float3> compute_positions(std::size_t n_ant, float spacing_m) {
         const unsigned int col = (n_ant <= 64) ? (a & 7U) : (a & 15U);
         const unsigned int row = (n_ant <= 64) ? (a >> 3U) : (a >> 4U);
         pos[a] = make_float3(static_cast<float>(col) * spacing_m,
-                             static_cast<float>(row) * spacing_m,
-                             0.0f);
+                             static_cast<float>(row) * spacing_m, 0.0f);
     }
     return pos;
 }
@@ -87,11 +86,13 @@ bool test_analytical_phasor_rotation() {
         const float err_r = W.x - true_r;
         const float err_i = W.y - true_i;
         const float err = std::sqrt(err_r * err_r + err_i * err_i);
-        if (err > max_phase_err) max_phase_err = err;
+        if (err > max_phase_err)
+            max_phase_err = err;
 
         const float norm = std::sqrt(W.x * W.x + W.y * W.y);
         const float norm_err = std::abs(norm - 1.0f);
-        if (norm_err > max_norm_err) max_norm_err = norm_err;
+        if (norm_err > max_norm_err)
+            max_norm_err = norm_err;
 
         // Advance phasor via complex multiplication
         W = complex_mul(W, dW);
@@ -139,14 +140,16 @@ bool test_chunk_boundary_continuity() {
         const std::size_t t_start_c1 = (c + 1) * time_chunk_size;
         const float2 W_c1_start = complex_mul(W0, complex_pow_int(dW, t_start_c1));
 
-        const float jump = std::sqrt(
-            (W_next_step.x - W_c1_start.x) * (W_next_step.x - W_c1_start.x) +
-            (W_next_step.y - W_c1_start.y) * (W_next_step.y - W_c1_start.y));
-        if (jump > max_chunk_jump) max_chunk_jump = jump;
+        const float jump =
+            std::sqrt((W_next_step.x - W_c1_start.x) * (W_next_step.x - W_c1_start.x)
+                      + (W_next_step.y - W_c1_start.y) * (W_next_step.y - W_c1_start.y));
+        if (jump > max_chunk_jump)
+            max_chunk_jump = jump;
     }
 
     std::cout << "  - Evaluated " << num_chunks - 1 << " chunk boundaries (256-sample chunks)\n";
-    std::cout << "  - Max Boundary Phase Discontinuity: " << std::scientific << max_chunk_jump << "\n";
+    std::cout << "  - Max Boundary Phase Discontinuity: " << std::scientific << max_chunk_jump
+              << "\n";
 
     const bool passed = (max_chunk_jump < 1e-5f);
     std::cout << "  -> Result: " << (passed ? "PASSED [OK]" : "FAILED [X]") << "\n";
@@ -173,8 +176,10 @@ bool test_frame_boundary_continuity() {
     const double delta_l_frame = angular_rate * frame_duration_s;
     const double delta_phase_frame = k * baseline_m * delta_l_frame;
 
-    std::cout << "  - Frame duration: " << frame_duration_s * 1000.0 << " ms (" << M << " samples)\n";
-    std::cout << "  - Drift per frame: " << delta_phase_frame * (180.0 / M_PI) << " deg (" << delta_phase_frame << " rad)\n";
+    std::cout << "  - Frame duration: " << frame_duration_s * 1000.0 << " ms (" << M
+              << " samples)\n";
+    std::cout << "  - Drift per frame: " << delta_phase_frame * (180.0 / M_PI) << " deg ("
+              << delta_phase_frame << " rad)\n";
 
     // Static beamforming without interpolation:
     const double static_phase_step = delta_phase_frame;
@@ -188,8 +193,8 @@ bool test_frame_boundary_continuity() {
     std::cout << "  - Sub-frame boundary phase jump:    " << interp_phase_step << " rad ("
               << interp_phase_step * (180.0 / M_PI) << " deg)\n";
     std::cout << "  - Phase jump suppression factor:    " << std::fixed << std::setprecision(1)
-              << step_suppression_factor << "x ("
-              << 20.0 * std::log10(step_suppression_factor) << " dB)\n";
+              << step_suppression_factor << "x (" << 20.0 * std::log10(step_suppression_factor)
+              << " dB)\n";
 
     const bool passed = (interp_phase_step < static_phase_step / 10000.0);
     std::cout << "  -> Result: " << (passed ? "PASSED [OK]" : "FAILED [X]") << "\n";
@@ -255,7 +260,8 @@ bool test_multibeam_gpu_vs_cpu() {
     const auto h_positions = compute_positions(n_ant, 0.6f);
 
     // CPU analytical reference computation
-    std::cout << "  - Computing CPU double-precision reference across " << n_time << " samples...\n";
+    std::cout << "  - Computing CPU double-precision reference across " << n_time
+              << " samples...\n";
     std::vector<float2> cpu_voltages(output_elements, make_float2(0.0f, 0.0f));
 
     const double norm_factor = 1.0 / std::sqrt(static_cast<double>(n_ant));
@@ -274,18 +280,20 @@ bool test_multibeam_gpu_vs_cpu() {
                 double sum_i = 0.0;
 
                 for (std::size_t a = 0; a < n_ant; ++a) {
-                    const double delay_m = static_cast<double>(h_positions[a].x) * l_t +
-                                           static_cast<double>(h_positions[a].y) * m_t +
-                                           static_cast<double>(h_positions[a].z) * n_t;
+                    const double delay_m = static_cast<double>(h_positions[a].x) * l_t
+                                           + static_cast<double>(h_positions[a].y) * m_t
+                                           + static_cast<double>(h_positions[a].z) * n_t;
                     const double phase = k_f * delay_m;
                     const double w_r = std::cos(phase) * norm_factor;
                     const double w_i = std::sin(phase) * norm_factor;
 
                     const uint8_t byte_val = h_packed[(t * n_freq + f) * n_ant + a].val;
                     int v_r = static_cast<int>(byte_val & 0x0F);
-                    if (v_r >= 8) v_r -= 16;
+                    if (v_r >= 8)
+                        v_r -= 16;
                     int v_i = static_cast<int>((byte_val >> 4) & 0x0F);
-                    if (v_i >= 8) v_i -= 16;
+                    if (v_i >= 8)
+                        v_i -= 16;
 
                     // Complex MAC: s = v * W
                     sum_r += w_r * static_cast<double>(v_r) - w_i * static_cast<double>(v_i);
@@ -312,38 +320,43 @@ bool test_multibeam_gpu_vs_cpu() {
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_voltages, output_elements * sizeof(float2)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_weights, weights_elements * sizeof(float2)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_step_weights, weights_elements * sizeof(float2)));
-    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_dirs_start, num_beams * sizeof(kotekan::DirectDirection3D)));
-    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_dirs_end, num_beams * sizeof(kotekan::DirectDirection3D)));
+    CHECK_CUDA_ERROR_NON_OO(
+        cudaMalloc(&d_dirs_start, num_beams * sizeof(kotekan::DirectDirection3D)));
+    CHECK_CUDA_ERROR_NON_OO(
+        cudaMalloc(&d_dirs_end, num_beams * sizeof(kotekan::DirectDirection3D)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_wavenumbers, n_freq * sizeof(double)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_positions, n_ant * sizeof(float3)));
 
-    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_packed, h_packed.data(), input_elements * sizeof(kotekan::int4x2_t), cudaMemcpyHostToDevice));
-    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_dirs_start, h_dirs_start.data(), num_beams * sizeof(kotekan::DirectDirection3D), cudaMemcpyHostToDevice));
-    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_dirs_end, h_dirs_end.data(), num_beams * sizeof(kotekan::DirectDirection3D), cudaMemcpyHostToDevice));
-    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_wavenumbers, h_wavenumbers.data(), n_freq * sizeof(double), cudaMemcpyHostToDevice));
-    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_positions, h_positions.data(), n_ant * sizeof(float3), cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_packed, h_packed.data(),
+                                       input_elements * sizeof(kotekan::int4x2_t),
+                                       cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_dirs_start, h_dirs_start.data(),
+                                       num_beams * sizeof(kotekan::DirectDirection3D),
+                                       cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_dirs_end, h_dirs_end.data(),
+                                       num_beams * sizeof(kotekan::DirectDirection3D),
+                                       cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_wavenumbers, h_wavenumbers.data(), n_freq * sizeof(double),
+                                       cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_positions, h_positions.data(), n_ant * sizeof(float3),
+                                       cudaMemcpyHostToDevice));
 
     cudaStream_t stream;
     CHECK_CUDA_ERROR_NON_OO(cudaStreamCreate(&stream));
 
-    kotekan::launch_generate_steering_weights(
-        d_weights, d_step_weights,
-        d_dirs_start, d_dirs_end,
-        d_wavenumbers, d_positions,
-        nullptr, nullptr,
-        num_beams, n_freq, n_ant,
-        n_time, n_ant, stream);
+    kotekan::launch_generate_steering_weights(d_weights, d_step_weights, d_dirs_start, d_dirs_end,
+                                              d_wavenumbers, d_positions, nullptr, nullptr,
+                                              num_beams, n_freq, n_ant, n_time, n_ant, stream);
 
-    kotekan::launch_direct_beamformer(
-        d_packed, d_weights, d_step_weights,
-        d_voltages, n_time, n_freq, n_ant,
-        num_beams, max_beams_stride,
-        256, 4, 4, stream);
+    kotekan::launch_direct_beamformer(d_packed, d_weights, d_step_weights, d_voltages, n_time,
+                                      n_freq, n_ant, num_beams, max_beams_stride, 256, 4, 4,
+                                      stream);
 
     CHECK_CUDA_ERROR_NON_OO(cudaStreamSynchronize(stream));
 
     std::vector<float2> gpu_voltages(output_elements);
-    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(gpu_voltages.data(), d_voltages, output_elements * sizeof(float2), cudaMemcpyDeviceToHost));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(gpu_voltages.data(), d_voltages,
+                                       output_elements * sizeof(float2), cudaMemcpyDeviceToHost));
 
     // Calculate error metrics
     double sum_sq_err = 0.0;
@@ -354,7 +367,8 @@ bool test_multibeam_gpu_vs_cpu() {
         const float err_r = gpu_voltages[i].x - cpu_voltages[i].x;
         const float err_i = gpu_voltages[i].y - cpu_voltages[i].y;
         const float abs_err = std::sqrt(err_r * err_r + err_i * err_i);
-        if (abs_err > max_abs_err) max_abs_err = abs_err;
+        if (abs_err > max_abs_err)
+            max_abs_err = abs_err;
 
         sum_sq_err += err_r * err_r + err_i * err_i;
         sum_sq_sig += cpu_voltages[i].x * cpu_voltages[i].x + cpu_voltages[i].y * cpu_voltages[i].y;
@@ -363,9 +377,11 @@ bool test_multibeam_gpu_vs_cpu() {
     const double rms_error = std::sqrt(sum_sq_err / static_cast<double>(output_elements));
     const double snr_db = 10.0 * std::log10(sum_sq_sig / (sum_sq_err + 1e-12));
 
-    std::cout << "  - Max Absolute Error vs CPU Reference: " << std::scientific << max_abs_err << "\n";
+    std::cout << "  - Max Absolute Error vs CPU Reference: " << std::scientific << max_abs_err
+              << "\n";
     std::cout << "  - RMS Error vs CPU Reference:          " << rms_error << "\n";
-    std::cout << "  - Reconstruction SNR:                   " << std::fixed << std::setprecision(2) << snr_db << " dB\n";
+    std::cout << "  - Reconstruction SNR:                   " << std::fixed << std::setprecision(2)
+              << snr_db << " dB\n";
 
     cudaFree(d_packed);
     cudaFree(d_voltages);
@@ -429,26 +445,29 @@ bool test_masked_normalization_with_interpolation() {
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_wavenumbers, sizeof(double)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_positions, n_ant * sizeof(float3)));
 
-    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_mask, h_mask.data(), n_ant * sizeof(uint8_t), cudaMemcpyHostToDevice));
-    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_dirs_start, h_dirs_start.data(), sizeof(kotekan::DirectDirection3D), cudaMemcpyHostToDevice));
-    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_dirs_end, h_dirs_end.data(), sizeof(kotekan::DirectDirection3D), cudaMemcpyHostToDevice));
-    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_wavenumbers, h_wavenumbers.data(), sizeof(double), cudaMemcpyHostToDevice));
-    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_positions, h_positions.data(), n_ant * sizeof(float3), cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(
+        cudaMemcpy(d_mask, h_mask.data(), n_ant * sizeof(uint8_t), cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_dirs_start, h_dirs_start.data(),
+                                       sizeof(kotekan::DirectDirection3D), cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_dirs_end, h_dirs_end.data(),
+                                       sizeof(kotekan::DirectDirection3D), cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(
+        cudaMemcpy(d_wavenumbers, h_wavenumbers.data(), sizeof(double), cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_positions, h_positions.data(), n_ant * sizeof(float3),
+                                       cudaMemcpyHostToDevice));
 
-    kotekan::launch_generate_steering_weights(
-        d_weights, d_step_weights,
-        d_dirs_start, d_dirs_end,
-        d_wavenumbers, d_positions,
-        d_mask, nullptr,
-        num_beams, n_freq, n_ant,
-        n_time, n_active, nullptr);
+    kotekan::launch_generate_steering_weights(d_weights, d_step_weights, d_dirs_start, d_dirs_end,
+                                              d_wavenumbers, d_positions, d_mask, nullptr,
+                                              num_beams, n_freq, n_ant, n_time, n_active, nullptr);
 
     CHECK_CUDA_ERROR_NON_OO(cudaDeviceSynchronize());
 
     std::vector<float2> h_weights(n_ant);
     std::vector<float2> h_step_weights(n_ant);
-    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(h_weights.data(), d_weights, n_ant * sizeof(float2), cudaMemcpyDeviceToHost));
-    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(h_step_weights.data(), d_step_weights, n_ant * sizeof(float2), cudaMemcpyDeviceToHost));
+    CHECK_CUDA_ERROR_NON_OO(
+        cudaMemcpy(h_weights.data(), d_weights, n_ant * sizeof(float2), cudaMemcpyDeviceToHost));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(h_step_weights.data(), d_step_weights,
+                                       n_ant * sizeof(float2), cudaMemcpyDeviceToHost));
 
     bool pass = true;
     const float expected_norm = 1.0f / std::sqrt(static_cast<float>(n_active));
@@ -458,17 +477,21 @@ bool test_masked_normalization_with_interpolation() {
             // Masked antenna must be exactly zero
             if (h_weights[a].x != 0.0f || h_weights[a].y != 0.0f) {
                 pass = false;
-                std::cout << "  [FAIL] Masked antenna " << a << " non-zero: (" << h_weights[a].x << ", " << h_weights[a].y << ")\n";
+                std::cout << "  [FAIL] Masked antenna " << a << " non-zero: (" << h_weights[a].x
+                          << ", " << h_weights[a].y << ")\n";
             }
         } else {
             // Active antenna norm must match 1/sqrt(48)
-            const float norm = std::sqrt(h_weights[a].x * h_weights[a].x + h_weights[a].y * h_weights[a].y);
+            const float norm =
+                std::sqrt(h_weights[a].x * h_weights[a].x + h_weights[a].y * h_weights[a].y);
             if (std::abs(norm - expected_norm) > 1e-5f) {
                 pass = false;
-                std::cout << "  [FAIL] Active antenna " << a << " norm " << norm << " != expected " << expected_norm << "\n";
+                std::cout << "  [FAIL] Active antenna " << a << " norm " << norm << " != expected "
+                          << expected_norm << "\n";
             }
             // Step rotator must have unit norm
-            const float step_norm = std::sqrt(h_step_weights[a].x * h_step_weights[a].x + h_step_weights[a].y * h_step_weights[a].y);
+            const float step_norm = std::sqrt(h_step_weights[a].x * h_step_weights[a].x
+                                              + h_step_weights[a].y * h_step_weights[a].y);
             if (std::abs(step_norm - 1.0f) > 1e-5f) {
                 pass = false;
                 std::cout << "  [FAIL] Step rotator " << a << " norm " << step_norm << " != 1.0\n";
@@ -476,7 +499,8 @@ bool test_masked_normalization_with_interpolation() {
         }
     }
 
-    std::cout << "  - Expected active antenna weight norm: 1/sqrt(" << n_active << ") = " << expected_norm << "\n";
+    std::cout << "  - Expected active antenna weight norm: 1/sqrt(" << n_active
+              << ") = " << expected_norm << "\n";
     std::cout << "  - Masked antennas [0..15] strictly zeroed: YES\n";
     std::cout << "  - Active antennas [16..63] normalized correctly: YES\n";
 
@@ -497,7 +521,8 @@ bool test_masked_normalization_with_interpolation() {
 // ============================================================================
 bool test_performance_benchmark() {
     std::cout << "\n======================================================\n";
-    std::cout << "[Test 6/6] GPU Execution Latency Benchmark (15,360 Samples, 4 Beams, 336 Frequencies)\n";
+    std::cout << "[Test 6/6] GPU Execution Latency Benchmark (15,360 Samples, 4 Beams, 336 "
+                 "Frequencies)\n";
     std::cout << "======================================================\n";
 
     int device_count = 0;
@@ -538,10 +563,9 @@ bool test_performance_benchmark() {
 
     // Warmup
     for (int i = 0; i < 5; ++i) {
-        kotekan::launch_direct_beamformer(
-            d_packed, d_weights, d_step_weights, d_voltages,
-            n_time, n_freq, n_ant, num_beams, max_beams_stride,
-            256, 4, 4, stream);
+        kotekan::launch_direct_beamformer(d_packed, d_weights, d_step_weights, d_voltages, n_time,
+                                          n_freq, n_ant, num_beams, max_beams_stride, 256, 4, 4,
+                                          stream);
     }
     CHECK_CUDA_ERROR_NON_OO(cudaStreamSynchronize(stream));
 
@@ -549,10 +573,9 @@ bool test_performance_benchmark() {
     constexpr int ITERS = 50;
     CHECK_CUDA_ERROR_NON_OO(cudaEventRecord(start, stream));
     for (int i = 0; i < ITERS; ++i) {
-        kotekan::launch_direct_beamformer(
-            d_packed, d_weights, d_step_weights, d_voltages,
-            n_time, n_freq, n_ant, num_beams, max_beams_stride,
-            256, 4, 4, stream);
+        kotekan::launch_direct_beamformer(d_packed, d_weights, d_step_weights, d_voltages, n_time,
+                                          n_freq, n_ant, num_beams, max_beams_stride, 256, 4, 4,
+                                          stream);
     }
     CHECK_CUDA_ERROR_NON_OO(cudaEventRecord(stop, stream));
     CHECK_CUDA_ERROR_NON_OO(cudaEventSynchronize(stop));
@@ -564,10 +587,8 @@ bool test_performance_benchmark() {
     // Benchmark without Interpolation (static weights)
     CHECK_CUDA_ERROR_NON_OO(cudaEventRecord(start, stream));
     for (int i = 0; i < ITERS; ++i) {
-        kotekan::launch_direct_beamformer(
-            d_packed, d_weights, nullptr, d_voltages,
-            n_time, n_freq, n_ant, num_beams, max_beams_stride,
-            256, 4, 4, stream);
+        kotekan::launch_direct_beamformer(d_packed, d_weights, nullptr, d_voltages, n_time, n_freq,
+                                          n_ant, num_beams, max_beams_stride, 256, 4, 4, stream);
     }
     CHECK_CUDA_ERROR_NON_OO(cudaEventRecord(stop, stream));
     CHECK_CUDA_ERROR_NON_OO(cudaEventSynchronize(stop));
@@ -576,13 +597,15 @@ bool test_performance_benchmark() {
     CHECK_CUDA_ERROR_NON_OO(cudaEventElapsedTime(&ms_static, start, stop));
     const float avg_ms_static = ms_static / static_cast<float>(ITERS);
 
-    const double data_gb = static_cast<double>(input_bytes + output_bytes) / (1024.0 * 1024.0 * 1024.0);
+    const double data_gb =
+        static_cast<double>(input_bytes + output_bytes) / (1024.0 * 1024.0 * 1024.0);
     const double tp_interp = data_gb / (avg_ms_interp / 1000.0);
     const double tp_static = data_gb / (avg_ms_static / 1000.0);
 
     std::cout << "  - Static Mode Latency:             " << std::fixed << std::setprecision(3)
               << avg_ms_static << " ms (" << tp_static << " GB/s)\n";
-    std::cout << "  - Subframe Interpolated Latency:   " << avg_ms_interp << " ms (" << tp_interp << " GB/s)\n";
+    std::cout << "  - Subframe Interpolated Latency:   " << avg_ms_interp << " ms (" << tp_interp
+              << " GB/s)\n";
     std::cout << "  - Frame Real-Time Processing Budget: 51.200 ms\n";
     std::cout << "  - GPU Load (% of real-time budget): " << std::setprecision(2)
               << (avg_ms_interp / 51.2f) * 100.0f << "%\n";

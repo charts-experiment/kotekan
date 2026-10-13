@@ -1,16 +1,16 @@
 #ifndef CUDA_BISLC_HPP
 #define CUDA_BISLC_HPP
 
-#include "cudaDirectBeamTracker.hpp"
 #include "chartsConstants.hpp"
+#include "cudaDirectBeamTracker.hpp"
 
 #include <array>
 #include <cmath>
 #include <complex>
 #include <cstddef>
 #include <cstdint>
-#include <vector>
 #include <cuda_runtime.h>
+#include <vector>
 
 namespace kotekan {
 
@@ -37,8 +37,7 @@ struct BiSLCConfig {
             const unsigned int row = (i < 64) ? (i >> 3U) : (i >> 4U);
             antenna_positions[i] = make_float3(
                 static_cast<float>(col) * charts::constants::charts_default_spacing_m,
-                static_cast<float>(row) * charts::constants::charts_default_spacing_m,
-                0.0f);
+                static_cast<float>(row) * charts::constants::charts_default_spacing_m, 0.0f);
         }
     }
 };
@@ -52,13 +51,11 @@ struct BiSLCConfig {
  * @param diag_loading  Epsilon added to diagonal (A_reg = A + diag_loading * I)
  * @return true if successfully inverted, false if singular
  */
-inline bool invert_complex_matrix(
-    const float2* A_in,
-    float2* M_out,
-    std::size_t B,
-    float diag_loading = 1.0e-4f) {
+inline bool invert_complex_matrix(const float2* A_in, float2* M_out, std::size_t B,
+                                  float diag_loading = 1.0e-4f) {
 
-    if (B == 0) return true;
+    if (B == 0)
+        return true;
     if (B == 1) {
         float ar = A_in[0].x + diag_loading;
         float ai = A_in[0].y;
@@ -112,7 +109,8 @@ inline bool invert_complex_matrix(
 
     // General Gauss-Jordan elimination with partial pivoting for B <= 16
     constexpr std::size_t MAX_B = 16;
-    if (B > MAX_B) return false;
+    if (B > MAX_B)
+        return false;
 
     std::complex<float> aug[MAX_B][2 * MAX_B];
 
@@ -124,7 +122,8 @@ inline bool invert_complex_matrix(
             }
         }
         for (std::size_t j = 0; j < B; ++j) {
-            aug[i][B + j] = (i == j) ? std::complex<float>(1.0f, 0.0f) : std::complex<float>(0.0f, 0.0f);
+            aug[i][B + j] =
+                (i == j) ? std::complex<float>(1.0f, 0.0f) : std::complex<float>(0.0f, 0.0f);
         }
     }
 
@@ -186,12 +185,15 @@ inline bool invert_complex_matrix(
 }
 
 /**
- * @brief Compute the B x B complex beam coupling matrix A(f) and its inverse M(f) for all frequency channels.
+ * @brief Compute the B x B complex beam coupling matrix A(f) and its inverse M(f) for all frequency
+ * channels.
  *
- * A_{i, j}(f) = (i == j) ? 1.0 : (1.0 / N_active) * sum_{a in active} exp(+j * k(f) * x_a . (s_j - s_i))
+ * A_{i, j}(f) = (i == j) ? 1.0 : (1.0 / N_active) * sum_{a in active} exp(+j * k(f) * x_a . (s_j -
+ * s_i))
  *
  * @param M_out                 Output inverse matrices [n_freq][B][B] of float2
- * @param A_out                 Optional output coupling matrices [n_freq][B][B] of float2 (can be nullptr)
+ * @param A_out                 Optional output coupling matrices [n_freq][B][B] of float2 (can be
+ * nullptr)
  * @param targets               Active beam targets (directions) [num_beams]
  * @param frequencies_hz        Physical frequency channel values [n_freq]
  * @param antenna_positions     Physical antenna positions [n_ant]
@@ -202,18 +204,13 @@ inline bool invert_complex_matrix(
  * @param n_active              Number of active (unmasked) antennas
  * @param diag_loading          Diagonal loading regularizer epsilon
  */
-void compute_beam_coupling_and_inverses(
-    float2* M_out,
-    float2* A_out,
-    const DirectBeamTarget* targets,
-    const std::vector<double>& frequencies_hz,
-    const float3* antenna_positions,
-    const uint8_t* antenna_mask,
-    std::size_t num_beams,
-    std::size_t n_freq,
-    std::size_t n_ant,
-    std::size_t n_active,
-    float diag_loading = 1.0e-4f);
+void compute_beam_coupling_and_inverses(float2* M_out, float2* A_out,
+                                        const DirectBeamTarget* targets,
+                                        const std::vector<double>& frequencies_hz,
+                                        const float3* antenna_positions,
+                                        const uint8_t* antenna_mask, std::size_t num_beams,
+                                        std::size_t n_freq, std::size_t n_ant, std::size_t n_active,
+                                        float diag_loading = 1.0e-4f);
 
 /**
  * @brief Launch CUDA BiSLC (Joint Matrix Unmixing) kernel across complex baseband voltages.
@@ -229,15 +226,10 @@ void compute_beam_coupling_and_inverses(
  * @param max_beams_stride      Total stride of beam dimension in buffers (e.g. 2, 4, or 8)
  * @param stream                CUDA stream
  */
-void launch_bislc_unmixing(
-    float2* d_cleaned_voltages,
-    const float2* d_formed_voltages,
-    const float2* d_unmix_matrices,
-    std::size_t n_time,
-    std::size_t n_freq,
-    std::size_t num_active_beams,
-    std::size_t max_beams_stride,
-    cudaStream_t stream = nullptr);
+void launch_bislc_unmixing(float2* d_cleaned_voltages, const float2* d_formed_voltages,
+                           const float2* d_unmix_matrices, std::size_t n_time, std::size_t n_freq,
+                           std::size_t num_active_beams, std::size_t max_beams_stride,
+                           cudaStream_t stream = nullptr);
 
 } // namespace kotekan
 

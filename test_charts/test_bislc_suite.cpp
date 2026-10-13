@@ -1,15 +1,15 @@
+#include "chartsConstants.hpp"
 #include "cudaBiSLC.hpp"
 #include "cudaDirectBeamTracker.hpp"
-#include "chartsConstants.hpp"
 #include "cudaUtils.hpp"
 
-#include <cuda_runtime.h>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <cuda_runtime.h>
 #include <iomanip>
 #include <iostream>
 #include <numeric>
@@ -24,8 +24,7 @@ constexpr double SPEED_OF_LIGHT = kotekan::charts::constants::speed_of_light_m_p
 constexpr double TWO_PI = kotekan::charts::constants::two_pi;
 
 // Helper: compute complex matrix product C = A * B
-void matrix_mult_complex(
-    const float2* A, const float2* B, float2* C, std::size_t N) {
+void matrix_mult_complex(const float2* A, const float2* B, float2* C, std::size_t N) {
     for (std::size_t i = 0; i < N; ++i) {
         for (std::size_t j = 0; j < N; ++j) {
             float sr = 0.0f;
@@ -48,8 +47,7 @@ std::vector<float3> compute_positions(std::size_t n_ant, float spacing_m) {
         const unsigned int col = (n_ant <= 64) ? (a & 7U) : (a & 15U);
         const unsigned int row = (n_ant <= 64) ? (a >> 3U) : (a >> 4U);
         pos[a] = make_float3(static_cast<float>(col) * spacing_m,
-                             static_cast<float>(row) * spacing_m,
-                             0.0f);
+                             static_cast<float>(row) * spacing_m, 0.0f);
     }
     return pos;
 }
@@ -74,9 +72,12 @@ bool test_matrix_inversion() {
                 if (i == j) {
                     A[i * B + j] = make_float2(1.0f, 0.0f);
                 } else if (i < j) {
-                    float coupling_mag = 0.15f / static_cast<float>(std::abs(static_cast<int>(i) - static_cast<int>(j)));
+                    float coupling_mag =
+                        0.15f
+                        / static_cast<float>(std::abs(static_cast<int>(i) - static_cast<int>(j)));
                     float phase = static_cast<float>(0.3 * (i + 1) - 0.2 * (j + 1));
-                    A[i * B + j] = make_float2(coupling_mag * std::cos(phase), coupling_mag * std::sin(phase));
+                    A[i * B + j] =
+                        make_float2(coupling_mag * std::cos(phase), coupling_mag * std::sin(phase));
                 } else {
                     // Hermitian conjugate: A_{j, i} = A_{i, j}^*
                     A[i * B + j] = make_float2(A[j * B + i].x, -A[j * B + i].y);
@@ -109,8 +110,8 @@ bool test_matrix_inversion() {
             }
         }
 
-        std::cout << "  B=" << B << "x" << B << " Inversion Residual Error: "
-                  << std::scientific << std::setprecision(3) << max_err;
+        std::cout << "  B=" << B << "x" << B << " Inversion Residual Error: " << std::scientific
+                  << std::setprecision(3) << max_err;
         if (max_err < 1.0e-4f) {
             std::cout << " [PASS]\n";
         } else {
@@ -147,9 +148,9 @@ bool test_coupling_matrix_generation() {
     std::vector<float2> M(n_freq * num_beams * num_beams);
     std::vector<float2> A(n_freq * num_beams * num_beams);
 
-    kotekan::compute_beam_coupling_and_inverses(
-        M.data(), A.data(), targets, freqs, pos.data(), mask.data(),
-        num_beams, n_freq, n_ant, n_ant, 1.0e-4f);
+    kotekan::compute_beam_coupling_and_inverses(M.data(), A.data(), targets, freqs, pos.data(),
+                                                mask.data(), num_beams, n_freq, n_ant, n_ant,
+                                                1.0e-4f);
 
     bool passed = true;
     for (std::size_t f = 0; f < n_freq; ++f) {
@@ -160,8 +161,8 @@ bool test_coupling_matrix_generation() {
         const float2 a11 = A[base + 3];
 
         // Diagonal must be (1.0, 0.0)
-        if (std::abs(a00.x - 1.0f) > 1.0e-5f || std::abs(a00.y) > 1.0e-5f ||
-            std::abs(a11.x - 1.0f) > 1.0e-5f || std::abs(a11.y) > 1.0e-5f) {
+        if (std::abs(a00.x - 1.0f) > 1.0e-5f || std::abs(a00.y) > 1.0e-5f
+            || std::abs(a11.x - 1.0f) > 1.0e-5f || std::abs(a11.y) > 1.0e-5f) {
             std::cerr << "  FAILED: Diagonal is not 1.0 at channel " << f << "\n";
             passed = false;
         }
@@ -173,9 +174,10 @@ bool test_coupling_matrix_generation() {
         }
 
         const float coupling_pwr = a01.x * a01.x + a01.y * a01.y;
-        std::cout << "  Freq=" << freqs[f] / 1.0e6 << " MHz: Sidelobe Coupling Power A_01="
-                  << std::fixed << std::setprecision(4) << coupling_pwr
-                  << " (" << 10.0 * std::log10(std::max(coupling_pwr, 1.0e-8f)) << " dB)\n";
+        std::cout << "  Freq=" << freqs[f] / 1.0e6
+                  << " MHz: Sidelobe Coupling Power A_01=" << std::fixed << std::setprecision(4)
+                  << coupling_pwr << " (" << 10.0 * std::log10(std::max(coupling_pwr, 1.0e-8f))
+                  << " dB)\n";
     }
 
     std::cout << "  Result: " << (passed ? "[PASS]" : "[FAIL]") << "\n";
@@ -201,14 +203,15 @@ bool test_sidelobe_cancellation() {
     kotekan::DirectBeamTarget targets[2];
     targets[0].direction = kotekan::DirectDirection3D{0.0f, 0.0f, 1.0f}; // Target 0 (Zenith)
     const float l1 = 0.06f; // Sidelobe location (~3.4 degrees)
-    targets[1].direction = kotekan::DirectDirection3D{l1, 0.0f, std::sqrt(1.0f - l1 * l1)}; // Target 1 (Interferer)
+    targets[1].direction =
+        kotekan::DirectDirection3D{l1, 0.0f, std::sqrt(1.0f - l1 * l1)}; // Target 1 (Interferer)
 
     std::vector<float2> M(num_beams * num_beams);
     std::vector<float2> A(num_beams * num_beams);
 
-    kotekan::compute_beam_coupling_and_inverses(
-        M.data(), A.data(), targets, freqs, pos.data(), mask.data(),
-        num_beams, n_freq, n_ant, n_ant, 1.0e-5f);
+    kotekan::compute_beam_coupling_and_inverses(M.data(), A.data(), targets, freqs, pos.data(),
+                                                mask.data(), num_beams, n_freq, n_ant, n_ant,
+                                                1.0e-5f);
 
     const float2 alpha = A[1]; // Sidelobe leakage coefficient from beam 1 into beam 0
     std::cout << "  Coupling Alpha (Beam 1 -> Beam 0): (" << alpha.x << " + j*" << alpha.y << ")\n";
@@ -292,13 +295,18 @@ bool test_sidelobe_cancellation() {
     const double suppression_ratio_db = 10.0 * std::log10(err_before / err_after);
 
     std::cout << "  Target 0 True Power:              " << true_power_0 << "\n";
-    std::cout << "  Interferer 1 Power:               " << interf_power_1 << " (" << 10.0 * std::log10(interf_power_1 / true_power_0) << " dB higher)\n";
-    std::cout << "  Residual Error Before BiSLC:       " << err_before << " (" << 10.0 * std::log10(err_before) << " dB)\n";
-    std::cout << "  Residual Error After BiSLC:        " << err_after << " (" << 10.0 * std::log10(err_after) << " dB)\n";
-    std::cout << "  Sidelobe Interference Suppression: " << std::fixed << std::setprecision(1) << suppression_ratio_db << " dB\n";
+    std::cout << "  Interferer 1 Power:               " << interf_power_1 << " ("
+              << 10.0 * std::log10(interf_power_1 / true_power_0) << " dB higher)\n";
+    std::cout << "  Residual Error Before BiSLC:       " << err_before << " ("
+              << 10.0 * std::log10(err_before) << " dB)\n";
+    std::cout << "  Residual Error After BiSLC:        " << err_after << " ("
+              << 10.0 * std::log10(err_after) << " dB)\n";
+    std::cout << "  Sidelobe Interference Suppression: " << std::fixed << std::setprecision(1)
+              << suppression_ratio_db << " dB\n";
 
     bool passed = (suppression_ratio_db >= 30.0);
-    std::cout << "  Result: " << (passed ? "[PASS]" : "[FAIL]") << " (Requirement: >= 30 dB suppression)\n";
+    std::cout << "  Result: " << (passed ? "[PASS]" : "[FAIL]")
+              << " (Requirement: >= 30 dB suppression)\n";
     return passed;
 }
 
@@ -310,7 +318,8 @@ bool test_gpu_kernel_benchmark() {
 
     int dev_count = 0;
     if (cudaGetDeviceCount(&dev_count) != cudaSuccess || dev_count == 0) {
-        std::cout << "  No CUDA-capable GPU detected in this test environment. Skipping GPU kernel launch.\n";
+        std::cout << "  No CUDA-capable GPU detected in this test environment. Skipping GPU kernel "
+                     "launch.\n";
         return true;
     }
 
@@ -328,9 +337,8 @@ bool test_gpu_kernel_benchmark() {
 
     // Populate synthetic input data and matrices
     for (std::size_t i = 0; i < h_formed.size(); ++i) {
-        h_formed[i] = make_float2(
-            static_cast<float>(static_cast<int>(i % 17) - 8),
-            static_cast<float>(static_cast<int>(i % 13) - 6));
+        h_formed[i] = make_float2(static_cast<float>(static_cast<int>(i % 17) - 8),
+                                  static_cast<float>(static_cast<int>(i % 13) - 6));
     }
     for (std::size_t f = 0; f < n_freq; ++f) {
         h_matrices[f * 4 + 0] = make_float2(1.02f, 0.01f);
@@ -353,13 +361,13 @@ bool test_gpu_kernel_benchmark() {
             const float2 m10 = h_matrices[m_idx + 2];
             const float2 m11 = h_matrices[m_idx + 3];
 
-            h_expected[in_idx + 0] = make_float2(
-                m00.x * y0.x - m00.y * y0.y + m01.x * y1.x - m01.y * y1.y,
-                m00.x * y0.y + m00.y * y0.x + m01.x * y1.y + m01.y * y1.x);
+            h_expected[in_idx + 0] =
+                make_float2(m00.x * y0.x - m00.y * y0.y + m01.x * y1.x - m01.y * y1.y,
+                            m00.x * y0.y + m00.y * y0.x + m01.x * y1.y + m01.y * y1.x);
 
-            h_expected[in_idx + 1] = make_float2(
-                m10.x * y0.x - m10.y * y0.y + m11.x * y1.x - m11.y * y1.y,
-                m10.x * y0.y + m10.y * y0.x + m11.x * y1.y + m11.y * y1.x);
+            h_expected[in_idx + 1] =
+                make_float2(m10.x * y0.x - m10.y * y0.y + m11.x * y1.x - m11.y * y1.y,
+                            m10.x * y0.y + m10.y * y0.x + m11.x * y1.y + m11.y * y1.x);
         }
     }
 
@@ -374,16 +382,20 @@ bool test_gpu_kernel_benchmark() {
     cudaStream_t stream;
     CHECK_CUDA_ERROR_NON_OO(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
 
-    CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(d_in, h_formed.data(), buffer_bytes, cudaMemcpyHostToDevice, stream));
-    CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(d_mat, h_matrices.data(), matrix_bytes, cudaMemcpyHostToDevice, stream));
+    CHECK_CUDA_ERROR_NON_OO(
+        cudaMemcpyAsync(d_in, h_formed.data(), buffer_bytes, cudaMemcpyHostToDevice, stream));
+    CHECK_CUDA_ERROR_NON_OO(
+        cudaMemcpyAsync(d_mat, h_matrices.data(), matrix_bytes, cudaMemcpyHostToDevice, stream));
 
     // Warm-up
-    kotekan::launch_bislc_unmixing(d_out, d_in, d_mat, n_time, n_freq, num_beams, max_stride, stream);
+    kotekan::launch_bislc_unmixing(d_out, d_in, d_mat, n_time, n_freq, num_beams, max_stride,
+                                   stream);
     CHECK_CUDA_ERROR_NON_OO(cudaStreamSynchronize(stream));
 
     // Verify numerical equivalence
     std::vector<float2> h_gpu_out(n_time * n_freq * max_stride);
-    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(h_gpu_out.data(), d_out, buffer_bytes, cudaMemcpyDeviceToHost));
+    CHECK_CUDA_ERROR_NON_OO(
+        cudaMemcpy(h_gpu_out.data(), d_out, buffer_bytes, cudaMemcpyDeviceToHost));
 
     float max_diff = 0.0f;
     for (std::size_t i = 0; i < h_gpu_out.size(); ++i) {
@@ -391,7 +403,8 @@ bool test_gpu_kernel_benchmark() {
         float di = std::abs(h_gpu_out[i].y - h_expected[i].y);
         max_diff = std::max(max_diff, std::max(dr, di));
     }
-    std::cout << "  GPU vs CPU Parity Max Discrepancy: " << std::scientific << std::setprecision(3) << max_diff;
+    std::cout << "  GPU vs CPU Parity Max Discrepancy: " << std::scientific << std::setprecision(3)
+              << max_diff;
     bool parity_pass = (max_diff < 1.0e-4f);
     std::cout << " " << (parity_pass ? "[PASS]" : "[FAIL]") << "\n";
 
@@ -403,7 +416,8 @@ bool test_gpu_kernel_benchmark() {
     constexpr int ITERS = 100;
     CHECK_CUDA_ERROR_NON_OO(cudaEventRecord(ev_start, stream));
     for (int it = 0; it < ITERS; ++it) {
-        kotekan::launch_bislc_unmixing(d_out, d_in, d_mat, n_time, n_freq, num_beams, max_stride, stream);
+        kotekan::launch_bislc_unmixing(d_out, d_in, d_mat, n_time, n_freq, num_beams, max_stride,
+                                       stream);
     }
     CHECK_CUDA_ERROR_NON_OO(cudaEventRecord(ev_stop, stream));
     CHECK_CUDA_ERROR_NON_OO(cudaEventSynchronize(ev_stop));
@@ -412,14 +426,19 @@ bool test_gpu_kernel_benchmark() {
     CHECK_CUDA_ERROR_NON_OO(cudaEventElapsedTime(&total_ms, ev_start, ev_stop));
     const float kernel_ms = total_ms / ITERS;
 
-    const double data_gb = static_cast<double>(buffer_bytes * 2) / (1024.0 * 1024.0 * 1024.0); // Read + Write
+    const double data_gb =
+        static_cast<double>(buffer_bytes * 2) / (1024.0 * 1024.0 * 1024.0); // Read + Write
     const double eff_gb_s = data_gb / (kernel_ms / 1000.0);
     const double budget_pct = (kernel_ms / 51.2) * 100.0;
 
-    std::cout << "  Kernel Execution Time:  " << std::fixed << std::setprecision(3) << kernel_ms << " ms per frame (51.2 ms budget)\n";
-    std::cout << "  Real-Time Budget Used:  " << std::fixed << std::setprecision(2) << budget_pct << "%\n";
-    std::cout << "  Effective DRAM Bandwidth: " << std::fixed << std::setprecision(1) << eff_gb_s << " GB/s\n";
-    std::cout << "  Real-Time Factor:       " << std::fixed << std::setprecision(1) << (51.2 / kernel_ms) << "x faster than real-time\n";
+    std::cout << "  Kernel Execution Time:  " << std::fixed << std::setprecision(3) << kernel_ms
+              << " ms per frame (51.2 ms budget)\n";
+    std::cout << "  Real-Time Budget Used:  " << std::fixed << std::setprecision(2) << budget_pct
+              << "%\n";
+    std::cout << "  Effective DRAM Bandwidth: " << std::fixed << std::setprecision(1) << eff_gb_s
+              << " GB/s\n";
+    std::cout << "  Real-Time Factor:       " << std::fixed << std::setprecision(1)
+              << (51.2 / kernel_ms) << "x faster than real-time\n";
 
     cudaFree(d_in);
     cudaFree(d_out);

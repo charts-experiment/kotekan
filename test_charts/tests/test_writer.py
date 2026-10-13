@@ -72,12 +72,12 @@ class TestBasebandWriterSuite(unittest.TestCase):
             (1, 0, 0x01),
             (0, 1, 0x10),
             (7, 7, 0x77),
-            (-1, -1, 0xFF),   # -1 & 0xF = 0xF -> 0xF | (0xF << 4) = 0xFF
-            (-7, 7, 0x79),    # -7 & 0xF = 0x9, 7 << 4 = 0x70 -> 0x79
-            (-8, -8, 0x88),   # -8 & 0xF = 0x8 -> 0x88
-            (3, -2, 0xE3),    # 3 & 0xF = 0x3, -2 & 0xF = 0xE -> 0xE3
-            (-5, 2, 0x2B),    # -5 & 0xF = 0xB, 2 << 4 = 0x20 -> 0x2B
-            (5, -5, 0xB5),    # 5 & 0xF = 0x5, -5 & 0xF = 0xB -> 0xB5
+            (-1, -1, 0xFF),  # -1 & 0xF = 0xF -> 0xF | (0xF << 4) = 0xFF
+            (-7, 7, 0x79),  # -7 & 0xF = 0x9, 7 << 4 = 0x70 -> 0x79
+            (-8, -8, 0x88),  # -8 & 0xF = 0x8 -> 0x88
+            (3, -2, 0xE3),  # 3 & 0xF = 0x3, -2 & 0xF = 0xE -> 0xE3
+            (-5, 2, 0x2B),  # -5 & 0xF = 0xB, 2 << 4 = 0x20 -> 0x2B
+            (5, -5, 0xB5),  # 5 & 0xF = 0x5, -5 & 0xF = 0xB -> 0xB5
         ]
 
         for r, i, expected_byte in fixtures:
@@ -86,7 +86,7 @@ class TestBasebandWriterSuite(unittest.TestCase):
             self.assertEqual(
                 packed[0],
                 expected_byte,
-                f"Packing failed for ({r}, {i}): got 0x{packed[0]:02X}, expected 0x{expected_byte:02X}"
+                f"Packing failed for ({r}, {i}): got 0x{packed[0]:02X}, expected 0x{expected_byte:02X}",
             )
 
             # Roundtrip unpacking verification
@@ -124,7 +124,9 @@ class TestBasebandWriterSuite(unittest.TestCase):
         )
 
         expected_payload_bytes = samples_per_frame * num_freq * num_ant
-        expected_total_bytes = 4 + expected_payload_bytes  # 4 bytes for metadata_size header
+        expected_total_bytes = (
+            4 + expected_payload_bytes
+        )  # 4 bytes for metadata_size header
 
         test_frame = np.ones((samples_per_frame, num_freq, num_ant), dtype=np.complex64)
         out_file = writer.write_frame(0, test_frame)
@@ -141,7 +143,9 @@ class TestBasebandWriterSuite(unittest.TestCase):
             self.assertEqual(payload.size, expected_payload_bytes)
 
         # Read back via read_raw_bin_frame
-        unpacked = read_raw_bin_frame(out_file, shape=(samples_per_frame, num_freq, num_ant), unpack=True)
+        unpacked = read_raw_bin_frame(
+            out_file, shape=(samples_per_frame, num_freq, num_ant), unpack=True
+        )
         self.assertEqual(unpacked.shape, (samples_per_frame, num_freq, num_ant))
         self.assertAlmostEqual(float(unpacked[0, 0, 0].real), 1.0, places=4)
         self.assertAlmostEqual(float(unpacked[0, 0, 0].imag), 0.0, places=4)
@@ -162,11 +166,17 @@ class TestBasebandWriterSuite(unittest.TestCase):
 
         # Write 3 frames
         for f_idx in range(3):
-            data = np.full((samples_per_frame, num_freq, num_ant), complex(f_idx, -f_idx), dtype=np.complex64)
+            data = np.full(
+                (samples_per_frame, num_freq, num_ant),
+                complex(f_idx, -f_idx),
+                dtype=np.complex64,
+            )
             writer.write_frame(f_idx, data)
 
         pos_x, pos_y = get_antenna_positions(num_ant)
-        freqs_hz = (DEFAULT_FREQUENCY_START_MHZ + np.arange(num_freq) * CHARTS_CHANNEL_WIDTH_MHZ) * 1e6
+        freqs_hz = (
+            DEFAULT_FREQUENCY_START_MHZ + np.arange(num_freq) * CHARTS_CHANNEL_WIDTH_MHZ
+        ) * 1e6
         dt_s = FPGA_TIME_RESOLUTION_US * 1e-6
 
         meta = WindowMetadata(
@@ -223,14 +233,20 @@ class TestBasebandWriterSuite(unittest.TestCase):
         )
 
         # Write 2 frames
-        f0 = np.full((samples_per_frame, num_freq, num_ant), complex(2, 3), dtype=np.complex64)
-        f1 = np.full((samples_per_frame, num_freq, num_ant), complex(-4, 5), dtype=np.complex64)
+        f0 = np.full(
+            (samples_per_frame, num_freq, num_ant), complex(2, 3), dtype=np.complex64
+        )
+        f1 = np.full(
+            (samples_per_frame, num_freq, num_ant), complex(-4, 5), dtype=np.complex64
+        )
 
         writer.write_frame(0, f0)
         writer.write_frame(1, f1)
 
         pos_x, pos_y = get_antenna_positions(num_ant)
-        freqs_hz = (DEFAULT_FREQUENCY_START_MHZ + np.arange(num_freq) * CHARTS_CHANNEL_WIDTH_MHZ) * 1e6
+        freqs_hz = (
+            DEFAULT_FREQUENCY_START_MHZ + np.arange(num_freq) * CHARTS_CHANNEL_WIDTH_MHZ
+        ) * 1e6
         dt_s = FPGA_TIME_RESOLUTION_US * 1e-6
 
         meta = WindowMetadata(
@@ -282,31 +298,45 @@ class TestBasebandWriterSuite(unittest.TestCase):
         samples_per_frame = 32
 
         # 1. 4D single packet: (dish, pol, freq, t_samp)
-        orig_4d = np.random.randint(-7, 7, size=(num_dishes, num_pol, num_freq, samples_per_frame)).astype(np.float32)
+        orig_4d = np.random.randint(
+            -7, 7, size=(num_dishes, num_pol, num_freq, samples_per_frame)
+        ).astype(np.float32)
         kotekan_3d = fiducial_5d_to_kotekan(orig_4d)
         self.assertEqual(kotekan_3d.shape, (samples_per_frame, num_freq, num_elements))
 
-        recovered_4d = kotekan_to_fiducial_5d(kotekan_3d, num_dishes=num_dishes, num_pol=num_pol)
+        recovered_4d = kotekan_to_fiducial_5d(
+            kotekan_3d, num_dishes=num_dishes, num_pol=num_pol
+        )
         self.assertEqual(recovered_4d.shape, orig_4d.shape)
         np.testing.assert_array_equal(recovered_4d, orig_4d)
 
         # 2. 5D multi packet: (t_pkt, dish, pol, freq, t_samp)
         t_pkt = 3
-        orig_5d = np.random.randint(-7, 7, size=(t_pkt, num_dishes, num_pol, num_freq, samples_per_frame)).astype(np.float32)
+        orig_5d = np.random.randint(
+            -7, 7, size=(t_pkt, num_dishes, num_pol, num_freq, samples_per_frame)
+        ).astype(np.float32)
         kotekan_4d = fiducial_5d_to_kotekan(orig_5d)
-        self.assertEqual(kotekan_4d.shape, (t_pkt, samples_per_frame, num_freq, num_elements))
+        self.assertEqual(
+            kotekan_4d.shape, (t_pkt, samples_per_frame, num_freq, num_elements)
+        )
 
-        recovered_5d = kotekan_to_fiducial_5d(kotekan_4d, num_dishes=num_dishes, num_pol=num_pol)
+        recovered_5d = kotekan_to_fiducial_5d(
+            kotekan_4d, num_dishes=num_dishes, num_pol=num_pol
+        )
         self.assertEqual(recovered_5d.shape, orig_5d.shape)
         np.testing.assert_array_equal(recovered_5d, orig_5d)
 
     def test_07_factory_function(self):
         """Test create_writer factory function for all supported writer types."""
-        raw_writer = create_writer("raw_bin", target_dir=self.temp_dir / "w1", window_name="w1")
+        raw_writer = create_writer(
+            "raw_bin", target_dir=self.temp_dir / "w1", window_name="w1"
+        )
         self.assertIsInstance(raw_writer, RawBinWriter)
         self.assertIsInstance(raw_writer, BasebandWriter)
 
-        h5_writer = create_writer("hdf5", target_dir=self.temp_dir / "w2", window_name="w2")
+        h5_writer = create_writer(
+            "hdf5", target_dir=self.temp_dir / "w2", window_name="w2"
+        )
         self.assertIsInstance(h5_writer, HDF5Writer)
         self.assertIsInstance(h5_writer, BasebandWriter)
 

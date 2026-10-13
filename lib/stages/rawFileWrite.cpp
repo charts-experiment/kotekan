@@ -24,7 +24,7 @@
 #include <stdio.h>    // for snprintf, size_t
 #include <stdlib.h>   // for exit
 #include <system_error>
-#include <unistd.h>   // for write, close, gethostname, ssize_t
+#include <unistd.h> // for write, close, gethostname, ssize_t
 
 
 using kotekan::bufferContainer;
@@ -105,7 +105,8 @@ void rawFileWrite::main_thread() {
             continue;
         }
 
-        // Skip all-zero frames (e.g. during DPDK startup/warmup or packet loss before link stabilization)
+        // Skip all-zero frames (e.g. during DPDK startup/warmup or packet loss before link
+        // stabilization)
         if (_skip_zero_frames) {
             const uint64_t* p64 = reinterpret_cast<const uint64_t*>(frame);
             const size_t num_u64 = buf->frame_size / sizeof(uint64_t);

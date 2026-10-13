@@ -207,7 +207,7 @@ def make_zeroed_chord_buffer(
 ):
     """
     Produce ChordBuffer objects containing 0's in sequence.
-    
+
     Parameters
     ----------
     name : String
@@ -1076,7 +1076,7 @@ def expected_accum(
             dcorr = (corr2 - corr1).astype(np.float32)
             dcorr2 = dcorr[..., 0] ** 2 + dcorr[..., 1] ** 2
             accum_var_chime[i] += mask_32[:, None, None, None] * dcorr2
-            accum_bias_chime[i] += (mask_32 * (dN ** 2))[:, None, None, None]
+            accum_bias_chime[i] += (mask_32 * (dN**2))[:, None, None, None]
 
             # Accumulate the EvenOddPosDef variance. Less worried about replicating truncation here.
             inv_N1 = safe_invert(N1, float)
@@ -1103,7 +1103,7 @@ def expected_accum(
             bias = accum_bias_chime[i, f] * (vis[..., 0] ** 2 + vis[..., 1] ** 2)
             accum_n2_var_chime[i, f, :] = (accum_var_chime[i, f] - bias)[
                 corr_idx_b, corr_idx_i, corr_idx_j
-            ] * (inv_N_32 ** 2)
+            ] * (inv_N_32**2)
 
             # compute final EvenOddPosDef var
             # Normalize by pairs that contributed to the variance estimate.

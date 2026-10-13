@@ -59,7 +59,9 @@ from sim.visualizer import (
 
 # Frame constants
 SAMPLES_PER_FRAME: int = 1536
-FRAME_DURATION_S: float = SAMPLES_PER_FRAME * (FPGA_TIME_RESOLUTION_US * 1e-6)  # 5.12 ms
+FRAME_DURATION_S: float = SAMPLES_PER_FRAME * (
+    FPGA_TIME_RESOLUTION_US * 1e-6
+)  # 5.12 ms
 
 # ---------------------------------------------------------------------------
 # 10 TB Campaign Specification (16 Diverse Runs)
@@ -140,7 +142,6 @@ CAMPAIGN_SPEC: List[Dict[str, Any]] = [
         "persistent_rfi_channels": [],
         "description": "Supernova remnant calibrator with SIMBAD-verified coordinates across full 672 channels.",
     },
-
     # -----------------------------------------------------------------------
     # Suite 2: Fast Transients (FRBs across DM & Array Space)
     # -----------------------------------------------------------------------
@@ -186,7 +187,6 @@ CAMPAIGN_SPEC: List[Dict[str, Any]] = [
         "persistent_rfi_channels": [],
         "description": "Dispersed FRB correlated over all 32,896 independent baselines and 672 channels (51.6 GB/s ingest).",
     },
-
     # -----------------------------------------------------------------------
     # Suite 3: Periodic Pulsar Pulse Trains
     # -----------------------------------------------------------------------
@@ -218,7 +218,6 @@ CAMPAIGN_SPEC: List[Dict[str, Any]] = [
         "persistent_rfi_channels": [],
         "description": "Periodic dispersed slow pulsar train (P=89.3 ms, DM=68 pc/cm^3) across tens of cycles and 672 channels.",
     },
-
     # -----------------------------------------------------------------------
     # Suite 4: Terrestrial & Orbital RFI Environments
     # -----------------------------------------------------------------------
@@ -251,7 +250,6 @@ CAMPAIGN_SPEC: List[Dict[str, Any]] = [
         "persistent_rfi_channels": [],
         "description": "Rapidly drifting non-celestial phase sweep (v_drift=0.025/s) simulating LEO satellite transit across 672 channels.",
     },
-
     # -----------------------------------------------------------------------
     # Suite 5: Complex Long-Duration Multi-Event Runs (The 1-TB Scale Pillars)
     # -----------------------------------------------------------------------
@@ -378,8 +376,12 @@ def run_single_simulation(
     print("\n" + "#" * 90)
     print(f" EXECUTING RUN: {run_id} ({spec['title']})")
     print(f" Suite       : {spec['suite']}")
-    print(f" Antennas    : {spec['antennas']} | Channels: {spec['num_freq']} | Frames: {spec['frames']}")
-    print(f" Duration    : {dur_s:.2f} s physical time | Data Volume: {data_bytes / 1e9:.2f} GB")
+    print(
+        f" Antennas    : {spec['antennas']} | Channels: {spec['num_freq']} | Frames: {spec['frames']}"
+    )
+    print(
+        f" Duration    : {dur_s:.2f} s physical time | Data Volume: {data_bytes / 1e9:.2f} GB"
+    )
     print(f" Start Time  : {spec['start_time']} | Profile: {spec['profile']}")
     print(f" Description : {spec['description']}")
     print("#" * 90)
@@ -423,15 +425,24 @@ def run_single_simulation(
     existing_bins = sorted(window_dir.glob(f"{run_id}_*.bin"))
     meta_h5 = window_dir / f"{run_id}_meta.h5"
     target_frames = 1 if dry_run else spec["frames"]
-    if not force_generate and not dry_run and len(existing_bins) >= target_frames and meta_h5.exists():
-        print(f"  * Detected {len(existing_bins)} existing baseband frames in {window_dir}. Reusing existing stream.")
+    if (
+        not force_generate
+        and not dry_run
+        and len(existing_bins) >= target_frames
+        and meta_h5.exists()
+    ):
+        print(
+            f"  * Detected {len(existing_bins)} existing baseband frames in {window_dir}. Reusing existing stream."
+        )
         num_written = len(existing_bins)
     else:
         t0_gen = time.perf_counter()
         gen_result = generate_simulation_window(cfg)
         num_written = gen_result["num_written"]
         t_gen_s = time.perf_counter() - t0_gen
-        print(f"  * Generated {num_written} frames in {t_gen_s:.1f} s ({data_bytes / 1e9 / max(0.1, t_gen_s):.2f} GB/s)")
+        print(
+            f"  * Generated {num_written} frames in {t_gen_s:.1f} s ({data_bytes / 1e9 / max(0.1, t_gen_s):.2f} GB/s)"
+        )
 
     # 3. Step 2: Correlator Replay (cudaCorrelatorAstron)
     print("\n[Step 2/4] Executing Kotekan GPU Tensor Core Correlator...")
@@ -467,9 +478,13 @@ def run_single_simulation(
     corr_dumps = sorted(corr_dir.glob("corr_*.bin")) if not dry_run else []
     if corr_dumps:
         mid_dump = corr_dumps[len(corr_dumps) // 2]
-        vis_cube = load_astron_correlator_dump(mid_dump, num_elements=cfg.antennas, num_channels=cfg.num_freq)
+        vis_cube = load_astron_correlator_dump(
+            mid_dump, num_elements=cfg.antennas, num_channels=cfg.num_freq
+        )
         diag = inspect_correlator_matrix(vis_cube)
-        print(f"  * Correlator Hermitian Error : {diag['hermitian_error']:.2e} (Passed: {diag['hermitian_valid']})")
+        print(
+            f"  * Correlator Hermitian Error : {diag['hermitian_error']:.2e} (Passed: {diag['hermitian_valid']})"
+        )
         print(f"  * Mean Autocorrelation Power : {diag['mean_autocorr']:.2f} LSB^2")
         print(f"  * Baseline Cross-Power SNR   : {diag['cross_snr']:.2f}")
 
@@ -554,17 +569,62 @@ def main():
         description="CHARTS 10-Terabyte Correlator Simulation Campaign Runner",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--list", action="store_true", help="List all 16 simulations in the campaign matrix and exit")
-    parser.add_argument("--run-idx", type=int, default=None, help="Run specific simulation index (0 to 15, matching Slurm array task ID)")
-    parser.add_argument("--run-id", type=str, default=None, help="Run specific simulation by Run ID (e.g. S1_transit_vela)")
-    parser.add_argument("--all", action="store_true", help="Run all 16 simulations sequentially")
-    parser.add_argument("--scratch-dir", type=str, default=None, help="Base scratch directory for temporary baseband dumps")
-    parser.add_argument("--output-dir", type=str, default="./test_charts/data/campaign_10tb_output", help="Permanent output directory")
-    parser.add_argument("--kotekan-bin", type=str, default=None, help="Path to kotekan executable")
-    parser.add_argument("--workers", type=int, default=None, help="Number of CPU worker threads for baseband synthesis")
-    parser.add_argument("--cleanup-baseband", action="store_true", help="Delete raw baseband frames after correlator completes")
-    parser.add_argument("--dry-run", action="store_true", help="Validate configurations without writing full baseband files")
-    parser.add_argument("--force-generate", action="store_true", help="Force re-generation of baseband frames even if already present")
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="List all 16 simulations in the campaign matrix and exit",
+    )
+    parser.add_argument(
+        "--run-idx",
+        type=int,
+        default=None,
+        help="Run specific simulation index (0 to 15, matching Slurm array task ID)",
+    )
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="Run specific simulation by Run ID (e.g. S1_transit_vela)",
+    )
+    parser.add_argument(
+        "--all", action="store_true", help="Run all 16 simulations sequentially"
+    )
+    parser.add_argument(
+        "--scratch-dir",
+        type=str,
+        default=None,
+        help="Base scratch directory for temporary baseband dumps",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="./test_charts/data/campaign_10tb_output",
+        help="Permanent output directory",
+    )
+    parser.add_argument(
+        "--kotekan-bin", type=str, default=None, help="Path to kotekan executable"
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Number of CPU worker threads for baseband synthesis",
+    )
+    parser.add_argument(
+        "--cleanup-baseband",
+        action="store_true",
+        help="Delete raw baseband frames after correlator completes",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate configurations without writing full baseband files",
+    )
+    parser.add_argument(
+        "--force-generate",
+        action="store_true",
+        help="Force re-generation of baseband frames even if already present",
+    )
 
     args = parser.parse_args()
 
@@ -572,13 +632,19 @@ def main():
         print_campaign_table()
         if not args.list:
             print("\nUsage Examples:")
-            print("  python test_charts/run_10tb_correlator_campaign.py --run-idx 0 --dry-run")
-            print("  python test_charts/run_10tb_correlator_campaign.py --run-id S1_transit_vela")
+            print(
+                "  python test_charts/run_10tb_correlator_campaign.py --run-idx 0 --dry-run"
+            )
+            print(
+                "  python test_charts/run_10tb_correlator_campaign.py --run-id S1_transit_vela"
+            )
             print("  sbatch test_charts/slurm/submit_10tb_correlator_campaign.slurm")
         sys.exit(0)
 
     # Resolve scratch & output paths
-    scratch_base = Path(args.scratch_dir) if args.scratch_dir else get_default_scratch_dir()
+    scratch_base = (
+        Path(args.scratch_dir) if args.scratch_dir else get_default_scratch_dir()
+    )
     output_base = Path(args.output_dir)
     workers = args.workers or get_default_workers()
     kotekan_bin = Path(args.kotekan_bin) if args.kotekan_bin else find_kotekan_binary()
@@ -589,14 +655,20 @@ def main():
         if 0 <= args.run_idx < len(CAMPAIGN_SPEC):
             selected_specs.append(CAMPAIGN_SPEC[args.run_idx])
         else:
-            print(f"[ERROR] --run-idx {args.run_idx} out of range [0, {len(CAMPAIGN_SPEC) - 1}]")
+            print(
+                f"[ERROR] --run-idx {args.run_idx} out of range [0, {len(CAMPAIGN_SPEC) - 1}]"
+            )
             sys.exit(1)
     elif args.run_id is not None:
-        matched = [s for s in CAMPAIGN_SPEC if s["run_id"].lower() == args.run_id.lower()]
+        matched = [
+            s for s in CAMPAIGN_SPEC if s["run_id"].lower() == args.run_id.lower()
+        ]
         if matched:
             selected_specs.append(matched[0])
         else:
-            print(f"[ERROR] Run ID '{args.run_id}' not found in campaign specification.")
+            print(
+                f"[ERROR] Run ID '{args.run_id}' not found in campaign specification."
+            )
             sys.exit(1)
     elif args.all:
         selected_specs = CAMPAIGN_SPEC
@@ -621,7 +693,9 @@ def main():
             force_generate=args.force_generate,
         )
         if rc != 0:
-            print(f"[FATAL] Simulation {spec['run_id']} failed with code {rc}. Aborting.")
+            print(
+                f"[FATAL] Simulation {spec['run_id']} failed with code {rc}. Aborting."
+            )
             sys.exit(rc)
 
     print("\n" + "=" * 90)

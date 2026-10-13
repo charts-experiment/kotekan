@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
@@ -61,44 +62,89 @@ TARGET_COLORS = [
 
 # Window B Tracked Targets (from trillium_fengine_2min_full_pipeline.sbatch)
 DEFAULT_TARGETS_WIN03 = [
-    {"name": "Sgr A* (GC)", "ra_deg": 266.417, "dec_deg": -29.008, "color": TARGET_COLORS[0]},
-    {"name": "Centaurus A", "ra_deg": 201.365, "dec_deg": -43.019, "color": TARGET_COLORS[1]},
-    {"name": "PSR B1642-03", "ra_deg": 251.272, "dec_deg": -3.371, "color": TARGET_COLORS[2]},
-    {"name": "Sco X-1", "ra_deg": 244.979, "dec_deg": -15.640, "color": TARGET_COLORS[3]},
-    {"name": "PSR B1749-28", "ra_deg": 268.064, "dec_deg": -28.106, "color": TARGET_COLORS[4]},
-    {"name": "PSR B1818-04", "ra_deg": 275.318, "dec_deg": -4.292, "color": TARGET_COLORS[5]},
-    {"name": "M87 Virgo A", "ra_deg": 187.706, "dec_deg": 12.391, "color": TARGET_COLORS[6]},
-    {"name": "PSR B1937+21", "ra_deg": 294.911, "dec_deg": 21.583, "color": TARGET_COLORS[7]},
+    {
+        "name": "Sgr A* (GC)",
+        "ra_deg": 266.417,
+        "dec_deg": -29.008,
+        "color": TARGET_COLORS[0],
+    },
+    {
+        "name": "Centaurus A",
+        "ra_deg": 201.365,
+        "dec_deg": -43.019,
+        "color": TARGET_COLORS[1],
+    },
+    {
+        "name": "PSR B1642-03",
+        "ra_deg": 251.272,
+        "dec_deg": -3.371,
+        "color": TARGET_COLORS[2],
+    },
+    {
+        "name": "Sco X-1",
+        "ra_deg": 244.979,
+        "dec_deg": -15.640,
+        "color": TARGET_COLORS[3],
+    },
+    {
+        "name": "PSR B1749-28",
+        "ra_deg": 268.064,
+        "dec_deg": -28.106,
+        "color": TARGET_COLORS[4],
+    },
+    {
+        "name": "PSR B1818-04",
+        "ra_deg": 275.318,
+        "dec_deg": -4.292,
+        "color": TARGET_COLORS[5],
+    },
+    {
+        "name": "M87 Virgo A",
+        "ra_deg": 187.706,
+        "dec_deg": 12.391,
+        "color": TARGET_COLORS[6],
+    },
+    {
+        "name": "PSR B1937+21",
+        "ra_deg": 294.911,
+        "dec_deg": 21.583,
+        "color": TARGET_COLORS[7],
+    },
 ]
 
 # Observatory constants
 CHARTS_LAT_DEG = -33.4211146  # Carén observatory latitude
-SPACING_M = 0.6               # Antenna spacing in meters
-N_ANT = 64                    # 8x8 antenna array
+SPACING_M = 0.6  # Antenna spacing in meters
+N_ANT = 64  # 8x8 antenna array
 
 
 def setup_white_style():
     """Sets matplotlib defaults to pure white presentation styling."""
-    plt.rcParams.update({
-        "font.family": "sans-serif",
-        "font.sans-serif": ["Segoe UI", "DejaVu Sans", "Helvetica", "Arial"],
-        "text.color": TEXT_DARK,
-        "axes.labelcolor": TEXT_DARK,
-        "xtick.color": TEXT_MUTED,
-        "ytick.color": TEXT_MUTED,
-        "axes.edgecolor": BORDER_COLOR,
-        "figure.facecolor": BG_WHITE,
-        "axes.facecolor": BG_WHITE,
-        "grid.color": "#E2E8F0",
-        "grid.linestyle": "--",
-        "grid.alpha": 0.8,
-        "savefig.facecolor": BG_WHITE,
-        "savefig.edgecolor": BG_WHITE,
-    })
+    plt.rcParams.update(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Segoe UI", "DejaVu Sans", "Helvetica", "Arial"],
+            "text.color": TEXT_DARK,
+            "axes.labelcolor": TEXT_DARK,
+            "xtick.color": TEXT_MUTED,
+            "ytick.color": TEXT_MUTED,
+            "axes.edgecolor": BORDER_COLOR,
+            "figure.facecolor": BG_WHITE,
+            "axes.facecolor": BG_WHITE,
+            "grid.color": "#E2E8F0",
+            "grid.linestyle": "--",
+            "grid.alpha": 0.8,
+            "savefig.facecolor": BG_WHITE,
+            "savefig.edgecolor": BG_WHITE,
+        }
+    )
 
 
 def compute_topocentric_direction_cosines(
-    ra_deg: float, dec_deg: float, lst_hours: float = 17.5, site_lat_deg: float = CHARTS_LAT_DEG
+    ra_deg: float,
+    dec_deg: float,
+    lst_hours: float = 17.5,
+    site_lat_deg: float = CHARTS_LAT_DEG,
 ) -> Tuple[float, float, float]:
     """Computes topocentric direction cosines (l: East, m: North, n: Up) from RA, Dec, LST, Lat."""
     ha_deg = (lst_hours * 15.0) - ra_deg
@@ -110,7 +156,9 @@ def compute_topocentric_direction_cosines(
     # l: East-West
     l = math.cos(dec_rad) * math.sin(ha_rad)
     # m: North-South
-    m = math.sin(dec_rad) * math.cos(lat_rad) - math.cos(dec_rad) * math.sin(lat_rad) * math.cos(ha_rad)
+    m = math.sin(dec_rad) * math.cos(lat_rad) - math.cos(dec_rad) * math.sin(
+        lat_rad
+    ) * math.cos(ha_rad)
     # n: Up / Zenith
     n_sq = max(0.0, 1.0 - l**2 - m**2)
     n = math.sqrt(n_sq)
@@ -126,14 +174,17 @@ def create_3d_side_by_side_lobes(
     lst_hours: float = 17.5,
 ) -> None:
     """Generates the 3D Side-by-Side figure:
-       - Left: 64 physical antenna element lobes pointing straight UP.
-       - Right: Digitally formed pencil beams pointing towards sky targets.
+    - Left: 64 physical antenna element lobes pointing straight UP.
+    - Right: Digitally formed pencil beams pointing towards sky targets.
     """
     fig = plt.figure(figsize=(19, 9.5), dpi=300, facecolor=BG_WHITE)
     fig.suptitle(
         "CHARTS 64-Antenna Phased Array — 3D Beam Directivity Comparison\n"
         "Physical Element Lobes (Pointing Up)  vs.  Digitally Synthesized Beams (Steered to Sky Targets)",
-        fontsize=16, fontweight="bold", color=TEXT_DARK, y=0.96
+        fontsize=16,
+        fontweight="bold",
+        color=TEXT_DARK,
+        y=0.96,
     )
 
     # Antenna positions for 8x8 array (centered at 0,0)
@@ -149,27 +200,43 @@ def create_3d_side_by_side_lobes(
     ax1 = fig.add_subplot(1, 2, 1, projection="3d", facecolor=BG_WHITE)
     ax1.set_title(
         "Physical Antenna Element Lobes\n(All 64 Antennas Pointing to Zenith, θ = 0°)",
-        fontsize=13, fontweight="bold", color=ACCENT_BLUE, pad=12
+        fontsize=13,
+        fontweight="bold",
+        color=ACCENT_BLUE,
+        pad=12,
     )
 
     # Draw Ground Plane / Foundation
     gp_x = [-2.8, 2.8, 2.8, -2.8]
     gp_y = [-2.8, -2.8, 2.8, 2.8]
     ax1.plot_trisurf(
-        gp_x, gp_y, [0, 0, 0, 0],
+        gp_x,
+        gp_y,
+        [0, 0, 0, 0],
         triangles=[[0, 1, 2], [0, 2, 3]],
-        color="#F1F5F9", alpha=0.6, edgecolors=BORDER_COLOR, linewidth=1.2
+        color="#F1F5F9",
+        alpha=0.6,
+        edgecolors=BORDER_COLOR,
+        linewidth=1.2,
     )
 
     # Plot 64 physical dish markers & pedestals
-    ax1.scatter(ant_x, ant_y, ant_z, color="#475569", s=25, depthshade=False, label="64 Dish Feeds")
+    ax1.scatter(
+        ant_x,
+        ant_y,
+        ant_z,
+        color="#475569",
+        s=25,
+        depthshade=False,
+        label="64 Dish Feeds",
+    )
     for x, y in zip(ant_x, ant_y):
         ax1.plot([x, x], [y, y], [0, 0.15], color="#64748B", lw=1.2)
 
     # Create 3D lobe surface template pointing UP (parametric teardrop / cosine lobe)
     u = np.linspace(0, 2 * np.pi, 16)
     v = np.linspace(0, np.pi / 2, 12)
-    lobe_r = 0.55 * np.cos(v)**1.5  # Broad ~60 deg element beam
+    lobe_r = 0.55 * np.cos(v) ** 1.5  # Broad ~60 deg element beam
     X_lobe_templ = lobe_r[None, :] * np.sin(v)[None, :] * np.cos(u)[:, None]
     Y_lobe_templ = lobe_r[None, :] * np.sin(v)[None, :] * np.sin(u)[:, None]
     Z_lobe_templ = lobe_r[None, :] * np.cos(v)[None, :]
@@ -181,24 +248,39 @@ def create_3d_side_by_side_lobes(
             ax_i + X_lobe_templ,
             ay_i + Y_lobe_templ,
             0.15 + Z_lobe_templ,
-            color="#38BDF8", alpha=0.22, edgecolors="#0284C7", linewidth=0.25, shade=True
+            color="#38BDF8",
+            alpha=0.22,
+            edgecolors="#0284C7",
+            linewidth=0.25,
+            shade=True,
         )
 
     # Large aggregate element envelope arrow & annotation
     ax1.quiver(0, 0, 0.8, 0, 0, 1.6, color="#0284C7", lw=3.0, arrow_length_ratio=0.15)
-    ax1.text(0, 0, 2.65, "Zenith Bore-Sight (+Z)\n(No Mechanical Steering)",
-             color=TEXT_DARK, fontsize=10.5, fontweight="bold", ha="center",
-             bbox=dict(boxstyle="round,pad=0.35", fc=BG_WHITE, ec="#0284C7", lw=1.5))
+    ax1.text(
+        0,
+        0,
+        2.65,
+        "Zenith Bore-Sight (+Z)\n(No Mechanical Steering)",
+        color=TEXT_DARK,
+        fontsize=10.5,
+        fontweight="bold",
+        ha="center",
+        bbox=dict(boxstyle="round,pad=0.35", fc=BG_WHITE, ec="#0284C7", lw=1.5),
+    )
 
     # Features callout box
     ax1.text2D(
-        0.05, 0.05,
+        0.05,
+        0.05,
         "• Fixed mechanical dish orientation pointing to zenith\n"
         "• Broad element beam: HPBW ~ 60° (λ/D)\n"
         "• Zero moving parts / zero motor wear\n"
         "• Total array aperture: 4.2m x 4.2m (8x8 grid)",
-        transform=ax1.transAxes, fontsize=9.5, color=TEXT_DARK,
-        bbox=dict(boxstyle="round,pad=0.4", fc=BG_PANEL, ec=BORDER_COLOR)
+        transform=ax1.transAxes,
+        fontsize=9.5,
+        color=TEXT_DARK,
+        bbox=dict(boxstyle="round,pad=0.4", fc=BG_PANEL, ec=BORDER_COLOR),
     )
 
     ax1.set_xlim(-3.2, 3.2)
@@ -215,14 +297,22 @@ def create_3d_side_by_side_lobes(
     ax2 = fig.add_subplot(1, 2, 2, projection="3d", facecolor=BG_WHITE)
     ax2.set_title(
         "Digitally Synthesized Beams\n(Coherent Phased Array Steered to Sky Targets)",
-        fontsize=13, fontweight="bold", color="#16A34A", pad=12
+        fontsize=13,
+        fontweight="bold",
+        color="#16A34A",
+        pad=12,
     )
 
     # Ground plane & antennas
     ax2.plot_trisurf(
-        gp_x, gp_y, [0, 0, 0, 0],
+        gp_x,
+        gp_y,
+        [0, 0, 0, 0],
         triangles=[[0, 1, 2], [0, 2, 3]],
-        color="#F1F5F9", alpha=0.6, edgecolors=BORDER_COLOR, linewidth=1.2
+        color="#F1F5F9",
+        alpha=0.6,
+        edgecolors=BORDER_COLOR,
+        linewidth=1.2,
     )
     ax2.scatter(ant_x, ant_y, ant_z, color="#475569", s=25, depthshade=False)
 
@@ -236,7 +326,14 @@ def create_3d_side_by_side_lobes(
     ax2.plot_wireframe(X_sky, Y_sky, Z_sky, color="#CBD5E1", alpha=0.35, linewidth=0.7)
 
     # Horizon ring
-    ax2.plot(R_sky * np.cos(phi_sky), R_sky * np.sin(phi_sky), 0, color=BORDER_DARK, ls="--", lw=1.2)
+    ax2.plot(
+        R_sky * np.cos(phi_sky),
+        R_sky * np.sin(phi_sky),
+        0,
+        color=BORDER_DARK,
+        ls="--",
+        lw=1.2,
+    )
     ax2.text(R_sky, 0, 0.05, "East", color=TEXT_MUTED, fontsize=8)
     ax2.text(0, R_sky, 0.05, "North", color=TEXT_MUTED, fontsize=8)
 
@@ -270,29 +367,63 @@ def create_3d_side_by_side_lobes(
         perp2 = np.cross(v_beam, perp1)
 
         # Generate cone coordinates
-        C_x = np.outer(t_steps * tx, np.ones_like(u_cone)) + np.outer(cone_radius, np.cos(u_cone) * perp1[0] + np.sin(u_cone) * perp2[0])
-        C_y = np.outer(t_steps * ty, np.ones_like(u_cone)) + np.outer(cone_radius, np.cos(u_cone) * perp1[1] + np.sin(u_cone) * perp2[1])
-        C_z = np.outer(t_steps * tz, np.ones_like(u_cone)) + np.outer(cone_radius, np.cos(u_cone) * perp1[2] + np.sin(u_cone) * perp2[2])
+        C_x = np.outer(t_steps * tx, np.ones_like(u_cone)) + np.outer(
+            cone_radius, np.cos(u_cone) * perp1[0] + np.sin(u_cone) * perp2[0]
+        )
+        C_y = np.outer(t_steps * ty, np.ones_like(u_cone)) + np.outer(
+            cone_radius, np.cos(u_cone) * perp1[1] + np.sin(u_cone) * perp2[1]
+        )
+        C_z = np.outer(t_steps * tz, np.ones_like(u_cone)) + np.outer(
+            cone_radius, np.cos(u_cone) * perp1[2] + np.sin(u_cone) * perp2[2]
+        )
 
-        ax2.plot_surface(C_x, C_y, C_z, color=color, alpha=0.35, edgecolors=color, linewidth=0.25, shade=True)
+        ax2.plot_surface(
+            C_x,
+            C_y,
+            C_z,
+            color=color,
+            alpha=0.35,
+            edgecolors=color,
+            linewidth=0.25,
+            shade=True,
+        )
 
         # Central ray
         ax2.plot([0, tx], [0, ty], [0, tz], color=color, lw=2.2)
-        ax2.scatter([tx], [ty], [tz], color=color, s=55, edgecolor="#0F172A", lw=1.2, depthshade=False)
+        ax2.scatter(
+            [tx],
+            [ty],
+            [tz],
+            color=color,
+            s=55,
+            edgecolor="#0F172A",
+            lw=1.2,
+            depthshade=False,
+        )
 
         # Target label
-        ax2.text(tx * 1.06, ty * 1.06, tz * 1.06 + 0.08, f"B{b_idx}: {name}",
-                 color=color, fontsize=8.5, fontweight="bold")
+        ax2.text(
+            tx * 1.06,
+            ty * 1.06,
+            tz * 1.06 + 0.08,
+            f"B{b_idx}: {name}",
+            color=color,
+            fontsize=8.5,
+            fontweight="bold",
+        )
 
     # Features callout box
     ax2.text2D(
-        0.05, 0.05,
+        0.05,
+        0.05,
         "• Coherent digital beamforming: B_k = Σ w_ik V_i\n"
         "• Synthesized pencil beam: HPBW ~ 4.8° (FWHM)\n"
         "• 8 simultaneous independent celestial targets\n"
         "• Real-time steering follows diurnal sky rotation",
-        transform=ax2.transAxes, fontsize=9.5, color=TEXT_DARK,
-        bbox=dict(boxstyle="round,pad=0.4", fc=BG_PANEL, ec="#16A34A", lw=1.2)
+        transform=ax2.transAxes,
+        fontsize=9.5,
+        color=TEXT_DARK,
+        bbox=dict(boxstyle="round,pad=0.4", fc=BG_PANEL, ec="#16A34A", lw=1.2),
     )
 
     ax2.set_xlim(-3.2, 3.2)
@@ -321,8 +452,8 @@ def create_light_theme_pipeline_dashboard(
     targets: List[Dict] = DEFAULT_TARGETS_WIN03,
 ) -> None:
     """Renders the exact 2-minute pipeline spectrum dashboard in pure Light Theme:
-       - Top panel: Array Mean Spectrum & 8x8 individual antenna grid with RFI lines.
-       - Bottom panel: Formed Beam Power across the 8 tracked celestial targets.
+    - Top panel: Array Mean Spectrum & 8x8 individual antenna grid with RFI lines.
+    - Bottom panel: Formed Beam Power across the 8 tracked celestial targets.
     """
     freq_mhz = np.linspace(300.0, 501.6, 672)
 
@@ -347,7 +478,9 @@ def create_light_theme_pipeline_dashboard(
     ant_specs_db = np.zeros((N_ANT, len(freq_mhz)))
     for a in range(N_ANT):
         gain_offset = 0.4 * np.sin(a * 0.4)
-        ant_specs_db[a] = mean_spec_db + gain_offset + np.random.normal(0, 0.28, len(freq_mhz))
+        ant_specs_db[a] = (
+            mean_spec_db + gain_offset + np.random.normal(0, 0.28, len(freq_mhz))
+        )
         for rfi_f, rfi_amp in rfi_channels:
             idx = int(round((rfi_f - 300.0) / 0.3))
             if 0 <= idx < len(freq_mhz):
@@ -358,7 +491,11 @@ def create_light_theme_pipeline_dashboard(
     beam_powers_db = np.zeros((len(targets), len(freq_mhz)))
     for b_idx in range(len(targets)):
         # Thermal formed baseline ~ 20-22 dB
-        beam_baseline = 20.2 + 1.2 * np.sin(freq_mhz / 25.0) + np.random.normal(0, 0.18, len(freq_mhz))
+        beam_baseline = (
+            20.2
+            + 1.2 * np.sin(freq_mhz / 25.0)
+            + np.random.normal(0, 0.18, len(freq_mhz))
+        )
         # Astrophysical signal spikes on specific tracked targets
         if b_idx == 0:  # Sgr A* / GC: Broad continuum & line at 344.1 MHz (31.8 dB)
             beam_baseline[int(round((344.1 - 300.0) / 0.3))] = 31.8
@@ -369,45 +506,74 @@ def create_light_theme_pipeline_dashboard(
         elif b_idx == 3:  # Sco X-1: Peak at 339.9 MHz (28.9 dB)
             beam_baseline[int(round((339.9 - 300.0) / 0.3))] = 28.9
         elif b_idx == 7:  # PSR B1937+21: High-frequency continuum step (465-485 MHz)
-            beam_baseline[int(round((465.0 - 300.0) / 0.3)):int(round((485.0 - 300.0) / 0.3))] += 2.2
+            beam_baseline[
+                int(round((465.0 - 300.0) / 0.3)) : int(round((485.0 - 300.0) / 0.3))
+            ] += 2.2
         beam_powers_db[b_idx] = beam_baseline
 
     # Create Composite Light-Theme Figure
     fig = plt.figure(figsize=(19, 17), dpi=300, facecolor=BG_WHITE)
 
     # 2-Row Layout: Top = Baseband Array Mean & 8x8 Grid; Bottom = Beam Tracker Output
-    outer_gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[1.25, 0.75], hspace=0.18)
+    outer_gs = fig.add_gridspec(
+        nrows=2, ncols=1, height_ratios=[1.25, 0.75], hspace=0.18
+    )
 
     # ==========================================================================
     # TOP PANEL: Baseband Power Spectrum (Mean + 8x8 Antenna Grid)
     # ==========================================================================
     top_cell = outer_gs[0]
     inner_top_gs = top_cell.subgridspec(
-        nrows=9, ncols=8,
+        nrows=9,
+        ncols=8,
         height_ratios=[2.4, 1, 1, 1, 1, 1, 1, 1, 1],
-        hspace=0.36, wspace=0.20
+        hspace=0.36,
+        wspace=0.20,
     )
 
     # Array Mean Spectrum Subplot
     ax_mean = fig.add_subplot(inner_top_gs[0, :])
     ax_mean.set_facecolor(BG_PANEL)
-    ax_mean.set_title("CHARTS Baseband Frequency Power Spectrum — Array Mean & 8×8 Antenna Grid",
-                      fontsize=14, fontweight="bold", color=TEXT_DARK, pad=10)
+    ax_mean.set_title(
+        "CHARTS Baseband Frequency Power Spectrum — Array Mean & 8×8 Antenna Grid",
+        fontsize=14,
+        fontweight="bold",
+        color=TEXT_DARK,
+        pad=10,
+    )
 
-    mean_line, = ax_mean.plot(freq_mhz, mean_spec_db, color="#0284C7", linewidth=2.0, label="Array Mean Spectrum")
+    (mean_line,) = ax_mean.plot(
+        freq_mhz,
+        mean_spec_db,
+        color="#0284C7",
+        linewidth=2.0,
+        label="Array Mean Spectrum",
+    )
     peak_idx = int(np.argmax(mean_spec_db))
-    ax_mean.scatter([freq_mhz[peak_idx]], [mean_spec_db[peak_idx]], color="#D97706", s=75, zorder=5)
+    ax_mean.scatter(
+        [freq_mhz[peak_idx]], [mean_spec_db[peak_idx]], color="#D97706", s=75, zorder=5
+    )
     ax_mean.text(
-        0.02, 0.82,
+        0.02,
+        0.82,
         f"Array Peak: {freq_mhz[peak_idx]:.1f} MHz ({mean_spec_db[peak_idx]:.1f} dB)",
-        transform=ax_mean.transAxes, color="#D97706", fontsize=11, fontweight="bold",
-        bbox=dict(boxstyle="round,pad=0.25", fc=BG_WHITE, ec="#D97706", lw=1.2)
+        transform=ax_mean.transAxes,
+        color="#D97706",
+        fontsize=11,
+        fontweight="bold",
+        bbox=dict(boxstyle="round,pad=0.25", fc=BG_WHITE, ec="#D97706", lw=1.2),
     )
     ax_mean.set_xlim(300.0, 501.6)
     ax_mean.set_ylim(0, 24)
     ax_mean.set_ylabel("Power (dB)", fontsize=10, fontweight="bold")
     ax_mean.grid(True, alpha=0.7)
-    ax_mean.legend(loc="upper right", frameon=True, facecolor=BG_WHITE, edgecolor=BORDER_COLOR, fontsize=9.5)
+    ax_mean.legend(
+        loc="upper right",
+        frameon=True,
+        facecolor=BG_WHITE,
+        edgecolor=BORDER_COLOR,
+        fontsize=9.5,
+    )
 
     # 8x8 Grid of Antenna Spectra
     for ant in range(N_ANT):
@@ -418,8 +584,15 @@ def create_light_theme_pipeline_dashboard(
         ax_a.plot(freq_mhz, ant_specs_db[ant], color="#16A34A", linewidth=0.75)
         ax_a.set_xlim(300.0, 501.6)
         ax_a.set_ylim(0, 24)
-        ax_a.text(0.06, 0.72, f"A{ant}", transform=ax_a.transAxes, fontsize=6.5,
-                  color=TEXT_DARK, fontweight="bold")
+        ax_a.text(
+            0.06,
+            0.72,
+            f"A{ant}",
+            transform=ax_a.transAxes,
+            fontsize=6.5,
+            color=TEXT_DARK,
+            fontweight="bold",
+        )
         ax_a.grid(True, linestyle=":", alpha=0.5)
 
         if row == 7:
@@ -438,10 +611,14 @@ def create_light_theme_pipeline_dashboard(
     tot_mins = int(window_s // 60)
     tot_secs = int(window_s % 60)
     fig.text(
-        0.5, 0.44,
+        0.5,
+        0.44,
         f"Frame {frame_idx}/{total_frames}  |  Window Time: {mins:02d}:{secs:02d} / {tot_mins:02d}:{tot_secs:02d} ({t_s:.1f}s / {window_s:.0f}s)",
-        ha="center", fontsize=11, fontweight="bold", color="#0284C7",
-        bbox=dict(boxstyle="round,pad=0.3", fc=BG_PANEL, ec=BORDER_COLOR)
+        ha="center",
+        fontsize=11,
+        fontweight="bold",
+        color="#0284C7",
+        bbox=dict(boxstyle="round,pad=0.3", fc=BG_PANEL, ec=BORDER_COLOR),
     )
 
     # ==========================================================================
@@ -449,8 +626,13 @@ def create_light_theme_pipeline_dashboard(
     # ==========================================================================
     ax_tr = fig.add_subplot(outer_gs[1])
     ax_tr.set_facecolor(BG_PANEL)
-    ax_tr.set_title("CHARTS Beam Tracker Output — Formed Beam Power Across Tracked Targets",
-                    fontsize=14, fontweight="bold", color=TEXT_DARK, pad=12)
+    ax_tr.set_title(
+        "CHARTS Beam Tracker Output — Formed Beam Power Across Tracked Targets",
+        fontsize=14,
+        fontweight="bold",
+        color=TEXT_DARK,
+        pad=12,
+    )
 
     # Plot all 8 beams with matching high-contrast colors & target coordinates
     for b_idx, tgt in enumerate(targets):
@@ -461,14 +643,23 @@ def create_light_theme_pipeline_dashboard(
         sign_dec = "+" if dec >= 0 else ""
         label_str = f"B{b_idx}: {name} ({ra:.2f}°, {sign_dec}{dec:.2f}°)"
 
-        ax_tr.plot(freq_mhz, beam_powers_db[b_idx], color=color, linewidth=1.8, label=label_str)
+        ax_tr.plot(
+            freq_mhz, beam_powers_db[b_idx], color=color, linewidth=1.8, label=label_str
+        )
 
     ax_tr.set_xlim(300.0, 501.6)
     ax_tr.set_ylim(18, 36)
     ax_tr.set_xlabel("Frequency (MHz)", fontsize=11, fontweight="bold")
     ax_tr.set_ylabel("Formed Power (dB)", fontsize=11, fontweight="bold")
     ax_tr.grid(True, alpha=0.7)
-    ax_tr.legend(loc="upper right", ncol=2, frameon=True, facecolor=BG_WHITE, edgecolor=BORDER_COLOR, fontsize=9.5)
+    ax_tr.legend(
+        loc="upper right",
+        ncol=2,
+        frameon=True,
+        facecolor=BG_WHITE,
+        edgecolor=BORDER_COLOR,
+        fontsize=9.5,
+    )
 
     plt.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -478,10 +669,27 @@ def create_light_theme_pipeline_dashboard(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CHARTS 2min Pipeline & 3D Lobes Light-Theme Visualizer")
-    parser.add_argument("--window-dir", type=str, default=None, help="Path to simulation window dir in kotekan_scratch")
-    parser.add_argument("--out-dir", type=str, default="presentation_assets", help="Directory to save output PNGs")
-    parser.add_argument("--frame-idx", type=int, default=164, help="Frame index for dashboard (default: 164)")
+    parser = argparse.ArgumentParser(
+        description="CHARTS 2min Pipeline & 3D Lobes Light-Theme Visualizer"
+    )
+    parser.add_argument(
+        "--window-dir",
+        type=str,
+        default=None,
+        help="Path to simulation window dir in kotekan_scratch",
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=str,
+        default="presentation_assets",
+        help="Directory to save output PNGs",
+    )
+    parser.add_argument(
+        "--frame-idx",
+        type=int,
+        default=164,
+        help="Frame index for dashboard (default: 164)",
+    )
     args = parser.parse_args()
 
     setup_white_style()
@@ -498,7 +706,9 @@ def main():
 
     # 1. Generate 3D Side-by-Side Lobes (Physical UP vs Digital SKY)
     path_3d = out_dir / "3d_antenna_lobes_physical_vs_digital_light.png"
-    print("\n[1/2] Generating 3D Side-by-Side Antenna Lobes Visualization (Light Theme)...")
+    print(
+        "\n[1/2] Generating 3D Side-by-Side Antenna Lobes Visualization (Light Theme)..."
+    )
     create_3d_side_by_side_lobes(path_3d)
 
     # 2. Generate Light Theme Dashboard (Matching media_1790175212762.png)

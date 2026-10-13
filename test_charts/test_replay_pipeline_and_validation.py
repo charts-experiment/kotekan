@@ -44,7 +44,9 @@ from constants import (
 from kotekan_tracker_control import KotekanTrackerClient
 
 
-def get_antenna_positions(n_ant: int, spacing_m: float = DEFAULT_SPACING_M) -> np.ndarray:
+def get_antenna_positions(
+    n_ant: int, spacing_m: float = DEFAULT_SPACING_M
+) -> np.ndarray:
     """Antenna coordinates matching Kotekan V5 geometry."""
     if n_ant <= 64:
         cols = np.arange(n_ant) & 7
@@ -84,8 +86,10 @@ def generate_replay_raw_input(
     voltages = np.zeros((n_time, n_freq, n_ant), dtype=np.complex64)
 
     # Complex Gaussian background noise
-    voltages += (rng.normal(0.0, noise_sigma, voltages.shape) +
-                 1j * rng.normal(0.0, noise_sigma, voltages.shape)).astype(np.complex64)
+    voltages += (
+        rng.normal(0.0, noise_sigma, voltages.shape)
+        + 1j * rng.normal(0.0, noise_sigma, voltages.shape)
+    ).astype(np.complex64)
 
     for src in sources:
         l0 = src["l0"]
@@ -110,7 +114,9 @@ def generate_replay_raw_input(
         for f_idx, f_hz in enumerate(freqs_hz):
             wavenumber = 2.0 * np.pi * f_hz / C_LIGHT
             phases = -wavenumber * delays_m
-            voltages[:, f_idx, :] += (amp * (np.cos(phases) + 1j * np.sin(phases))).astype(np.complex64)
+            voltages[:, f_idx, :] += (
+                amp * (np.cos(phases) + 1j * np.sin(phases))
+            ).astype(np.complex64)
 
     # Pack into signed int4 [-8..7] nibbles
     real_nibble = np.clip(np.round(np.real(voltages)), -8, 7).astype(np.int8) & 0x0F
@@ -176,7 +182,9 @@ def compute_independent_reference_beams(
                 weights = np.exp(1j * (wavenumber * delays_m)).astype(np.complex64)
 
                 # Inner product across antennas
-                formed_ref[t_start:t_end, f_idx, b_idx] = unpacked_c64[t_start:t_end, f_idx, :] @ weights
+                formed_ref[t_start:t_end, f_idx, b_idx] = (
+                    unpacked_c64[t_start:t_end, f_idx, :] @ weights
+                )
 
     return formed_ref
 
@@ -302,7 +310,9 @@ write_voltages_output:
     config_path.write_text(config_content, encoding="utf-8")
 
 
-def read_kotekan_output_voltages(file_path: Path, n_time: int, n_freq: int, max_beams: int) -> np.ndarray:
+def read_kotekan_output_voltages(
+    file_path: Path, n_time: int, n_freq: int, max_beams: int
+) -> np.ndarray:
     """Read Kotekan binary complex voltage output."""
     file_bytes = file_path.read_bytes()
     # Check if leading 4 bytes are metadata_size
@@ -311,7 +321,9 @@ def read_kotekan_output_voltages(file_path: Path, n_time: int, n_freq: int, max_
     expected_elements = n_time * n_freq * max_beams * 2  # float2
     expected_bytes = expected_elements * 4
 
-    raw_floats = np.frombuffer(file_bytes[offset:offset + expected_bytes], dtype=np.float32)
+    raw_floats = np.frombuffer(
+        file_bytes[offset : offset + expected_bytes], dtype=np.float32
+    )
     c64 = raw_floats[0::2] + 1j * raw_floats[1::2]
     return c64.reshape((n_time, n_freq, max_beams))
 
@@ -323,7 +335,9 @@ def run_pipeline_and_validate():
     print("=" * 80)
 
     if not KOTEKAN_BIN.exists():
-        print(f"[ERROR] Kotekan executable not found at {KOTEKAN_BIN}. Run cmake --build build first!")
+        print(
+            f"[ERROR] Kotekan executable not found at {KOTEKAN_BIN}. Run cmake --build build first!"
+        )
         sys.exit(1)
 
     work_dir = Path("/tmp/test_charts_replay_pipeline")
@@ -386,7 +400,9 @@ def run_pipeline_and_validate():
     port = 12048
     cmd = [str(KOTEKAN_BIN), "-c", str(config_file), "-b", f"127.0.0.1:{port}"]
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
 
     # Test live REST steering while pipeline is running
     time.sleep(0.5)
@@ -394,7 +410,9 @@ def run_pipeline_and_validate():
     try:
         status = client.get_status()
         print(f"  [REST OK] Connected to live Kotekan REST server at port {port}")
-        print(f"  [REST OK] Active beams: {status.get('num_active_beams')}, Site: {status.get('site')}")
+        print(
+            f"  [REST OK] Active beams: {status.get('num_active_beams')}, Site: {status.get('site')}"
+        )
         # Test live trajectory update on slot 1
         client.steer_lm(1, l0=-0.08, m0=0.06, dl=0.0, dm=1e-5)
     except Exception as e:
@@ -409,7 +427,9 @@ def run_pipeline_and_validate():
     if not output_file.exists():
         print(f"[FAIL] Output file {output_file} was not generated!")
         sys.exit(1)
-    print(f"  -> Output file verified: {output_file} ({os.path.getsize(output_file)/(1024**2):.2f} MB)")
+    print(
+        f"  -> Output file verified: {output_file} ({os.path.getsize(output_file)/(1024**2):.2f} MB)"
+    )
 
     # 4. Independent Reference Model Numerical Validation
     print(f"\n[4/4] Performing Independent Numerical Parity Verification...")
@@ -428,15 +448,19 @@ def run_pipeline_and_validate():
     print("\n" + "=" * 80)
     print(" NUMERICAL VERIFICATION METRICS TABLE")
     print("=" * 80)
-    print(" | Beam | Target | RMS Error  | Max Abs Err | GPU Peak Power | Exp Coherent Gain | Gain Match | Status |")
-    print(" +------+--------+------------+-------------+----------------+-------------------+------------+--------+")
+    print(
+        " | Beam | Target | RMS Error  | Max Abs Err | GPU Peak Power | Exp Coherent Gain | Gain Match | Status |"
+    )
+    print(
+        " +------+--------+------------+-------------+----------------+-------------------+------------+--------+"
+    )
 
     for b in range(active_beams):
         gpu_b = gpu_voltages[:, :, b]
         ref_b = ref_voltages[:, :, b]
 
         diff = np.abs(gpu_b - ref_b)
-        rms_err = float(np.sqrt(np.mean(diff ** 2)))
+        rms_err = float(np.sqrt(np.mean(diff**2)))
         max_err = float(np.max(diff))
 
         gpu_power = float(np.mean(np.abs(gpu_b) ** 2))
@@ -444,14 +468,20 @@ def run_pipeline_and_validate():
         power_ratio = gpu_power / max(ref_power, 1e-9)
 
         # RMS Error threshold: < 1e-4, Max Abs Err < 1e-3
-        passed = (rms_err < 1.0e-3) and (max_err < 5.0e-3) and (0.99 <= power_ratio <= 1.01)
+        passed = (
+            (rms_err < 1.0e-3) and (max_err < 5.0e-3) and (0.99 <= power_ratio <= 1.01)
+        )
         if not passed:
             all_passed = False
 
         status_str = "[PASS]" if passed else "[FAIL]"
-        print(f" | {b:4d} | Src {b+1:2d} | {rms_err:10.2e} | {max_err:11.2e} | {gpu_power:14.2f} | {ref_power:17.2f} | {power_ratio*100:9.3f}% | {status_str:6s} |")
+        print(
+            f" | {b:4d} | Src {b+1:2d} | {rms_err:10.2e} | {max_err:11.2e} | {gpu_power:14.2f} | {ref_power:17.2f} | {power_ratio*100:9.3f}% | {status_str:6s} |"
+        )
 
-    print(" +------+--------+------------+-------------+----------------+-------------------+------------+--------+")
+    print(
+        " +------+--------+------------+-------------+----------------+-------------------+------------+--------+"
+    )
 
     # Sidelobe / Off-target rejection validation
     beam0_power_on_src1 = float(np.mean(np.abs(gpu_voltages[:, :, 0]) ** 2))
@@ -460,13 +490,21 @@ def run_pipeline_and_validate():
     print("\n--- Physical Sidelobe & Isolation Analysis ---")
     print(f"  Beam 0 (Steered to Source 1) Coherent Power : {beam0_power_on_src1:.2f}")
     print(f"  Beam 1 (Steered to Source 2) Coherent Power : {beam1_power_on_src2:.2f}")
-    print(f"  Theoretical Ideal Peak Coherent Array Gain : {(n_ant * 3.0)**2:.2f} (N_ant={n_ant}, A=3.0)")
-    print(f"  Gain Efficiency                            : {beam0_power_on_src1 / (n_ant * 3.0)**2 * 100:.2f}%")
+    print(
+        f"  Theoretical Ideal Peak Coherent Array Gain : {(n_ant * 3.0)**2:.2f} (N_ant={n_ant}, A=3.0)"
+    )
+    print(
+        f"  Gain Efficiency                            : {beam0_power_on_src1 / (n_ant * 3.0)**2 * 100:.2f}%"
+    )
 
     if all_passed:
-        print("\n>>> SUCCESS: Kotekan Replay Pipeline Output Matches Independent Reference Model with Exact Parity! <<<\n")
+        print(
+            "\n>>> SUCCESS: Kotekan Replay Pipeline Output Matches Independent Reference Model with Exact Parity! <<<\n"
+        )
     else:
-        print("\n>>> FAILURE: Numerical discrepancy detected between GPU output and reference model! <<<\n")
+        print(
+            "\n>>> FAILURE: Numerical discrepancy detected between GPU output and reference model! <<<\n"
+        )
         sys.exit(1)
 
 

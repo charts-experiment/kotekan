@@ -20,14 +20,13 @@ namespace kotekan {
 
 /**
  * @class cudaTransientTriggerState
- * @brief Shared state across all pipeline instances of cudaTransientTriggerCommand in a cudaProcess stage.
- *        Owns the single VRAM circular ring buffer and pinned dump staging buffers.
+ * @brief Shared state across all pipeline instances of cudaTransientTriggerCommand in a cudaProcess
+ * stage. Owns the single VRAM circular ring buffer and pinned dump staging buffers.
  */
 class cudaTransientTriggerState : public cudaCommandState {
 public:
     cudaTransientTriggerState(Config& config, const std::string& unique_name,
-                              bufferContainer& host_buffers,
-                              cudaDeviceInterface& device);
+                              bufferContainer& host_buffers, cudaDeviceInterface& device);
     ~cudaTransientTriggerState();
 
     void allocate_device_buffers();
@@ -81,9 +80,8 @@ public:
 class cudaTransientTriggerCommand : public cudaCommand {
 public:
     cudaTransientTriggerCommand(Config& config, const std::string& unique_name,
-                                bufferContainer& host_buffers,
-                                cudaDeviceInterface& device, int inst,
-                                std::shared_ptr<cudaCommandState> state = nullptr);
+                                bufferContainer& host_buffers, cudaDeviceInterface& device,
+                                int inst, std::shared_ptr<cudaCommandState> state = nullptr);
     ~cudaTransientTriggerCommand() override;
 
     cudaEvent_t execute(cudaPipelineState& pipestate,

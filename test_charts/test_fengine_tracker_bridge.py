@@ -16,7 +16,8 @@ import argparse
 import numpy as np
 import h5py
 import matplotlib
-matplotlib.use('Agg')
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 _test_charts_dir = os.path.dirname(os.path.abspath(__file__))
@@ -26,7 +27,9 @@ if _test_charts_dir not in sys.path:
 from constants import C_LIGHT, DEFAULT_SPACING_M
 
 
-def unpack_int4x2(u8_array: np.ndarray, format_type: str = "twos_complement") -> np.ndarray:
+def unpack_int4x2(
+    u8_array: np.ndarray, format_type: str = "twos_complement"
+) -> np.ndarray:
     """
     Unpacks 4-bit complex int4x2 values (real and imag nibbles) to complex64.
     Supports both standard 2's complement and offset-binary ('int4x2_swapped_withoffset').
@@ -110,7 +113,7 @@ def beamform_synthesize(
         delays = (np.outer(l_sub, pos_x) + np.outer(m_sub, pos_y)) / C_LIGHT
 
         # Phases: 2 * pi * f * delay -> (t_sub, n_freq, n_ant)
-        phases = 2.0 * np.pi * np.einsum('f,ta->tfa', freqs_hz, delays)
+        phases = 2.0 * np.pi * np.einsum("f,ta->tfa", freqs_hz, delays)
         weights = np.exp(1j * phases).astype(np.complex64)  # (t_sub, n_freq, n_ant)
 
         # Apply antenna health/selection mask
@@ -148,7 +151,7 @@ def run_bridge_verification(h5_path: str, out_plot: str = ""):
             print(f" Found 'voltage' dataset with shape {dset_shape}")
             # Format in RadioTelescopeFEngine.jl: (ndishes, npolrs, nfreqs, ntimes)
             if len(dset_shape) == 4:
-                raw_data = dset[:, 0, :, :] # take polarization 0
+                raw_data = dset[:, 0, :, :]  # take polarization 0
             else:
                 raw_data = dset[:]
             format_type = str(dset.attrs.get("type", "int4x2_swapped_withoffset"))
@@ -157,7 +160,11 @@ def run_bridge_verification(h5_path: str, out_plot: str = ""):
             if coarse_freq is not None:
                 freq_indices = np.array(coarse_freq)
                 # CHARTS / CHORD frequency conversion
-                freqs_hz = (freq_indices * (4.9152e9 / 16384)) if np.max(freq_indices) > 500 else (300.0e6 + freq_indices * 300.0e3)
+                freqs_hz = (
+                    (freq_indices * (4.9152e9 / 16384))
+                    if np.max(freq_indices) > 500
+                    else (300.0e6 + freq_indices * 300.0e3)
+                )
             else:
                 freqs_hz = 300.0e6 + np.arange(raw_data.shape[1]) * 300.0e3
 
@@ -190,14 +197,18 @@ def run_bridge_verification(h5_path: str, out_plot: str = ""):
 
         print(f"\n--- Dataset Parameters ---")
         print(f"  Antennas   : {n_ant} ({'8x8' if n_ant <= 64 else '16x16'} array)")
-        print(f"  Frequencies: {n_freq} channels ({freq_start_mhz:.1f} to {freq_start_mhz + n_freq*delta_freq_mhz:.1f} MHz)")
-        print(f"  Time       : {n_time} samples ({n_time * delta_time_us / 1000.0:.2f} ms)")
+        print(
+            f"  Frequencies: {n_freq} channels ({freq_start_mhz:.1f} to {freq_start_mhz + n_freq*delta_freq_mhz:.1f} MHz)"
+        )
+        print(
+            f"  Time       : {n_time} samples ({n_time * delta_time_us / 1000.0:.2f} ms)"
+        )
         print(f"  Data Format: {format_type}")
         print(f"  Scenario   : {scenario}")
 
     # 1. Single Antenna Power & Variance
     c_single = unpack_int4x2(raw_data, format_type=format_type)
-    ant_powers = np.mean(np.real(c_single)**2 + np.imag(c_single)**2, axis=(1, 2))
+    ant_powers = np.mean(np.real(c_single) ** 2 + np.imag(c_single) ** 2, axis=(1, 2))
     mean_ant_p = float(np.mean(ant_powers))
     print(f"\n--- Single Antenna Statistics ---")
     print(f"  Mean Power across Antennas : {mean_ant_p:.4f}")
@@ -225,19 +236,33 @@ def run_bridge_verification(h5_path: str, out_plot: str = ""):
         target_m = 0.0
 
     # On-Target Beam
-    v_on_target = beamform_synthesize(raw_data, freqs_hz, target_l, target_m, spacing_m=spacing_m, format_type=format_type)
+    v_on_target = beamform_synthesize(
+        raw_data,
+        freqs_hz,
+        target_l,
+        target_m,
+        spacing_m=spacing_m,
+        format_type=format_type,
+    )
 
     # Off-Target (Sidelobe / Null Rejection outside 64-ant primary beamwidth ~0.2 rad)
     offset_l = 0.25 if np.isscalar(target_l) else target_l + 0.25
     offset_m = 0.20 if np.isscalar(target_m) else target_m + 0.20
-    v_off_target = beamform_synthesize(raw_data, freqs_hz, offset_l, offset_m, spacing_m=spacing_m, format_type=format_type)
+    v_off_target = beamform_synthesize(
+        raw_data,
+        freqs_hz,
+        offset_l,
+        offset_m,
+        spacing_m=spacing_m,
+        format_type=format_type,
+    )
 
     t1_bf = time.perf_counter()
     print(f"  Beamforming execution time : {(t1_bf - t0_bf)*1000.0:.2f} ms")
 
     # 3. Analyze Coherent Gain & Sidelobe Rejection
-    p_on = np.abs(v_on_target)**2
-    p_off = np.abs(v_off_target)**2
+    p_on = np.abs(v_on_target) ** 2
+    p_off = np.abs(v_off_target) ** 2
 
     mean_p_on = float(np.mean(p_on))
     mean_p_off = float(np.mean(p_off))
@@ -248,7 +273,9 @@ def run_bridge_verification(h5_path: str, out_plot: str = ""):
     print(f"\n--- Beam Tracker Performance & Verification Metrics ---")
     print(f"  On-Target Mean Power |E|² : {mean_p_on:.4f}")
     print(f"  Off-Target Mean Power |E|²: {mean_p_off:.4f}")
-    print(f"  Array Coherent Gain Ratio : {measured_gain:.2f}x (Expected ~ {n_ant:.0f}x for noise, up to {n_ant**2:.0f}x for pure tone)")
+    print(
+        f"  Array Coherent Gain Ratio : {measured_gain:.2f}x (Expected ~ {n_ant:.0f}x for noise, up to {n_ant**2:.0f}x for pure tone)"
+    )
     print(f"  Sidelobe / Null Rejection : {rejection_db:.2f} dB")
 
     # Pass / Fail Evaluation
@@ -258,9 +285,15 @@ def run_bridge_verification(h5_path: str, out_plot: str = ""):
     all_passed = passed_gain and passed_rejection
 
     print(f"\n--- Verification Status ---")
-    print(f"  Gain Threshold Check (>={min_gain_threshold:.1f}x) : {'[PASS]' if passed_gain else '[FAIL]'}")
-    print(f"  Rejection Check (>=8.0 dB)         : {'[PASS]' if passed_rejection else '[FAIL]'}")
-    print(f"  OVERALL RESULT                     : {'[PASSED]' if all_passed else '[FAILED]'}")
+    print(
+        f"  Gain Threshold Check (>={min_gain_threshold:.1f}x) : {'[PASS]' if passed_gain else '[FAIL]'}"
+    )
+    print(
+        f"  Rejection Check (>=8.0 dB)         : {'[PASS]' if passed_rejection else '[FAIL]'}"
+    )
+    print(
+        f"  OVERALL RESULT                     : {'[PASSED]' if all_passed else '[FAILED]'}"
+    )
 
     # 4. Generate Diagnostic Plots
     if not out_plot:
@@ -271,8 +304,10 @@ def run_bridge_verification(h5_path: str, out_plot: str = ""):
 
     # Panel 1: Per-Antenna Power Distribution
     ax1 = fig.add_subplot(2, 2, 1)
-    ax1.bar(range(n_ant), ant_powers, color='steelblue', edgecolor='navy', alpha=0.8)
-    ax1.axhline(mean_ant_p, color='red', linestyle='--', label=f"Mean Power ({mean_ant_p:.2f})")
+    ax1.bar(range(n_ant), ant_powers, color="steelblue", edgecolor="navy", alpha=0.8)
+    ax1.axhline(
+        mean_ant_p, color="red", linestyle="--", label=f"Mean Power ({mean_ant_p:.2f})"
+    )
     ax1.set_xlabel("Antenna Index (0..{})".format(n_ant - 1))
     ax1.set_ylabel("Power Variance |V_a|²")
     ax1.set_title(f"Antenna Array Power Profile ({n_ant} Antennas)")
@@ -284,7 +319,9 @@ def run_bridge_verification(h5_path: str, out_plot: str = ""):
     step = max(1, n_time // 1000)
     waterfall = p_on[::step, :].T  # (freq, time)
     extent = [0, n_time * delta_time_us / 1000.0, freqs_hz[0] / 1e6, freqs_hz[-1] / 1e6]
-    im = ax2.imshow(waterfall, aspect='auto', origin='lower', cmap='viridis', extent=extent)
+    im = ax2.imshow(
+        waterfall, aspect="auto", origin="lower", cmap="viridis", extent=extent
+    )
     ax2.set_xlabel("Time (ms)")
     ax2.set_ylabel("Frequency (MHz)")
     ax2.set_title(f"On-Target Tracked Beam Dynamic Spectrum ({scenario})")
@@ -295,8 +332,21 @@ def run_bridge_verification(h5_path: str, out_plot: str = ""):
     spec_on = np.mean(p_on, axis=0)
     spec_off = np.mean(p_off, axis=0)
     freq_axis_mhz = freqs_hz / 1e6
-    ax3.plot(freq_axis_mhz, spec_on, label=f"On-Target Tracked Beam (Gain={measured_gain:.1f}x)", color='crimson', lw=1.5)
-    ax3.plot(freq_axis_mhz, spec_off, label=f"Off-Target Beam (Rejection={rejection_db:.1f} dB)", color='gray', alpha=0.7, lw=1.2)
+    ax3.plot(
+        freq_axis_mhz,
+        spec_on,
+        label=f"On-Target Tracked Beam (Gain={measured_gain:.1f}x)",
+        color="crimson",
+        lw=1.5,
+    )
+    ax3.plot(
+        freq_axis_mhz,
+        spec_off,
+        label=f"Off-Target Beam (Rejection={rejection_db:.1f} dB)",
+        color="gray",
+        alpha=0.7,
+        lw=1.2,
+    )
     ax3.set_xlabel("Frequency (MHz)")
     ax3.set_ylabel("Average Power |E|²")
     ax3.set_title("Formed Beam Power Spectrum")
@@ -309,14 +359,31 @@ def run_bridge_verification(h5_path: str, out_plot: str = ""):
     beam_scan_power = np.zeros(len(l_scan))
     mid_freq_idx = n_freq // 2
     f_mid_hz = np.array([freqs_hz[mid_freq_idx]])
-    raw_mid_slice = raw_data[:, mid_freq_idx:mid_freq_idx+1, :min(n_time, 2048)]
+    raw_mid_slice = raw_data[:, mid_freq_idx : mid_freq_idx + 1, : min(n_time, 2048)]
 
     for idx, l_val in enumerate(l_scan):
-        v_scan = beamform_synthesize(raw_mid_slice, f_mid_hz, l_val, 0.0, spacing_m=spacing_m, format_type=format_type)
-        beam_scan_power[idx] = np.mean(np.abs(v_scan)**2)
+        v_scan = beamform_synthesize(
+            raw_mid_slice,
+            f_mid_hz,
+            l_val,
+            0.0,
+            spacing_m=spacing_m,
+            format_type=format_type,
+        )
+        beam_scan_power[idx] = np.mean(np.abs(v_scan) ** 2)
 
-    ax4.plot(l_scan, 10.0 * np.log10(beam_scan_power / np.max(beam_scan_power)), color='darkmagenta', lw=1.5)
-    ax4.axvline(0.0 if np.isscalar(target_l) else np.mean(target_l), color='green', linestyle=':', label="Target Center")
+    ax4.plot(
+        l_scan,
+        10.0 * np.log10(beam_scan_power / np.max(beam_scan_power)),
+        color="darkmagenta",
+        lw=1.5,
+    )
+    ax4.axvline(
+        0.0 if np.isscalar(target_l) else np.mean(target_l),
+        color="green",
+        linestyle=":",
+        label="Target Center",
+    )
     ax4.set_xlabel("Direction Cosine l (East-West)")
     ax4.set_ylabel("Normalized Beam Response (dB)")
     ax4.set_title(f"Synthesized Array Factor Cut (at {f_mid_hz[0]/1e6:.1f} MHz)")
@@ -334,9 +401,13 @@ def run_bridge_verification(h5_path: str, out_plot: str = ""):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Kotekan Beam Tracker <-> F-Engine Verification Bridge")
+    parser = argparse.ArgumentParser(
+        description="Kotekan Beam Tracker <-> F-Engine Verification Bridge"
+    )
     parser.add_argument("h5_path", help="Path to F-Engine HDF5 dataset")
-    parser.add_argument("--plot-out", default="", help="Path for output diagnostic plot")
+    parser.add_argument(
+        "--plot-out", default="", help="Path for output diagnostic plot"
+    )
     args = parser.parse_args()
 
     success = run_bridge_verification(args.h5_path, args.plot_out)

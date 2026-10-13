@@ -6,21 +6,20 @@
 
 #include "fmt.hpp" // for compile_string_to_view
 
-#include <assert.h>        // for assert
-#include <cuda.h>          // for cuGetErrorString, cuModuleGetFunction, cuModuleLoadDataEx
+#include <assert.h> // for assert
+#include <cstdlib>
+#include <cuda.h> // for cuGetErrorString, cuModuleGetFunction, cuModuleLoadDataEx
+#include <filesystem>
 #include <mutex>           // for mutex, lock_guard
 #include <nvPTXCompiler.h> // for NVPTXCOMPILE_SUCCESS, nvPTXCompilerCompile, nvPTXCompilerC...
 #include <nvrtc.h>         // for nvrtcGetErrorString, NVRTC_SUCCESS, nvrtcCompileProgram
-#include <stdexcept>       // for runtime_error
-#include <stdio.h>         // for fclose, fopen, fread, fseek, ftell, rewind, FILE, SEEK_END
-#include <stdlib.h>        // for free, malloc
-#include <utility>         // for pair
-
-#include <cstdlib>
-#include <filesystem>
 #include <set>
 #include <sstream>
+#include <stdexcept> // for runtime_error
+#include <stdio.h>   // for fclose, fopen, fread, fseek, ftell, rewind, FILE, SEEK_END
+#include <stdlib.h>  // for free, malloc
 #include <system_error>
+#include <utility> // for pair
 
 using kotekan::Config;
 
@@ -143,7 +142,8 @@ static std::vector<std::string> get_cuda_include_paths() {
     std::set<std::string> seen;
 
     auto try_add = [&](const std::string& path) {
-        if (path.empty()) return;
+        if (path.empty())
+            return;
         std::error_code ec;
         if (std::filesystem::is_directory(path, ec)) {
             std::string canon;
@@ -152,12 +152,14 @@ static std::vector<std::string> get_cuda_include_paths() {
             } catch (...) {
                 canon = path;
             }
-            if (canon.empty()) canon = path;
+            if (canon.empty())
+                canon = path;
             if (seen.find(canon) == seen.end()) {
                 seen.insert(canon);
                 inc_paths.push_back(path);
             }
-            // In modern CUDA (e.g. CUDA 12+), CCCL headers (cuda/std, cooperative_groups, thrust, cub) may reside in cccl/
+            // In modern CUDA (e.g. CUDA 12+), CCCL headers (cuda/std, cooperative_groups, thrust,
+            // cub) may reside in cccl/
             std::string cccl = path + "/cccl";
             if (std::filesystem::is_directory(cccl, ec)) {
                 std::string canon_cccl;
@@ -166,7 +168,8 @@ static std::vector<std::string> get_cuda_include_paths() {
                 } catch (...) {
                     canon_cccl = cccl;
                 }
-                if (canon_cccl.empty()) canon_cccl = cccl;
+                if (canon_cccl.empty())
+                    canon_cccl = cccl;
                 if (seen.find(canon_cccl) == seen.end()) {
                     seen.insert(canon_cccl);
                     inc_paths.push_back(cccl);
@@ -176,16 +179,8 @@ static std::vector<std::string> get_cuda_include_paths() {
     };
 
     // 1. Environment variables from cluster modules (e.g. Trillium, Compute Canada, SLURM)
-    const char* env_vars[] = {
-        "CUDA_HOME",
-        "CUDA_PATH",
-        "CUDA_ROOT",
-        "EBROOTCUDA",
-        "CUDADIR",
-        "CUDA_INCLUDE_DIR",
-        "CUDA_INC_PATH",
-        "CUDAToolkit_ROOT"
-    };
+    const char* env_vars[] = {"CUDA_HOME", "CUDA_PATH",        "CUDA_ROOT",     "EBROOTCUDA",
+                              "CUDADIR",   "CUDA_INCLUDE_DIR", "CUDA_INC_PATH", "CUDAToolkit_ROOT"};
     for (const char* var : env_vars) {
         const char* val = std::getenv(var);
         if (val && *val) {
@@ -311,7 +306,8 @@ void cudaDeviceInterface::build(const std::string& kernel_filename,
         cstrings.push_back(s.c_str());
 
     // Compile the kernel
-    res = nvrtcCompileProgram(prog, cstrings.size(), cstrings.data());    // TODO Abstract error checking
+    res =
+        nvrtcCompileProgram(prog, cstrings.size(), cstrings.data()); // TODO Abstract error checking
 
     if (res != NVRTC_SUCCESS) {
 
@@ -319,14 +315,14 @@ void cudaDeviceInterface::build(const std::string& kernel_filename,
         nvrtcGetProgramLogSize(prog, &logSize);
 
         std::string log;
-        log.resize(logSize > 1 ? logSize : 1);  // evita size 0
+        log.resize(logSize > 1 ? logSize : 1); // evita size 0
         nvrtcGetProgramLog(prog, log.data());
 
         // 2) Mensaje de error + log
         const char* error_str = nvrtcGetErrorString(res);
         FATAL_ERROR("ERROR IN nvrtcCompileProgram: {}\nNVRTC LOG:\n{}", error_str, log);
     }
-    
+
 
     // Obtain CUBIN from the program: native SASS for the local GPU, so the
     // driver does not need to JIT-compile PTX.

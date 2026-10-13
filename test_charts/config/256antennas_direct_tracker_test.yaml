@@ -1,3 +1,4 @@
+---
 # ==============================================================================
 # CHARTS 256-Antenna GPU Direct Multi-Beam Tracker Test Pipeline
 # ==============================================================================
@@ -19,105 +20,105 @@ buffer_depth: 3
 sizeof_complex_float: 8
 
 main_pool:
-  kotekan_metadata_pool: chordMetadata
-  num_metadata_objects: 50
+    kotekan_metadata_pool: chordMetadata
+    num_metadata_objects: 50
 
 # Input buffer (matches rfsocHandlerShuffle layout [time][freq][antenna] of int4x2_t)
 network_capture_buf:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: samples_per_data_set * num_local_freq * num_elements
-  numa_node: 0
-  metadata_pool: main_pool
-  zero_new_frames: true
-  mlock_frames: false
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set * num_local_freq * num_elements
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
 
 # Output complex voltages buffer [time][freq][max_beams] of float2 (real, imag)
 host_formed_beams_buffer:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float
-  numa_node: 0
-  metadata_pool: main_pool
-  zero_new_frames: true
-  mlock_frames: false
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
 
 # Data Generator simulating continuous RFSoC stream
 gen_data:
-  kotekan_stage: testDataGen
-  type: random_signed
-  seed: 42
-  reuse_random: true
-  wait: false
-  num_frames: 4
-  end_interrupt: false
-  out_buf: network_capture_buf
+    kotekan_stage: testDataGen
+    type: random_signed
+    seed: 42
+    reuse_random: true
+    wait: false
+    num_frames: 4
+    end_interrupt: false
+    out_buf: network_capture_buf
 
 # GPU Execution Stage
 gpu:
-  profiling: false
-  commands: &command_list
-    - name: cudaInputData
-      in_buf: host_voltage
-      gpu_mem: voltage
-    - name: cudaSyncInput
-    - name: cudaAntennaMaskCommand
-      gpu_mem_voltage: voltage
-      num_elements: 256
-      num_local_freq: 336
-      samples_per_data_set: 3840
-      buffer_depth: 3
-      auto_detect_enabled: true
-      blank_voltages_enabled: false
-      dead_power_threshold: 0.50
-      sat_power_threshold: 80.0
-      clip_fraction_threshold: 0.15
-      revival_frames: 5
-    - name: cudaDirectBeamTrackerCommand
-      gpu_mem_voltage: voltage
-      gpu_mem_formed_beams: formed_beams
-      num_elements: 256
-      num_local_freq: 336
-      samples_per_data_set: 3840
-      spacing_m: 0.6
-      max_beams: 4
-      initial_active_beams: 2
-      buffer_depth: 3
-      time_chunk_size: 256
-      time_unroll: 4
-      beam_tile_size: 4
-      enable_cuda_graph: false
-      enable_grid_mode: false
-      site_lat_deg: -33.4211146
-      site_lon_deg: -70.8634710
-      site_alt_m: 458.0
-      freq_start_hz: 300000000.0
-      freq_step_hz: 300000.0
-      source_l0: 0.03
-      source_m0: -0.02
-      source_l0_1: 0.0
-      source_m0_1: 0.0
-    - name: cudaSyncOutput
-    - name: cudaOutputData
-      in_buf: host_voltage
-      gpu_mem: formed_beams
-      out_buf: host_formed_beams
-  gpu_0:
-    kotekan_stage: cudaProcess
-    gpu_id: 0
-    commands: *command_list
-    in_buffers:
-      host_voltage: network_capture_buf
-    out_buffers:
-      host_formed_beams: host_formed_beams_buffer
+    profiling: false
+    commands: &command_list
+        - name: cudaInputData
+          in_buf: host_voltage
+          gpu_mem: voltage
+        - name: cudaSyncInput
+        - name: cudaAntennaMaskCommand
+          gpu_mem_voltage: voltage
+          num_elements: 256
+          num_local_freq: 336
+          samples_per_data_set: 3840
+          buffer_depth: 3
+          auto_detect_enabled: true
+          blank_voltages_enabled: false
+          dead_power_threshold: 0.50
+          sat_power_threshold: 80.0
+          clip_fraction_threshold: 0.15
+          revival_frames: 5
+        - name: cudaDirectBeamTrackerCommand
+          gpu_mem_voltage: voltage
+          gpu_mem_formed_beams: formed_beams
+          num_elements: 256
+          num_local_freq: 336
+          samples_per_data_set: 3840
+          spacing_m: 0.6
+          max_beams: 4
+          initial_active_beams: 2
+          buffer_depth: 3
+          time_chunk_size: 256
+          time_unroll: 4
+          beam_tile_size: 4
+          enable_cuda_graph: false
+          enable_grid_mode: false
+          site_lat_deg: -33.4211146
+          site_lon_deg: -70.8634710
+          site_alt_m: 458.0
+          freq_start_hz: 300000000.0
+          freq_step_hz: 300000.0
+          source_l0: 0.03
+          source_m0: -0.02
+          source_l0_1: 0.0
+          source_m0_1: 0.0
+        - name: cudaSyncOutput
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: formed_beams
+          out_buf: host_formed_beams
+    gpu_0:
+        kotekan_stage: cudaProcess
+        gpu_id: 0
+        commands: *command_list
+        in_buffers:
+            host_voltage: network_capture_buf
+        out_buffers:
+            host_formed_beams: host_formed_beams_buffer
 
 # Write output complex voltages to disk for verification
 write_voltages_output:
-  kotekan_stage: rawFileWrite
-  in_buf: host_formed_beams_buffer
-  base_dir: /tmp/test_charts_direct_tracker_256
-  file_name: multibeam_complex_voltages_256
-  file_ext: bin
-  num_frames_per_file: 1
-  exit_after_n_files: 2
-  prefix_hostname: false
+    kotekan_stage: rawFileWrite
+    in_buf: host_formed_beams_buffer
+    base_dir: /tmp/test_charts_direct_tracker_256
+    file_name: multibeam_complex_voltages_256
+    file_ext: bin
+    num_frames_per_file: 1
+    exit_after_n_files: 2
+    prefix_hostname: false

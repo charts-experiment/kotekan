@@ -63,10 +63,10 @@ from .constants import (
     LOCAL_FREQUENCY_CHANNELS,
 )
 
-
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class FEngineConfig:
@@ -76,10 +76,13 @@ class FEngineConfig:
     300 kHz channels) and the Julia reference (4 taps, quantizer scale 7.5,
     channels 1000..1335 -> 300.0 - 400.8 MHz).
     """
+
     adc_rate_hz: float = ADC_SAMPLING_FREQ_HZ
     ntaps: int = 4
     nsamples: int = FPGA_NUM_SAMP_FFT
-    freq_ids: np.ndarray = field(default_factory=lambda: np.arange(1000, 1000 + LOCAL_FREQUENCY_CHANNELS))
+    freq_ids: np.ndarray = field(
+        default_factory=lambda: np.arange(1000, 1000 + LOCAL_FREQUENCY_CHANNELS)
+    )
     quant_scale: float = 7.5
 
     def __post_init__(self) -> None:
@@ -107,6 +110,7 @@ class ToneSource:
     tau = (x*l + y*m) / c (Julia `calc_delay` with sin(angle) == direction
     cosine for small angles; here the exact cosine form is used).
     """
+
     freq_hz: float
     amp: float
     l: float
@@ -116,6 +120,7 @@ class ToneSource:
 # ---------------------------------------------------------------------------
 # PFB primitives (Julia parity)
 # ---------------------------------------------------------------------------
+
 
 def sinc_hanning_window(ntaps: int, nsamples: int) -> np.ndarray:
     r"""sinc-Hanning PFB window, eq. (11), Erik convention (Julia `sinc_hanning`).
@@ -223,6 +228,7 @@ def quantize_int4x2(
 # ADC stream synthesis
 # ---------------------------------------------------------------------------
 
+
 def synth_adc_stream(
     tone_sources: Sequence[ToneSource],
     noise_sigma: float,
@@ -271,6 +277,7 @@ def synth_adc_stream(
 # Full reference chain
 # ---------------------------------------------------------------------------
 
+
 def simulate_fengine_frame(
     tone_sources: Sequence[ToneSource],
     noise_sigma_adc: float,
@@ -316,7 +323,14 @@ def simulate_fengine_frame(
     n_adc = (n_spectra + cfg.ntaps - 1) * cfg.nsamples
 
     adc = synth_adc_stream(
-        tone_sources, noise_sigma_adc, pos_x_m, pos_y_m, t0_s, n_adc, cfg.adc_dt_s, rng=rng
+        tone_sources,
+        noise_sigma_adc,
+        pos_x_m,
+        pos_y_m,
+        t0_s,
+        n_adc,
+        cfg.adc_dt_s,
+        rng=rng,
     )
     channels = pfb_channelize(adc, config=cfg)  # (n_spectra, n_ch, n_ant)
     packed, quantized = quantize_int4x2(channels, scale=cfg.quant_scale)

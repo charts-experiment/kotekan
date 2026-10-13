@@ -87,7 +87,7 @@ void zeroSamples::main_thread() {
                 out_lost_sample_bufs[i]->mark_frame_full(unique_name, lost_samples_buf_frame_id);
             }
         }
-        //get_chord_metadata(out_buf, out_buf_frame_id)->atomic_add_lost_timesamples(lost_samples);
+        // get_chord_metadata(out_buf, out_buf_frame_id)->atomic_add_lost_timesamples(lost_samples);
 
         lost_samples_buf->mark_frame_empty(unique_name, lost_samples_buf_frame_id);
         lost_samples_buf_frame_id = (lost_samples_buf_frame_id + 1) % lost_samples_buf->num_frames;

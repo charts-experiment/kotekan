@@ -1,3 +1,4 @@
+---
 # ==============================================================================
 # CHARTS 32-Antenna Live DPDK Ingest & Real-Time GPU Beam Tracker Pipeline
 # ==============================================================================
@@ -40,124 +41,124 @@ sizeof_complex_float: 8          # float2 (4-byte real + 4-byte imag) per formed
 # Metadata & Memory Pool
 # ------------------------------------------------------------------------------
 main_pool:
-  kotekan_metadata_pool: chartsMetadata
-  num_metadata_objects: buffer_depth * 15
+    kotekan_metadata_pool: chartsMetadata
+    num_metadata_objects: buffer_depth * 15
 
 # ------------------------------------------------------------------------------
 # Buffer Definitions
 # ------------------------------------------------------------------------------
 # Captured raw network voltages from DPDK (4-bit complex samples packed as int4x2_t)
 network_capture_buf:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: bytes_per_dataset * num_elements
-  numa_node: 0
-  metadata_pool: main_pool
-  zero_new_frames: true
-  mlock_frames: false
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: bytes_per_dataset * num_elements
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
 
 # Lost packets / dropped sample mask from DPDK
 mask_buffer_zeros:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: samples_per_data_set
-  numa_node: 0
-  metadata_pool: main_pool
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set
+    numa_node: 0
+    metadata_pool: main_pool
 
 # Output formed beam complex voltages [time][freq][max_beams] of float2
 host_formed_beams_buffer:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float
-  numa_node: 0
-  metadata_pool: main_pool
-  zero_new_frames: true
-  mlock_frames: false
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
 
 # ------------------------------------------------------------------------------
 # Network Ingest Stage: DPDK Core (Exact match to 32antennas_corr.yaml)
 # ------------------------------------------------------------------------------
 dpdk:
-  kotekan_stage: dpdkCore
-  lcore_cpu_map: [3]
-  main_lcore_cpu: 4
-  lcore_port_map:
-    - [0]
-  max_rx_pkt_len: 9000
-  num_mbufs: 9600
-  handlers:
-    - dpdk_handler: rfsocHandlerNoClk
-      out_buffer: network_capture_buf
-      alignment: 4000
-      mask_buf: mask_buffer_zeros
-    - dpdk_handler: none
+    kotekan_stage: dpdkCore
+    lcore_cpu_map: [3]
+    main_lcore_cpu: 4
+    lcore_port_map:
+        - [0]
+    max_rx_pkt_len: 9000
+    num_mbufs: 9600
+    handlers:
+        - dpdk_handler: rfsocHandlerNoClk
+          out_buffer: network_capture_buf
+          alignment: 4000
+          mask_buf: mask_buffer_zeros
+        - dpdk_handler: none
 
 # ------------------------------------------------------------------------------
 # Lost Packet Zeroing Stage (Exact match to 32antennas_corr.yaml)
 # ------------------------------------------------------------------------------
 zero_samples:
-  kotekan_stage: zeroSamples
-  out_buf: network_capture_buf
-  lost_samples_buf: mask_buffer_zeros
-  zero_value: 0
-  sample_size: 21504    # num_elements (32) * num_local_freq (672)
+    kotekan_stage: zeroSamples
+    out_buf: network_capture_buf
+    lost_samples_buf: mask_buffer_zeros
+    zero_value: 0
+    sample_size: 21504  # num_elements (32) * num_local_freq (672)
 
 # ------------------------------------------------------------------------------
 # GPU Multi-Beam Tracker Stage
 # ------------------------------------------------------------------------------
 gpu:
-  profiling: false
-  commands: &command_list
-    - name: cudaInputData
-      in_buf: host_voltage
-      gpu_mem: voltage
-    - name: cudaSyncInput
-    - name: cudaBeamTrackerCommand
-      gpu_mem_voltage: voltage
-      gpu_mem_formed_beams: formed_beams
-      num_elements: 32
-      num_local_freq: 672
-      samples_per_data_set: 153600
-      integration_spectra: 320
-      spacing_m: 0.6
-      max_beams: 4
-      initial_active_beams: 2
-      buffer_depth: 2
+    profiling: false
+    commands: &command_list
+        - name: cudaInputData
+          in_buf: host_voltage
+          gpu_mem: voltage
+        - name: cudaSyncInput
+        - name: cudaBeamTrackerCommand
+          gpu_mem_voltage: voltage
+          gpu_mem_formed_beams: formed_beams
+          num_elements: 32
+          num_local_freq: 672
+          samples_per_data_set: 153600
+          integration_spectra: 320
+          spacing_m: 0.6
+          max_beams: 4
+          initial_active_beams: 2
+          buffer_depth: 2
       # Carén Observatory Site Coordinates
-      site_lat_deg: -33.4211146
-      site_lon_deg: -70.8634710
+          site_lat_deg: -33.4211146
+          site_lon_deg: -70.8634710
       # Antenna mapping convention outside kernel: descending (raw 31 -> physical 0) or ascending
-      antenna_order: "descending"
+          antenna_order: "descending"
       # Working antennas right now: raw elements 31 down to 24 (physical antennas 0 to 7)
-      active_raw_elements: [24, 25, 26, 27, 28, 29, 30, 31]
+          active_raw_elements: [24, 25, 26, 27, 28, 29, 30, 31]
       # Initial pointing at Zenith (steerable live via REST or CLI)
-      source_l0: 0.0
-      source_m0: 0.0
-      source_dl: 0.0
-      source_dm: 0.0
-    - name: cudaSyncOutput
-    - name: cudaOutputData
-      in_buf: host_voltage
-      gpu_mem: formed_beams
-      out_buf: host_formed_beams
-  gpu_0:
-    kotekan_stage: cudaProcess
-    gpu_id: 0
-    buffer_depth: 2
-    commands: *command_list
-    in_buffers:
-      host_voltage: network_capture_buf
-    out_buffers:
-      host_formed_beams: host_formed_beams_buffer
+          source_l0: 0.0
+          source_m0: 0.0
+          source_dl: 0.0
+          source_dm: 0.0
+        - name: cudaSyncOutput
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: formed_beams
+          out_buf: host_formed_beams
+    gpu_0:
+        kotekan_stage: cudaProcess
+        gpu_id: 0
+        buffer_depth: 2
+        commands: *command_list
+        in_buffers:
+            host_voltage: network_capture_buf
+        out_buffers:
+            host_formed_beams: host_formed_beams_buffer
 
 # ------------------------------------------------------------------------------
 # Monitoring & Output Writers
 # ------------------------------------------------------------------------------
 # Live REST inspection endpoint for formed beams telemetry (4 MB snapshot)
 inspect_beams:
-  kotekan_stage: restInspectFrame
-  in_buf: host_formed_beams_buffer
-  len: 4194304    # 4 MB snapshot for web dashboard / REST telemetry
+    kotekan_stage: restInspectFrame
+    in_buf: host_formed_beams_buffer
+    len: 4194304  # 4 MB snapshot for web dashboard / REST telemetry
 
 # Stream output complex voltages to high-speed NVMe storage
 # (Disabled by default: live tracking runs in RAM/GPU without writing to disk.

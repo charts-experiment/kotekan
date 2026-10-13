@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import h5py
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -69,7 +70,7 @@ def compute_dispersion_delay_samples(
     """Computes dispersion delay in integer/float time samples relative to f_ref."""
     if dm == 0.0:
         return np.zeros_like(freqs_mhz, dtype=np.int64)
-    delays_s = K_DM * dm * ((freqs_mhz ** -2.0) - (f_ref_mhz ** -2.0))
+    delays_s = K_DM * dm * ((freqs_mhz**-2.0) - (f_ref_mhz**-2.0))
     return np.round(delays_s / sample_time_s).astype(np.int64)
 
 
@@ -82,7 +83,9 @@ def dedisperse_waterfall(
     """De-disperses a 2D (n_freq, n_time) dynamic spectrum waterfall by shifting frequency channels."""
     n_freq, n_time = waterfall.shape
     f_ref_mhz = np.max(freqs_mhz)
-    delay_samples = compute_dispersion_delay_samples(freqs_mhz, dm, sample_time_s, f_ref_mhz)
+    delay_samples = compute_dispersion_delay_samples(
+        freqs_mhz, dm, sample_time_s, f_ref_mhz
+    )
 
     dedisp = np.zeros_like(waterfall)
     for f in range(n_freq):
@@ -156,13 +159,15 @@ def search_transient_events(
                 dm_time_snr_map[i, peak_idx] = peak_snr
 
             if peak_snr >= threshold_snr:
-                candidates.append({
-                    "dm": float(dm),
-                    "time_sample": peak_idx,
-                    "time_ms": float(peak_idx * sample_time_s * 1000.0),
-                    "boxcar_width_samples": int(w),
-                    "snr": peak_snr,
-                })
+                candidates.append(
+                    {
+                        "dm": float(dm),
+                        "time_sample": peak_idx,
+                        "time_ms": float(peak_idx * sample_time_s * 1000.0),
+                        "boxcar_width_samples": int(w),
+                        "snr": peak_snr,
+                    }
+                )
 
             if peak_snr > best_overall_snr:
                 best_overall_snr = peak_snr
@@ -175,7 +180,10 @@ def search_transient_events(
     for cand in candidates:
         is_duplicate = False
         for uc in unique_candidates:
-            if abs(cand["time_ms"] - uc["time_ms"]) < 5.0 and abs(cand["dm"] - uc["dm"]) < 30.0:
+            if (
+                abs(cand["time_ms"] - uc["time_ms"]) < 5.0
+                and abs(cand["dm"] - uc["dm"]) < 30.0
+            ):
                 is_duplicate = True
                 break
         if not is_duplicate:
@@ -195,7 +203,9 @@ def inject_synthetic_frb(
     """Injects a physical cold-plasma dispersed FRB burst into raw baseband complex voltages."""
     n_ant, n_freq, n_time = baseband_voltages.shape
     f_ref_mhz = np.max(freqs_mhz)
-    delays_samples = compute_dispersion_delay_samples(freqs_mhz, dm, sample_time_s, f_ref_mhz)
+    delays_samples = compute_dispersion_delay_samples(
+        freqs_mhz, dm, sample_time_s, f_ref_mhz
+    )
 
     pulse_width_samples = max(1, int(round(pulse_width_ms * 1e-3 / sample_time_s)))
     t_center_samples = n_time // 4  # place burst near first quarter of stream
@@ -211,7 +221,9 @@ def inject_synthetic_frb(
         t0 = t_center_samples + delays_samples[f]
         if t0 < n_time:
             # Gaussian pulse profile
-            pulse_env = amplitude * np.exp(-0.5 * ((time_indices - t0) / (pulse_width_samples / 2.355)) ** 2)
+            pulse_env = amplitude * np.exp(
+                -0.5 * ((time_indices - t0) / (pulse_width_samples / 2.355)) ** 2
+            )
             for a in range(min(8, n_ant)):
                 injected[a, f, :] += pulse_env.astype(np.complex64)
 
@@ -244,30 +256,59 @@ def plot_frb_candidate_diagnostic(
     fig.suptitle(
         f"CHARTS Fast Radio Burst (FRB) Transient Detection Diagnostic\n"
         f"Detected Candidate: Peak SNR = {best_cand.get('snr', 0.0):.1f}σ | Optimal DM = {best_cand.get('dm', 0.0):.1f} pc/cm³ | Arrival = {best_cand.get('time_ms', 0.0):.2f} ms",
-        color="white", fontsize=14, fontweight="bold", y=0.97
+        color="white",
+        fontsize=14,
+        fontweight="bold",
+        y=0.97,
     )
 
     # Panel 1: Dispersed Raw Dynamic Spectrum Waterfall
     ax1 = axes[0, 0]
     ax1.set_facecolor("#161B22")
-    ax1.set_title("1. Dispersed Dynamic Spectrum Waterfall (Raw Ingest)", color="white", fontsize=11, fontweight="bold")
+    ax1.set_title(
+        "1. Dispersed Dynamic Spectrum Waterfall (Raw Ingest)",
+        color="white",
+        fontsize=11,
+        fontweight="bold",
+    )
     raw_med = np.maximum(1e-6, np.median(raw_waterfall, axis=1, keepdims=True))
     wf_norm = raw_waterfall / raw_med
     im1 = ax1.imshow(
         10.0 * np.log10(np.maximum(wf_norm, 1e-4)),
-        aspect="auto", origin="lower",
+        aspect="auto",
+        origin="lower",
         extent=[time_ms[0], time_ms[-1], freqs_mhz[0], freqs_mhz[-1]],
-        cmap="inferno", vmin=-2.0, vmax=8.0
+        cmap="inferno",
+        vmin=-2.0,
+        vmax=8.0,
     )
     # Overlay theoretical dispersion sweep curve
     f_ref = np.max(freqs_mhz)
-    t_sweep_ms = best_cand.get("time_ms", 0.0) + (K_DM * best_cand.get("dm", 0.0) * ((freqs_mhz ** -2.0) - (f_ref ** -2.0))) * 1000.0
-    ax1.plot(t_sweep_ms, freqs_mhz, "--", color="#00FFCC", linewidth=1.8, label=f"Dispersion Sweep (DM={best_cand.get('dm', 0):.0f})")
+    t_sweep_ms = (
+        best_cand.get("time_ms", 0.0)
+        + (K_DM * best_cand.get("dm", 0.0) * ((freqs_mhz**-2.0) - (f_ref**-2.0)))
+        * 1000.0
+    )
+    ax1.plot(
+        t_sweep_ms,
+        freqs_mhz,
+        "--",
+        color="#00FFCC",
+        linewidth=1.8,
+        label=f"Dispersion Sweep (DM={best_cand.get('dm', 0):.0f})",
+    )
     ax1.set_xlabel("Time (ms)", color="#C9D1D9")
     ax1.set_ylabel("Frequency (MHz)", color="#C9D1D9")
     ax1.tick_params(colors="#8B949E")
-    for sp in ax1.spines.values(): sp.set_color("#30363D")
-    ax1.legend(loc="upper right", facecolor="#161B22", edgecolor="#30363D", labelcolor="#C9D1D9", fontsize=8)
+    for sp in ax1.spines.values():
+        sp.set_color("#30363D")
+    ax1.legend(
+        loc="upper right",
+        facecolor="#161B22",
+        edgecolor="#30363D",
+        labelcolor="#C9D1D9",
+        fontsize=8,
+    )
     cb1 = fig.colorbar(im1, ax=ax1, pad=0.02)
     cb1.set_label("Relative Power (dB)", color="#C9D1D9")
     cb1.ax.tick_params(colors="#8B949E")
@@ -275,21 +316,42 @@ def plot_frb_candidate_diagnostic(
     # Panel 2: De-dispersed Dynamic Spectrum Waterfall (Aligned in Time)
     ax2 = axes[0, 1]
     ax2.set_facecolor("#161B22")
-    ax2.set_title(f"2. De-dispersed Waterfall at Optimal DM = {best_cand.get('dm', 0.0):.1f} pc/cm³", color="white", fontsize=11, fontweight="bold")
+    ax2.set_title(
+        f"2. De-dispersed Waterfall at Optimal DM = {best_cand.get('dm', 0.0):.1f} pc/cm³",
+        color="white",
+        fontsize=11,
+        fontweight="bold",
+    )
     dedisp_med = np.maximum(1e-6, np.median(dedisp_waterfall, axis=1, keepdims=True))
     dedisp_norm = dedisp_waterfall / dedisp_med
     im2 = ax2.imshow(
         10.0 * np.log10(np.maximum(dedisp_norm, 1e-4)),
-        aspect="auto", origin="lower",
+        aspect="auto",
+        origin="lower",
         extent=[time_ms[0], time_ms[-1], freqs_mhz[0], freqs_mhz[-1]],
-        cmap="inferno", vmin=-2.0, vmax=8.0
+        cmap="inferno",
+        vmin=-2.0,
+        vmax=8.0,
     )
-    ax2.axvline(best_cand.get("time_ms", 0.0), color="#00FFCC", linestyle=":", linewidth=1.5, label="Aligned Pulse Time")
+    ax2.axvline(
+        best_cand.get("time_ms", 0.0),
+        color="#00FFCC",
+        linestyle=":",
+        linewidth=1.5,
+        label="Aligned Pulse Time",
+    )
     ax2.set_xlabel("Time (ms)", color="#C9D1D9")
     ax2.set_ylabel("Frequency (MHz)", color="#C9D1D9")
     ax2.tick_params(colors="#8B949E")
-    for sp in ax2.spines.values(): sp.set_color("#30363D")
-    ax2.legend(loc="upper right", facecolor="#161B22", edgecolor="#30363D", labelcolor="#C9D1D9", fontsize=8)
+    for sp in ax2.spines.values():
+        sp.set_color("#30363D")
+    ax2.legend(
+        loc="upper right",
+        facecolor="#161B22",
+        edgecolor="#30363D",
+        labelcolor="#C9D1D9",
+        fontsize=8,
+    )
     cb2 = fig.colorbar(im2, ax=ax2, pad=0.02)
     cb2.set_label("Relative Power (dB)", color="#C9D1D9")
     cb2.ax.tick_params(colors="#8B949E")
@@ -297,32 +359,88 @@ def plot_frb_candidate_diagnostic(
     # Panel 3: Frequency-Integrated Time Series S(t) Pulse Profile
     ax3 = axes[1, 0]
     ax3.set_facecolor("#161B22")
-    ax3.set_title(f"3. De-dispersed Frequency-Integrated Time Series S(t)", color="white", fontsize=11, fontweight="bold")
-    ax3.plot(time_ms, time_series_snr, color="#00FFCC", linewidth=1.5, label="De-dispersed S(t)")
-    ax3.axhline(7.0, color="#FF5252", linestyle="--", linewidth=1.2, label="Detection Threshold (7.0σ)")
-    ax3.scatter([best_cand.get("time_ms", 0.0)], [best_cand.get("snr", 0.0)], color="#FFEE58", marker="*", s=160, zorder=5, label=f"Peak: {best_cand.get('snr', 0):.1f}σ")
+    ax3.set_title(
+        f"3. De-dispersed Frequency-Integrated Time Series S(t)",
+        color="white",
+        fontsize=11,
+        fontweight="bold",
+    )
+    ax3.plot(
+        time_ms,
+        time_series_snr,
+        color="#00FFCC",
+        linewidth=1.5,
+        label="De-dispersed S(t)",
+    )
+    ax3.axhline(
+        7.0,
+        color="#FF5252",
+        linestyle="--",
+        linewidth=1.2,
+        label="Detection Threshold (7.0σ)",
+    )
+    ax3.scatter(
+        [best_cand.get("time_ms", 0.0)],
+        [best_cand.get("snr", 0.0)],
+        color="#FFEE58",
+        marker="*",
+        s=160,
+        zorder=5,
+        label=f"Peak: {best_cand.get('snr', 0):.1f}σ",
+    )
     ax3.set_xlabel("Time (ms)", color="#C9D1D9")
     ax3.set_ylabel("Detection S/N Ratio (σ)", color="#C9D1D9")
     ax3.tick_params(colors="#8B949E")
-    for sp in ax3.spines.values(): sp.set_color("#30363D")
-    ax3.legend(loc="upper right", facecolor="#161B22", edgecolor="#30363D", labelcolor="#C9D1D9", fontsize=8)
+    for sp in ax3.spines.values():
+        sp.set_color("#30363D")
+    ax3.legend(
+        loc="upper right",
+        facecolor="#161B22",
+        edgecolor="#30363D",
+        labelcolor="#C9D1D9",
+        fontsize=8,
+    )
     ax3.grid(True, color="#21262D", linestyle="--", alpha=0.6)
 
     # Panel 4: DM vs. Time SNR Heatmap ("Bowtie" Signature)
     ax4 = axes[1, 1]
     ax4.set_facecolor("#161B22")
-    ax4.set_title("4. DM vs. Time SNR Matrix (Astrophysical 'Bowtie' Signature)", color="white", fontsize=11, fontweight="bold")
-    im4 = ax4.imshow(
-        dm_time_snr_map, aspect="auto", origin="lower",
-        extent=[time_ms[0], time_ms[-1], dm_trials[0], dm_trials[-1]],
-        cmap="magma", vmin=0.0, vmax=max(8.0, best_cand.get("snr", 10.0))
+    ax4.set_title(
+        "4. DM vs. Time SNR Matrix (Astrophysical 'Bowtie' Signature)",
+        color="white",
+        fontsize=11,
+        fontweight="bold",
     )
-    ax4.scatter([best_cand.get("time_ms", 0.0)], [best_cand.get("dm", 0.0)], marker="x", color="#00FFCC", s=100, linewidth=2, label=f"Best Candidate (DM={best_cand.get('dm', 0):.0f})")
+    im4 = ax4.imshow(
+        dm_time_snr_map,
+        aspect="auto",
+        origin="lower",
+        extent=[time_ms[0], time_ms[-1], dm_trials[0], dm_trials[-1]],
+        cmap="magma",
+        vmin=0.0,
+        vmax=max(8.0, best_cand.get("snr", 10.0)),
+    )
+    ax4.scatter(
+        [best_cand.get("time_ms", 0.0)],
+        [best_cand.get("dm", 0.0)],
+        marker="x",
+        color="#00FFCC",
+        s=100,
+        linewidth=2,
+        label=f"Best Candidate (DM={best_cand.get('dm', 0):.0f})",
+    )
     ax4.set_xlabel("Time (ms)", color="#C9D1D9")
     ax4.set_ylabel("Dispersion Measure (pc/cm³)", color="#C9D1D9")
     ax4.tick_params(colors="#8B949E")
-    for sp in ax4.spines.values(): sp.set_color("#30363D")
-    ax4.legend(loc="upper right", facecolor="#161B22", edgecolor="#30363D", labelcolor="#C9D1D9", fontsize=8)
+    for sp in ax4.spines.values():
+        sp.set_color("#30363D")
+    ax4.legend(
+        loc="upper right",
+        facecolor="#161B22",
+        edgecolor="#30363D",
+        labelcolor="#C9D1D9",
+        fontsize=8,
+    )
     cb4 = fig.colorbar(im4, ax=ax4, pad=0.02)
     cb4.set_label("Detection S/N (σ)", color="#C9D1D9")
     cb4.ax.tick_params(colors="#8B949E")
@@ -365,18 +483,36 @@ def run_frb_detection(
     n_ant, n_freq, n_time = cdata.shape
     sample_time_s = FPGA_TIME_RESOLUTION_US * 1e-6
     total_time_ms = n_time * sample_time_s * 1000.0
-    freqs_mhz = DEFAULT_FREQUENCY_START_MHZ + np.arange(n_freq) * CHARTS_CHANNEL_WIDTH_MHZ
+    freqs_mhz = (
+        DEFAULT_FREQUENCY_START_MHZ + np.arange(n_freq) * CHARTS_CHANNEL_WIDTH_MHZ
+    )
 
-    print(f"  -> Array Shape: {n_ant} Antennas x {n_freq} Channels x {n_time} Samples ({total_time_ms:.2f} ms sky time)")
-    print(f"  -> Frequency Band: {freqs_mhz[0]:.2f} MHz -> {freqs_mhz[-1]:.2f} MHz (Δf = {CHARTS_CHANNEL_WIDTH_MHZ:.3f} MHz)")
+    print(
+        f"  -> Array Shape: {n_ant} Antennas x {n_freq} Channels x {n_time} Samples ({total_time_ms:.2f} ms sky time)"
+    )
+    print(
+        f"  -> Frequency Band: {freqs_mhz[0]:.2f} MHz -> {freqs_mhz[-1]:.2f} MHz (Δf = {CHARTS_CHANNEL_WIDTH_MHZ:.3f} MHz)"
+    )
 
     # 2. Injection Step (if enabled)
     if inject:
-        print(f"\n[2/4] Injecting Synthetic FRB (DM={inject_dm:.1f} pc/cm³, Target SNR={inject_snr:.1f}σ)...")
-        cdata, inject_meta = inject_synthetic_frb(cdata, freqs_mhz, dm=inject_dm, target_snr=inject_snr, sample_time_s=sample_time_s)
-        print(f"  -> Injected arrival time: {inject_meta['true_center_time_ms']:.2f} ms")
+        print(
+            f"\n[2/4] Injecting Synthetic FRB (DM={inject_dm:.1f} pc/cm³, Target SNR={inject_snr:.1f}σ)..."
+        )
+        cdata, inject_meta = inject_synthetic_frb(
+            cdata,
+            freqs_mhz,
+            dm=inject_dm,
+            target_snr=inject_snr,
+            sample_time_s=sample_time_s,
+        )
+        print(
+            f"  -> Injected arrival time: {inject_meta['true_center_time_ms']:.2f} ms"
+        )
     else:
-        print(f"\n[2/4] Searching for native natural transient events (No Injection)...")
+        print(
+            f"\n[2/4] Searching for native natural transient events (No Injection)..."
+        )
 
     # 3. Form Array Coherent Power Waterfall
     # Beamform to zenith (l0=0, m0=0) or sum active dipoles
@@ -384,7 +520,9 @@ def run_frb_detection(
     raw_waterfall = np.abs(formed_voltages) ** 2  # (n_freq, n_time)
 
     # 4. Dedispersion & Matched Filtering Search
-    print(f"\n[3/4] Running Dedispersion Search (DM: {dm_min:.0f} -> {dm_max:.0f} pc/cm³, step={dm_step:.0f})...")
+    print(
+        f"\n[3/4] Running Dedispersion Search (DM: {dm_min:.0f} -> {dm_max:.0f} pc/cm³, step={dm_step:.0f})..."
+    )
     candidates, dm_trials, best_ts, dm_snr_map = search_transient_events(
         raw_waterfall,
         freqs_mhz,
@@ -398,16 +536,28 @@ def run_frb_detection(
     # 5. Report Candidate Detections
     print(f"\n[4/4] Detection Search Results:")
     if candidates:
-        print(f"  *** FOUND {len(candidates)} EVENT CANDIDATES (SNR >= {threshold_snr:.1f}σ) ***")
+        print(
+            f"  *** FOUND {len(candidates)} EVENT CANDIDATES (SNR >= {threshold_snr:.1f}σ) ***"
+        )
         for i, c in enumerate(candidates):
-            print(f"  [{i+1}] SNR = {c['snr']:.2f}σ | DM = {c['dm']:.1f} pc/cm³ | Time = {c['time_ms']:.2f} ms | Boxcar = {c['boxcar_width_samples']} smp")
+            print(
+                f"  [{i+1}] SNR = {c['snr']:.2f}σ | DM = {c['dm']:.1f} pc/cm³ | Time = {c['time_ms']:.2f} ms | Boxcar = {c['boxcar_width_samples']} smp"
+            )
     else:
-        print(f"  -> No transient events detected above threshold ({threshold_snr:.1f}σ). Baseline noise is clean.")
+        print(
+            f"  -> No transient events detected above threshold ({threshold_snr:.1f}σ). Baseline noise is clean."
+        )
 
     # 6. Generate Candidate Diagnostic Plot
     if out_plot:
-        best_cand = candidates[0] if candidates else {"dm": 0.0, "time_ms": 0.0, "snr": float(np.max(best_ts))}
-        dedisp_wf = dedisperse_waterfall(raw_waterfall, freqs_mhz, best_cand.get("dm", 0.0), sample_time_s)
+        best_cand = (
+            candidates[0]
+            if candidates
+            else {"dm": 0.0, "time_ms": 0.0, "snr": float(np.max(best_ts))}
+        )
+        dedisp_wf = dedisperse_waterfall(
+            raw_waterfall, freqs_mhz, best_cand.get("dm", 0.0), sample_time_s
+        )
         plot_frb_candidate_diagnostic(
             raw_waterfall,
             dedisp_wf,
@@ -426,19 +576,53 @@ def run_frb_detection(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CHARTS FRB & Transient Event Detector")
+    parser = argparse.ArgumentParser(
+        description="CHARTS FRB & Transient Event Detector"
+    )
     default_h5 = get_default_charts_h5_path()
     default_plot = _kotekan_root / "test_charts" / "charts_frb_event_candidate.png"
 
-    parser.add_argument("--h5-path", type=Path, default=default_h5, help="Path to baseband virtual HDF5 dataset")
-    parser.add_argument("--inject", action="store_true", help="Inject a synthetic FRB into real baseband data for validation")
-    parser.add_argument("--dm", type=float, default=350.0, help="Injection DM in pc/cm^3 (default: 350.0)")
-    parser.add_argument("--snr", type=float, default=18.0, help="Injection target SNR (default: 18.0)")
-    parser.add_argument("--dm-min", type=float, default=0.0, help="Minimum search DM (default: 0.0)")
-    parser.add_argument("--dm-max", type=float, default=1000.0, help="Maximum search DM (default: 1000.0)")
-    parser.add_argument("--dm-step", type=float, default=10.0, help="Search DM step (default: 10.0)")
-    parser.add_argument("--threshold", type=float, default=7.0, help="SNR detection threshold (default: 7.0)")
-    parser.add_argument("--out-plot", type=Path, default=default_plot, help="Output candidate plot path")
+    parser.add_argument(
+        "--h5-path",
+        type=Path,
+        default=default_h5,
+        help="Path to baseband virtual HDF5 dataset",
+    )
+    parser.add_argument(
+        "--inject",
+        action="store_true",
+        help="Inject a synthetic FRB into real baseband data for validation",
+    )
+    parser.add_argument(
+        "--dm",
+        type=float,
+        default=350.0,
+        help="Injection DM in pc/cm^3 (default: 350.0)",
+    )
+    parser.add_argument(
+        "--snr", type=float, default=18.0, help="Injection target SNR (default: 18.0)"
+    )
+    parser.add_argument(
+        "--dm-min", type=float, default=0.0, help="Minimum search DM (default: 0.0)"
+    )
+    parser.add_argument(
+        "--dm-max",
+        type=float,
+        default=1000.0,
+        help="Maximum search DM (default: 1000.0)",
+    )
+    parser.add_argument(
+        "--dm-step", type=float, default=10.0, help="Search DM step (default: 10.0)"
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=7.0,
+        help="SNR detection threshold (default: 7.0)",
+    )
+    parser.add_argument(
+        "--out-plot", type=Path, default=default_plot, help="Output candidate plot path"
+    )
     args = parser.parse_args()
 
     run_frb_detection(

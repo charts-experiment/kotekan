@@ -71,25 +71,29 @@ def parse_beam_targets(
                 try:
                     ra = float(parts[0])
                     dec = float(parts[1])
-                    targets.append({
-                        "beam": idx,
-                        "name": name,
-                        "ra_deg": ra,
-                        "dec_deg": dec,
-                        "lst_hours": default_lst,
-                    })
+                    targets.append(
+                        {
+                            "beam": idx,
+                            "name": name,
+                            "ra_deg": ra,
+                            "dec_deg": dec,
+                            "lst_hours": default_lst,
+                        }
+                    )
                 except ValueError:
                     pass
 
     # If no targets parsed, initialize primary
     if not targets:
-        targets.append({
-            "beam": 0,
-            "name": default_name,
-            "ra_deg": default_ra,
-            "dec_deg": default_dec,
-            "lst_hours": default_lst,
-        })
+        targets.append(
+            {
+                "beam": 0,
+                "name": default_name,
+                "ra_deg": default_ra,
+                "dec_deg": default_dec,
+                "lst_hours": default_lst,
+            }
+        )
 
     # Fill remaining beams with distinct angular offsets around primary target
     p_ra = targets[0]["ra_deg"]
@@ -109,13 +113,15 @@ def parse_beam_targets(
         d_dec = radius_deg * math.sin(angle_rad)
         sub_name = dir_names[offset_idx % len(dir_names)]
 
-        targets.append({
-            "beam": b,
-            "name": f"{p_name} ({sub_name})",
-            "ra_deg": p_ra + d_ra,
-            "dec_deg": p_dec + d_dec,
-            "lst_hours": default_lst,
-        })
+        targets.append(
+            {
+                "beam": b,
+                "name": f"{p_name} ({sub_name})",
+                "ra_deg": p_ra + d_ra,
+                "dec_deg": p_dec + d_dec,
+                "lst_hours": default_lst,
+            }
+        )
 
     return targets
 
@@ -167,11 +173,15 @@ def create_beam_tracker_yaml(
         if b == 0:
             beam_params_lines.append(f"      source_ra_deg: {tgt['ra_deg']:.6f}")
             beam_params_lines.append(f"      source_dec_deg: {tgt['dec_deg']:.6f}")
-            beam_params_lines.append(f"      initial_lst_hours: {tgt.get('lst_hours', initial_lst_hours):.6f}")
+            beam_params_lines.append(
+                f"      initial_lst_hours: {tgt.get('lst_hours', initial_lst_hours):.6f}"
+            )
         else:
             beam_params_lines.append(f"      source_ra_deg_{b}: {tgt['ra_deg']:.6f}")
             beam_params_lines.append(f"      source_dec_deg_{b}: {tgt['dec_deg']:.6f}")
-            beam_params_lines.append(f"      initial_lst_hours_{b}: {tgt.get('lst_hours', initial_lst_hours):.6f}")
+            beam_params_lines.append(
+                f"      initial_lst_hours_{b}: {tgt.get('lst_hours', initial_lst_hours):.6f}"
+            )
 
     beam_params_yaml = "\n".join(beam_params_lines)
 
@@ -315,6 +325,7 @@ def run_beam_tracker(
         meta_file = window_dir / f"{base_name}_meta.h5"
         if meta_file.exists():
             import h5py
+
             with h5py.File(meta_file, "r") as hf:
                 num_frames = int(hf.attrs.get("written_frames_count", 0))
                 if num_frames == 0 and "written_out_index" in hf:
@@ -325,7 +336,9 @@ def run_beam_tracker(
     if num_frames <= 0:
         raise ValueError(f"No frames found in {window_dir}")
 
-    kotekan_executable = (kotekan_bin or (_kotekan_root / "build" / "kotekan" / "kotekan")).resolve()
+    kotekan_executable = (
+        kotekan_bin or (_kotekan_root / "build" / "kotekan" / "kotekan")
+    ).resolve()
     if not kotekan_executable.exists():
         raise FileNotFoundError(f"Kotekan binary not found: {kotekan_executable}")
 
@@ -354,7 +367,9 @@ def run_beam_tracker(
     print(f" Total Frames         : {num_frames}")
     print(f" Max Beams            : {max_beams}")
     for tgt in beam_targets:
-        print(f"   * Beam {tgt['beam']}: {tgt['name']} (RA={tgt['ra_deg']:.4f}°, Dec={tgt['dec_deg']:.4f}°)")
+        print(
+            f"   * Beam {tgt['beam']}: {tgt['name']} (RA={tgt['ra_deg']:.4f}°, Dec={tgt['dec_deg']:.4f}°)"
+        )
     print(f" Kotekan Binary       : {kotekan_executable}")
     print(f" Tracker Output Dir   : {t_dir}")
     print(f" YAML Configuration   : {yaml_path}")
@@ -384,7 +399,9 @@ def run_beam_tracker(
     # 2. Execute Kotekan
     print(f"\n[2/2] Executing Kotekan Beam Tracker over {num_frames} frames...")
     env = dict(os.environ)
-    env["LD_LIBRARY_PATH"] = f"{_kotekan_root / 'build' / 'external' / 'n2k'}:{env.get('LD_LIBRARY_PATH', '')}"
+    env["LD_LIBRARY_PATH"] = (
+        f"{_kotekan_root / 'build' / 'external' / 'n2k'}:{env.get('LD_LIBRARY_PATH', '')}"
+    )
 
     if "CUDA_HOME" not in env:
         for var in ["CUDA_ROOT", "EBROOTCUDA", "CUDA_PATH"]:
@@ -393,6 +410,7 @@ def run_beam_tracker(
                 break
         if "CUDA_HOME" not in env:
             import shutil
+
             nvcc_bin = shutil.which("nvcc")
             if nvcc_bin:
                 env["CUDA_HOME"] = str(Path(nvcc_bin).resolve().parent.parent)
@@ -403,7 +421,9 @@ def run_beam_tracker(
 
     cmd = [str(kotekan_executable), "--config", str(yaml_path)]
     t0 = time.perf_counter()
-    res = subprocess.run(cmd, cwd=str(_kotekan_root), env=env, capture_output=True, text=True)
+    res = subprocess.run(
+        cmd, cwd=str(_kotekan_root), env=env, capture_output=True, text=True
+    )
     t1 = time.perf_counter()
 
     if res.returncode != 0:
@@ -414,7 +434,9 @@ def run_beam_tracker(
         print(res.stdout[-2000:] if len(res.stdout) > 2000 else res.stdout)
         sys.exit(1)
 
-    print(f"    Completed in {(t1 - t0):.2f} s ({(t1 - t0) / max(1, num_frames):.3f} s/frame)")
+    print(
+        f"    Completed in {(t1 - t0):.2f} s ({(t1 - t0) / max(1, num_frames):.3f} s/frame)"
+    )
 
     # Verify output
     output_files = sorted(t_dir.glob(f"{tracker_name}_*.bin"))
@@ -442,7 +464,12 @@ def main():
     parser.add_argument("--source-ra-deg", type=float, default=83.633)
     parser.add_argument("--source-dec-deg", type=float, default=22.014)
     parser.add_argument("--initial-lst-hours", type=float, default=5.575)
-    parser.add_argument("--beam-targets", type=str, default=None, help="Semicolon-separated beam targets: 'Name:RA,Dec;...' or 'RA,Dec;...'")
+    parser.add_argument(
+        "--beam-targets",
+        type=str,
+        default=None,
+        help="Semicolon-separated beam targets: 'Name:RA,Dec;...' or 'RA,Dec;...'",
+    )
     args = parser.parse_args()
 
     run_beam_tracker(

@@ -1,3 +1,4 @@
+---
 ######################################################################
 # CHARTS 64-Antenna Baseband Replay & Astron Correlator Pipeline
 # Ingests 5.12 ms F-Engine baseband dumps and computes the 64x64
@@ -21,92 +22,92 @@ sizeof_int: 4
 buffer_depth: 4
 
 main_pool:
-  kotekan_metadata_pool: chordMetadata
-  num_metadata_objects: 30
+    kotekan_metadata_pool: chordMetadata
+    num_metadata_objects: 30
 
 # Input baseband buffer [time][freq][antenna] (int4x2_t)
 network_capture_buf:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: samples_per_data_set * num_local_freq * num_elements # 33,030,144 bytes
-  numa_node: 0
-  metadata_pool: main_pool
-  zero_new_frames: true
-  mlock_frames: false
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set * num_local_freq * num_elements # 33,030,144 bytes
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
 
 # Output correlation matrix buffer
 host_correlation_buffer:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: num_local_freq * num_blocks * (block_size * block_size) * 2 * num_data_sets * sizeof_int # 5,677,056 bytes
-  numa_node: 0
-  metadata_pool: main_pool
-  zero_new_frames: true
-  mlock_frames: false
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: num_local_freq * num_blocks * (block_size * block_size) * 2 * num_data_sets * sizeof_int # 5,677,056 bytes
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
 
 # Read simulated baseband dump from disk
 replay_reader:
-  kotekan_stage: rawFileRead
-  base_dir: /project/def-vanderli/ferpb/baseband
-  file_name: vela_no_noise_64ant_5ms
-  file_ext: bin
-  buf: network_capture_buf
-  prefix_hostname: false
-  end_interrupt: true
+    kotekan_stage: rawFileRead
+    base_dir: /project/def-vanderli/ferpb/baseband
+    file_name: vela_no_noise_64ant_5ms
+    file_ext: bin
+    buf: network_capture_buf
+    prefix_hostname: false
+    end_interrupt: true
 
 # GPU Tensor Core Correlation Stage
 gpu:
-  profiling: true
-  kernel_path: "lib/cuda/kernels"
-  commands: &command_list
-    - name: cudaInputData
-      in_buf: host_voltage
-      gpu_mem: voltage
-    - name: cudaSyncInput
-    - name: cudaShuffleAstron
-      gpu_mem_voltage: voltage
-      gpu_mem_ordered_voltage: ordered_voltage
-      num_elements: 64
-      num_local_freq: 336
-      samples_per_data_set: 1536
-      num_data_sets: 1
-      block_size: 2
-      num_blocks: 528
-      buffer_depth: 3
-    - name: cudaCorrelatorAstron
-      gpu_mem_voltage: ordered_voltage
-      gpu_mem_correlation_matrix: correlation_matrix
-      num_elements: 64
-      num_local_freq: 336
-      samples_per_data_set: 1536
-      num_data_sets: 1
-      block_size: 2
-      num_blocks: 528
-      elements_per_thread_block: 32
-      buffer_depth: 3
-    - name: cudaSyncOutput
-    - name: cudaOutputData
-      in_buf: host_voltage
-      gpu_mem: correlation_matrix
-      out_buf: host_correlation
-  gpu_0:
-    kotekan_stage: cudaProcess
-    gpu_id: 0
-    buffer_depth: 3
-    commands: *command_list
-    in_buffers:
-      host_voltage: network_capture_buf
-    out_buffers:
-      host_correlation: host_correlation_buffer
+    profiling: true
+    kernel_path: "lib/cuda/kernels"
+    commands: &command_list
+        - name: cudaInputData
+          in_buf: host_voltage
+          gpu_mem: voltage
+        - name: cudaSyncInput
+        - name: cudaShuffleAstron
+          gpu_mem_voltage: voltage
+          gpu_mem_ordered_voltage: ordered_voltage
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 1536
+          num_data_sets: 1
+          block_size: 2
+          num_blocks: 528
+          buffer_depth: 3
+        - name: cudaCorrelatorAstron
+          gpu_mem_voltage: ordered_voltage
+          gpu_mem_correlation_matrix: correlation_matrix
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 1536
+          num_data_sets: 1
+          block_size: 2
+          num_blocks: 528
+          elements_per_thread_block: 32
+          buffer_depth: 3
+        - name: cudaSyncOutput
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: correlation_matrix
+          out_buf: host_correlation
+    gpu_0:
+        kotekan_stage: cudaProcess
+        gpu_id: 0
+        buffer_depth: 3
+        commands: *command_list
+        in_buffers:
+            host_voltage: network_capture_buf
+        out_buffers:
+            host_correlation: host_correlation_buffer
 
 # Write correlation matrix dump to disk
 write_correlator_output:
-  kotekan_stage: rawFileWrite
-  in_buf: host_correlation_buffer
-  base_dir: /project/def-vanderli/ferpb/correlator
-  file_name: corr_vela_no_noise
-  file_ext: bin
-  num_frames_per_file: 1
-  exit_after_n_files: 1
-  prefix_hostname: false
-  skip_zero_frames: false
+    kotekan_stage: rawFileWrite
+    in_buf: host_correlation_buffer
+    base_dir: /project/def-vanderli/ferpb/correlator
+    file_name: corr_vela_no_noise
+    file_ext: bin
+    num_frames_per_file: 1
+    exit_after_n_files: 1
+    prefix_hostname: false
+    skip_zero_frames: false

@@ -66,7 +66,7 @@ def generate_fengine_data(
 ):
     """
     Generates complex baseband voltage data packed in 4-bit complex format (int4x2_t).
-    
+
     Returns:
         packed_data: np.ndarray shape (num_time, num_freq, num_antennas) uint8
         freqs_hz: np.ndarray shape (num_freq,) float64
@@ -77,9 +77,15 @@ def generate_fengine_data(
     freqs_hz = (freq_start_mhz + np.arange(num_freq) * delta_freq_mhz) * 1e6
 
     print(f"Generating F-Engine simulation:")
-    print(f"  Antennas   : {num_antennas} ({'8x8' if num_antennas <= 64 else '16x16'} grid, spacing={spacing_m}m)")
-    print(f"  Frequencies: {num_freq} channels ({freq_start_mhz:.1f} to {freq_start_mhz + num_freq*delta_freq_mhz:.1f} MHz)")
-    print(f"  Time       : {num_time} samples ({num_time * delta_time_us / 1000.0:.2f} ms)")
+    print(
+        f"  Antennas   : {num_antennas} ({'8x8' if num_antennas <= 64 else '16x16'} grid, spacing={spacing_m}m)"
+    )
+    print(
+        f"  Frequencies: {num_freq} channels ({freq_start_mhz:.1f} to {freq_start_mhz + num_freq*delta_freq_mhz:.1f} MHz)"
+    )
+    print(
+        f"  Time       : {num_time} samples ({num_time * delta_time_us / 1000.0:.2f} ms)"
+    )
     print(f"  Scenario   : {scenario}")
 
     # Define sources based on scenario
@@ -89,19 +95,36 @@ def generate_fengine_data(
     elif scenario == "off_zenith":
         l_val = target_l if target_l != 0.0 else 0.08
         m_val = target_m if target_m != 0.0 else -0.04
-        sources.append({"l0": l_val, "m0": m_val, "dl": 0.0, "dm": 0.0, "amp": source_amp})
+        sources.append(
+            {"l0": l_val, "m0": m_val, "dl": 0.0, "dm": 0.0, "amp": source_amp}
+        )
     elif scenario == "moving":
         l_val = target_l if target_l != 0.0 else 0.05
         m_val = target_m if target_m != 0.0 else 0.02
         dl_val = drift_dl if drift_dl != 0.0 else 1.0e-5
         dm_val = drift_dm if drift_dm != 0.0 else 0.5e-5
-        sources.append({"l0": l_val, "m0": m_val, "dl": dl_val, "dm": dm_val, "amp": source_amp})
+        sources.append(
+            {"l0": l_val, "m0": m_val, "dl": dl_val, "dm": dm_val, "amp": source_amp}
+        )
     elif scenario == "multisource":
-        sources.append({"l0": 0.06, "m0": 0.02, "dl": 0.0, "dm": 0.0, "amp": source_amp})
-        sources.append({"l0": -0.07, "m0": -0.05, "dl": 0.0, "dm": 0.0, "amp": source_amp * 0.8})
+        sources.append(
+            {"l0": 0.06, "m0": 0.02, "dl": 0.0, "dm": 0.0, "amp": source_amp}
+        )
+        sources.append(
+            {"l0": -0.07, "m0": -0.05, "dl": 0.0, "dm": 0.0, "amp": source_amp * 0.8}
+        )
     elif scenario == "frb":
         # Dispersed FRB chirp
-        sources.append({"l0": 0.03, "m0": 0.01, "dl": 0.0, "dm": 0.0, "amp": source_amp, "is_frb": True})
+        sources.append(
+            {
+                "l0": 0.03,
+                "m0": 0.01,
+                "dl": 0.0,
+                "dm": 0.0,
+                "amp": source_amp,
+                "is_frb": True,
+            }
+        )
     else:
         raise ValueError(f"Unknown scenario: {scenario}")
 
@@ -125,8 +148,12 @@ def generate_fengine_data(
         # Real and Imag components: (t_len, num_freq, num_antennas) in float32
         if noise_amp > 0.0:
             # Generate float32 noise directly without float64 intermediate
-            v_real = (np.random.randn(t_len, num_freq, num_antennas) * noise_amp).astype(np.float32)
-            v_imag = (np.random.randn(t_len, num_freq, num_antennas) * noise_amp).astype(np.float32)
+            v_real = (
+                np.random.randn(t_len, num_freq, num_antennas) * noise_amp
+            ).astype(np.float32)
+            v_imag = (
+                np.random.randn(t_len, num_freq, num_antennas) * noise_amp
+            ).astype(np.float32)
         else:
             v_real = np.zeros((t_len, num_freq, num_antennas), dtype=np.float32)
             v_imag = np.zeros((t_len, num_freq, num_antennas), dtype=np.float32)
@@ -152,22 +179,40 @@ def generate_fengine_data(
             if src.get("is_frb", False):
                 # Quadratic dispersion delay
                 f_ref = freqs_hz[-1]
-                dm_delays_s = 4.1488e-3 * 100.0 * (1.0 / (freqs_hz / 1e9)**2 - 1.0 / (f_ref / 1e9)**2)
+                dm_delays_s = (
+                    4.1488e-3
+                    * 100.0
+                    * (1.0 / (freqs_hz / 1e9) ** 2 - 1.0 / (f_ref / 1e9) ** 2)
+                )
                 t_physical_s = (t_chunk * dt_s).astype(np.float32)
                 pulse_center = np.float32((num_time * dt_s) * 0.4)
-                t_diff = (t_physical_s[:, None] - (pulse_center + dm_delays_s[None, :].astype(np.float32)))
+                t_diff = t_physical_s[:, None] - (
+                    pulse_center + dm_delays_s[None, :].astype(np.float32)
+                )
                 pulse_width_s = np.float32(50.0 * dt_s)
-                envelope = np.exp(-0.5 * (t_diff / pulse_width_s)**2).astype(np.float32)
-                
-                phase_base = two_pi_f32 * (np.outer((t_chunk * 0.01).astype(np.float32), freqs_hz_f32 / 1e8))
-                geom_phase = two_pi_f32 * (delays[:, None, :] * freqs_hz_f32[None, :, None])
+                envelope = np.exp(-0.5 * (t_diff / pulse_width_s) ** 2).astype(
+                    np.float32
+                )
+
+                phase_base = two_pi_f32 * (
+                    np.outer((t_chunk * 0.01).astype(np.float32), freqs_hz_f32 / 1e8)
+                )
+                geom_phase = two_pi_f32 * (
+                    delays[:, None, :] * freqs_hz_f32[None, :, None]
+                )
                 total_phase = phase_base[:, :, None] - geom_phase
                 v_real += amp * envelope[:, :, None] * np.cos(total_phase)
                 v_imag += amp * envelope[:, :, None] * np.sin(total_phase)
             else:
-                phase_base = two_pi_f32 * (np.outer((t_chunk * 0.005).astype(np.float32), (freqs_hz_f32 * 1e-8)))
+                phase_base = two_pi_f32 * (
+                    np.outer(
+                        (t_chunk * 0.005).astype(np.float32), (freqs_hz_f32 * 1e-8)
+                    )
+                )
                 # Direct broadcasting (t_len, 1, num_ant) * (1, num_freq, 1) in float32
-                geom_phase = two_pi_f32 * (delays[:, None, :] * freqs_hz_f32[None, :, None])
+                geom_phase = two_pi_f32 * (
+                    delays[:, None, :] * freqs_hz_f32[None, :, None]
+                )
                 total_phase = phase_base[:, :, None] - geom_phase
                 v_real += amp * np.cos(total_phase)
                 v_imag += amp * np.sin(total_phase)
@@ -199,7 +244,9 @@ def generate_fengine_data(
     return packed_buffer, freqs_hz, meta
 
 
-def save_to_hdf5(filepath: str, packed_data: np.ndarray, freqs_hz: np.ndarray, meta: dict):
+def save_to_hdf5(
+    filepath: str, packed_data: np.ndarray, freqs_hz: np.ndarray, meta: dict
+):
     """
     Saves packed voltage data to HDF5 file matching CHORD/CHARTS metadata specifications.
     Layout in HDF5: [Antenna, Freq, Time] (shape: (num_ant, num_freq, num_time))
@@ -211,7 +258,9 @@ def save_to_hdf5(filepath: str, packed_data: np.ndarray, freqs_hz: np.ndarray, m
     h5_array = np.transpose(packed_data, (2, 1, 0))
 
     if h5py is None:
-        raise ImportError("h5py is required to save HDF5 format. Install via: pip install h5py")
+        raise ImportError(
+            "h5py is required to save HDF5 format. Install via: pip install h5py"
+        )
 
     with h5py.File(filepath, "w") as f:
         # File attributes
@@ -240,7 +289,7 @@ def save_to_hdf5(filepath: str, packed_data: np.ndarray, freqs_hz: np.ndarray, m
         f_group = f.create_group("fengine_compat")
         v_dset = f_group.create_dataset(
             "voltage",
-            data=np.expand_dims(h5_array, axis=1), # (ant, pol=1, freq, time)
+            data=np.expand_dims(h5_array, axis=1),  # (ant, pol=1, freq, time)
             dtype=np.uint8,
         )
         v_dset.attrs["dim_names"] = ["D", "P", "F", "T"]
@@ -248,27 +297,66 @@ def save_to_hdf5(filepath: str, packed_data: np.ndarray, freqs_hz: np.ndarray, m
         v_dset.attrs["feed_separation_y_m"] = float(meta["spacing_m"])
         v_dset.attrs["coarse_freq"] = list(range(n_freq))
 
-    print(f"[SUCCESS] Saved HDF5 dataset to: {os.path.abspath(filepath)} ({os.path.getsize(filepath)/(1024**2):.2f} MB)")
+    print(
+        f"[SUCCESS] Saved HDF5 dataset to: {os.path.abspath(filepath)} ({os.path.getsize(filepath)/(1024**2):.2f} MB)"
+    )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CHARTS F-Engine Simulation Data Generator")
-    parser.add_argument("--antennas", type=int, choices=[64, 256], default=64, help="Number of antennas (64 or 256)")
-    parser.add_argument("--n-time", type=int, default=15360, help="Number of time samples (default: 15360)")
-    parser.add_argument("--n-freq", type=int, default=336, help="Number of frequency channels (default: 336)")
-    parser.add_argument("--scenario", choices=["zenith", "off_zenith", "moving", "multisource", "frb"], default="zenith", help="Simulation scenario")
-    parser.add_argument("--target-l", type=float, default=0.0, help="Target direction cosine l")
-    parser.add_argument("--target-m", type=float, default=0.0, help="Target direction cosine m")
-    parser.add_argument("--drift-dl", type=float, default=0.0, help="Direction rate dl/sample")
-    parser.add_argument("--drift-dm", type=float, default=0.0, help="Direction rate dm/sample")
-    parser.add_argument("--noise-amp", type=float, default=0.5, help="Noise standard deviation")
-    parser.add_argument("--source-amp", type=float, default=3.0, help="Point source amplitude")
+    parser = argparse.ArgumentParser(
+        description="CHARTS F-Engine Simulation Data Generator"
+    )
+    parser.add_argument(
+        "--antennas",
+        type=int,
+        choices=[64, 256],
+        default=64,
+        help="Number of antennas (64 or 256)",
+    )
+    parser.add_argument(
+        "--n-time",
+        type=int,
+        default=15360,
+        help="Number of time samples (default: 15360)",
+    )
+    parser.add_argument(
+        "--n-freq",
+        type=int,
+        default=336,
+        help="Number of frequency channels (default: 336)",
+    )
+    parser.add_argument(
+        "--scenario",
+        choices=["zenith", "off_zenith", "moving", "multisource", "frb"],
+        default="zenith",
+        help="Simulation scenario",
+    )
+    parser.add_argument(
+        "--target-l", type=float, default=0.0, help="Target direction cosine l"
+    )
+    parser.add_argument(
+        "--target-m", type=float, default=0.0, help="Target direction cosine m"
+    )
+    parser.add_argument(
+        "--drift-dl", type=float, default=0.0, help="Direction rate dl/sample"
+    )
+    parser.add_argument(
+        "--drift-dm", type=float, default=0.0, help="Direction rate dm/sample"
+    )
+    parser.add_argument(
+        "--noise-amp", type=float, default=0.5, help="Noise standard deviation"
+    )
+    parser.add_argument(
+        "--source-amp", type=float, default=3.0, help="Point source amplitude"
+    )
     parser.add_argument("--output", default="", help="Output HDF5 path")
     args = parser.parse_args()
 
     if not args.output:
         os.makedirs("test_charts/data", exist_ok=True)
-        args.output = f"test_charts/data/fengine_sim_{args.antennas}ant_{args.scenario}.h5"
+        args.output = (
+            f"test_charts/data/fengine_sim_{args.antennas}ant_{args.scenario}.h5"
+        )
 
     packed_data, freqs_hz, meta = generate_fengine_data(
         num_antennas=args.antennas,

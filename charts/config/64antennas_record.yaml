@@ -1,3 +1,4 @@
+---
 ########################
 #### Global options ####
 ########################
@@ -5,7 +6,7 @@ type: config
 # Logging level can be one of:
 # OFF, ERROR, WARN, INFO, DEBUG, DEBUG2 (case insensitive)
 # Note DEBUG and DEBUG2 require a build with (-DCMAKE_BUILD_TYPE=Debug)
-log_level: info  
+log_level: info
 cpu_affinity: [6, 7, 8, 9]
 
 num_elements: 64
@@ -24,82 +25,82 @@ capture_n_frames: 10
 
 # Save metadata for the run, including antenna positions and signal antennas
 run_metadata:
-  kotekan_stage: runMetadataWriter
-  base_dir: /data/32_test 
-  num_antennas: num_elements
-  signal_antennas: [0, 4, 6, 8, 32]
-  position_overrides:
-    - antenna: 0
-      position: [-33.421225, -70.863797, 460.0]
-      note: "Antenna in test base"
-    - antenna: 8
-      position: [-33.421117, -70.863486, 460.0]
-      note: "CHORD antenna next to the container"
-    - antenna: 32 
-      position: [-33.421216667, -70.8637972223, 460.0]
-      note: "Antenna with custom base"
+    kotekan_stage: runMetadataWriter
+    base_dir: /data/32_test
+    num_antennas: num_elements
+    signal_antennas: [0, 4, 6, 8, 32]
+    position_overrides:
+        - antenna: 0
+          position: [-33.421225, -70.863797, 460.0]
+          note: "Antenna in test base"
+        - antenna: 8
+          position: [-33.421117, -70.863486, 460.0]
+          note: "CHORD antenna next to the container"
+        - antenna: 32
+          position: [-33.421216667, -70.8637972223, 460.0]
+          note: "Antenna with custom base"
 
 # Main CHARTS Metadata Pool
 main_pool:
-  kotekan_metadata_pool: chartsMetadata
-  num_metadata_objects: 50
+    kotekan_metadata_pool: chartsMetadata
+    num_metadata_objects: 50
 
 # Baseband metadata pool
 baseband_pool:
-  kotekan_metadata_pool: BasebandMetadata
-  num_metadata_objects: 50
+    kotekan_metadata_pool: BasebandMetadata
+    num_metadata_objects: 50
 
 # Input data buffers from the DPDK stage
 # Buffer to hold captured network packets
 network_capture_buf_0:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: bytes_per_dataset * num_elements # 322.560.000 
-  numa_node: 0
-  metadata_pool: main_pool
-  zero_new_frames: true
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: bytes_per_dataset * num_elements # 322.560.000
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
 
 mask_buffer_zeros_0:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: spectra_per_dataset
-  numa_node: 0
-  metadata_pool: main_pool
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: spectra_per_dataset
+    numa_node: 0
+    metadata_pool: main_pool
 
 # Additional buffers for the second NIC
 network_capture_buf_1:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: bytes_per_dataset * num_elements # 322.560.000 
-  numa_node: 0
-  metadata_pool: main_pool
-  zero_new_frames: true
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: bytes_per_dataset * num_elements # 322.560.000
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
 
 mask_buffer_zeros_1:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: spectra_per_dataset
-  numa_node: 0
-  metadata_pool: main_pool
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: spectra_per_dataset
+    numa_node: 0
+    metadata_pool: main_pool
 
 baseband_output_buffer_0:
-  kotekan_buffer: standard
-  num_frames: baseband_buffer_depth
-  frame_size: bytes_per_dataset * num_elements
-  metadata_pool: baseband_pool
+    kotekan_buffer: standard
+    num_frames: baseband_buffer_depth
+    frame_size: bytes_per_dataset * num_elements
+    metadata_pool: baseband_pool
 
 baseband_output_buffer_1:
-  kotekan_buffer: standard
-  num_frames: baseband_buffer_depth
-  frame_size: bytes_per_dataset * num_elements
-  metadata_pool: baseband_pool
+    kotekan_buffer: standard
+    num_frames: baseband_buffer_depth
+    frame_size: bytes_per_dataset * num_elements
+    metadata_pool: baseband_pool
 
 # Interleaves completed frames from the two readout streams for one writer.
 baseband_output_buffer_merged:
-  kotekan_buffer: standard
-  num_frames: baseband_buffer_depth * 2
-  frame_size: bytes_per_dataset * num_elements
-  metadata_pool: baseband_pool
+    kotekan_buffer: standard
+    num_frames: baseband_buffer_depth * 2
+    frame_size: bytes_per_dataset * num_elements
+    metadata_pool: baseband_pool
 
 ##########################
 #### Pipeline Stages #####
@@ -107,85 +108,85 @@ baseband_output_buffer_merged:
 
 # DPDK Stage to capture network packets
 dpdk:
-  kotekan_stage: dpdkCore
-  alignment: spectra_per_dataset
-  lcore_cpu_map: [3, 5] # Use lcores 3 and 5 for DPDK processing
-  main_lcore_cpu: 4 # Use lcore 4 for the main DPDK thread
-  lcore_port_map: # Map lcores to network ports
-    - [0] # lcore 3 handles port 0
-    - [1] # lcore 5 handles port 1
-  max_rx_pkt_len: 9000
-  num_mbufs: 9600
-  mbuf_data_size: 9216
+    kotekan_stage: dpdkCore
+    alignment: spectra_per_dataset
+    lcore_cpu_map: [3, 5] # Use lcores 3 and 5 for DPDK processing
+    main_lcore_cpu: 4 # Use lcore 4 for the main DPDK thread
+    lcore_port_map: # Map lcores to network ports
+        - [0] # lcore 3 handles port 0
+        - [1] # lcore 5 handles port 1
+    max_rx_pkt_len: 9000
+    num_mbufs: 9600
+    mbuf_data_size: 9216
 
-  handlers:
-    - dpdk_handler: rfsocHandlerShuffle
-      out_buffer: network_capture_buf_0
-      mask_buf: mask_buffer_zeros_0
-      first_subband: 0
-      coarse_freq_start: 0
-      num_local_freq: 336
+    handlers:
+        - dpdk_handler: rfsocHandlerShuffle
+          out_buffer: network_capture_buf_0
+          mask_buf: mask_buffer_zeros_0
+          first_subband: 0
+          coarse_freq_start: 0
+          num_local_freq: 336
 
-    - dpdk_handler: rfsocHandlerShuffle
-      out_buffer: network_capture_buf_1
-      mask_buf: mask_buffer_zeros_1
-      first_subband: 2
-      coarse_freq_start: 336
-      num_local_freq: 336
+        - dpdk_handler: rfsocHandlerShuffle
+          out_buffer: network_capture_buf_1
+          mask_buf: mask_buffer_zeros_1
+          first_subband: 2
+          coarse_freq_start: 336
+          num_local_freq: 336
 
 zero_samples:
-  kotekan_stage: zeroSamples
-  out_buf: network_capture_buf_0
-  lost_samples_buf: mask_buffer_zeros_0
-  zero_value: 0
-  sample_size: 21504
+    kotekan_stage: zeroSamples
+    out_buf: network_capture_buf_0
+    lost_samples_buf: mask_buffer_zeros_0
+    zero_value: 0
+    sample_size: 21504
 
 zero_samples_1:
-  kotekan_stage: zeroSamples
-  out_buf: network_capture_buf_1
-  lost_samples_buf: mask_buffer_zeros_1
-  zero_value: 0
-  sample_size: 21504
+    kotekan_stage: zeroSamples
+    out_buf: network_capture_buf_1
+    lost_samples_buf: mask_buffer_zeros_1
+    zero_value: 0
+    sample_size: 21504
 
 
 baseband_readout_0:
-  kotekan_stage: chartsBasebandReadout
-  in_buf: network_capture_buf_0
-  out_buf: baseband_output_buffer_0
-  freq_id: 0
-  mask_buf: mask_buffer_zeros_0
-  num_frames_buffer: buffer_depth - 10
-  max_dump_samples: samples_per_data_set * capture_n_frames
+    kotekan_stage: chartsBasebandReadout
+    in_buf: network_capture_buf_0
+    out_buf: baseband_output_buffer_0
+    freq_id: 0
+    mask_buf: mask_buffer_zeros_0
+    num_frames_buffer: buffer_depth - 10
+    max_dump_samples: samples_per_data_set * capture_n_frames
 
 baseband_readout_1:
-  kotekan_stage: chartsBasebandReadout
-  in_buf: network_capture_buf_1
-  out_buf: baseband_output_buffer_1
-  freq_id: 336
-  mask_buf: mask_buffer_zeros_1
-  num_frames_buffer: buffer_depth - 10
-  max_dump_samples: samples_per_data_set * capture_n_frames
+    kotekan_stage: chartsBasebandReadout
+    in_buf: network_capture_buf_1
+    out_buf: baseband_output_buffer_1
+    freq_id: 336
+    mask_buf: mask_buffer_zeros_1
+    num_frames_buffer: buffer_depth - 10
+    max_dump_samples: samples_per_data_set * capture_n_frames
 
 
 #Merge the frequency blocks only after their readouts have attached distinct
 #BasebandMetadata::freq_id values.
 baseband_merge:
-  kotekan_stage: bufferMerge
-  timeout: 0.1
-  in_bufs:
-    - baseband_output_buffer_0
-    - baseband_output_buffer_1
-  out_buf: baseband_output_buffer_merged
+    kotekan_stage: bufferMerge
+    timeout: 0.1
+    in_bufs:
+        - baseband_output_buffer_0
+        - baseband_output_buffer_1
+    out_buf: baseband_output_buffer_merged
 
 #Save both frequency blocks through one writer. It creates one file per
 #(event_id, freq_id), i.e. baseband_1_0 and baseband_1_336 for this test.
 baseband_save:
-  kotekan_stage: BasebandWriter
-  samples_per_data_set: 5160960 # bytes_per_dataset
-  num_elements: 64
-  in_buf: baseband_output_buffer_merged
-  root_path: /data/chord_fullspan # Config (flag)
-  dump_timeout: 1
+    kotekan_stage: BasebandWriter
+    samples_per_data_set: 5160960 # bytes_per_dataset
+    num_elements: 64
+    in_buf: baseband_output_buffer_merged
+    root_path: /data/chord_fullspan # Config (flag)
+    dump_timeout: 1
 
 
 # raw_file_write_0:
@@ -205,4 +206,3 @@ baseband_save:
 #   file_ext: bin
 #   num_frames_per_file: 1
 #   exit_after_n_files: 100
-  

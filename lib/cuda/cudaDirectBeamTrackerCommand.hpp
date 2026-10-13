@@ -18,20 +18,21 @@ namespace kotekan {
 
 /**
  * @class cudaDirectBeamTrackerCommand
- * @brief High-throughput Direct Beam Tracker stage in Kotekan with direct complex weight application,
- *        precomputed sky grid codebooks, and live REST control.
+ * @brief High-throughput Direct Beam Tracker stage in Kotekan with direct complex weight
+ * application, precomputed sky grid codebooks, and live REST control.
  */
 class cudaDirectBeamTrackerCommand : public cudaCommand {
 public:
     cudaDirectBeamTrackerCommand(Config& config, const std::string& unique_name,
-                                bufferContainer& host_buffers,
-                                cudaDeviceInterface& device, int inst);
+                                 bufferContainer& host_buffers, cudaDeviceInterface& device,
+                                 int inst);
     ~cudaDirectBeamTrackerCommand() override;
 
     cudaEvent_t execute(cudaPipelineState& pipestate,
                         const std::vector<cudaEvent_t>& pre_events) override;
 
-    static void set_shared_antenna_mask(const std::array<std::uint8_t, MAX_DIRECT_ANTENNAS>& mask, int n_active = -1);
+    static void set_shared_antenna_mask(const std::array<std::uint8_t, MAX_DIRECT_ANTENNAS>& mask,
+                                        int n_active = -1);
     static std::array<std::uint8_t, MAX_DIRECT_ANTENNAS> get_shared_antenna_mask();
     static DirectBeamTrackerConfig get_shared_config();
 

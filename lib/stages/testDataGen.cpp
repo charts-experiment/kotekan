@@ -426,8 +426,8 @@ void testDataGen::main_thread() {
         const std::vector<std::ptrdiff_t> dimscalings(_dim_scaling.begin(), _dim_scaling.end());
 
         const kotekan::DataType frame_type = chordmeta ? chordmeta->type : chartsmeta->type;
-        buf->ensure_frame_desc(kotekan::GenericNDArray::describe(frame_type, _name, extents,
-                                                                 dimnames, dimscalings));
+        buf->ensure_frame_desc(
+            kotekan::GenericNDArray::describe(frame_type, _name, extents, dimnames, dimscalings));
         /* test that things are consistent */
         if (chordmeta)
             chordmeta->check_frame_desc(buf->get_frame_desc<kotekan::GenericNDArray>());

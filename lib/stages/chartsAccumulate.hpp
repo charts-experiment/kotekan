@@ -26,8 +26,7 @@ public:
     void main_thread() override;
 
 private:
-    void validate_metadata(const chartsMetadata& reference,
-                           const chartsMetadata& current) const;
+    void validate_metadata(const chartsMetadata& reference, const chartsMetadata& current) const;
 
     Buffer* in_buf;
     Buffer* out_buf;

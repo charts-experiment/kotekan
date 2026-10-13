@@ -80,7 +80,11 @@ class TestFEngineParity(unittest.TestCase):
         peak_pwr = ch_power[peak_idx]
         adj_pwr = max(ch_power[peak_idx - 1], ch_power[peak_idx + 1])
         leakage_ratio = adj_pwr / peak_pwr
-        self.assertLess(leakage_ratio, 0.01, f"Adjacent channel leakage ratio too high: {leakage_ratio}")
+        self.assertLess(
+            leakage_ratio,
+            0.01,
+            f"Adjacent channel leakage ratio too high: {leakage_ratio}",
+        )
 
     def test_pfb_channelize_multi_antenna(self):
         """pfb_channelize must support multi-antenna 2D input (n_samples, n_ant)."""
@@ -102,13 +106,16 @@ class TestFEngineParity(unittest.TestCase):
     def test_quantize_int4x2_roundtrip_and_clamping(self):
         """quantize_int4x2 must clamp to [-7, +7] and pack Re/Im in 4-bit nibbles."""
         # Test values including beyond bounds
-        vals = np.array([
-            0.0 + 0.0j,
-            5.0 - 5.0j,
-            7.0 + 7.0j,
-            12.0 - 15.0j,   # Should clamp to 7 - 7j
-            -10.0 + 20.0j,  # Should clamp to -7 + 7j
-        ], dtype=np.complex64)
+        vals = np.array(
+            [
+                0.0 + 0.0j,
+                5.0 - 5.0j,
+                7.0 + 7.0j,
+                12.0 - 15.0j,  # Should clamp to 7 - 7j
+                -10.0 + 20.0j,  # Should clamp to -7 + 7j
+            ],
+            dtype=np.complex64,
+        )
 
         packed, quantized = quantize_int4x2(vals, scale=1.0)
 
@@ -148,7 +155,9 @@ class TestFEngineParity(unittest.TestCase):
         _, q = quantize_int4x2(x_scaled, scale=1.0)
         loss_db = measure_quantization_snr_loss(x_scaled, q)
         # Must be well below the AGENTS.md §3 equivalence bound (< 0.5 dB)
-        self.assertLess(loss_db, 0.5, f"Quantization SNR loss {loss_db} dB exceeded 0.5 dB bound")
+        self.assertLess(
+            loss_db, 0.5, f"Quantization SNR loss {loss_db} dB exceeded 0.5 dB bound"
+        )
         self.assertGreater(loss_db, 0.0)
 
     def test_optimal_noise_sigma_lsb(self):

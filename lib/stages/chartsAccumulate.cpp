@@ -35,12 +35,9 @@ REGISTER_KOTEKAN_STAGE(chartsAccumulate);
 
 chartsAccumulate::chartsAccumulate(Config& config, const std::string& unique_name,
                                    bufferContainer& buffer_container) :
-    Stage(config, unique_name, buffer_container,
-          std::bind(&chartsAccumulate::main_thread, this)),
-    in_buf(get_buffer("in_buf")),
-    out_buf(get_buffer("out_buf")),
-    _num_frames_to_accumulate(
-        config.get<int32_t>(unique_name, "num_frames_to_accumulate")),
+    Stage(config, unique_name, buffer_container, std::bind(&chartsAccumulate::main_thread, this)),
+    in_buf(get_buffer("in_buf")), out_buf(get_buffer("out_buf")),
+    _num_frames_to_accumulate(config.get<int32_t>(unique_name, "num_frames_to_accumulate")),
     _num_values(0) {
 
     if (!in_buf || !out_buf)
@@ -79,7 +76,8 @@ void chartsAccumulate::validate_metadata(const chartsMetadata& reference,
 
     for (int d = 0; d < reference.dims; ++d) {
         if (reference.dim[d] != current.dim[d]
-            || std::strncmp(reference.dim_name[d], current.dim_name[d], CHARTS_META_MAX_DIMNAME) != 0
+            || std::strncmp(reference.dim_name[d], current.dim_name[d], CHARTS_META_MAX_DIMNAME)
+                   != 0
             || reference.stride[d] != current.stride[d])
             throw std::invalid_argument("chartsAccumulate received incompatible array metadata");
     }
@@ -117,8 +115,7 @@ void chartsAccumulate::main_thread() {
             in_buf->copy_metadata(in_frame_id, out_buf, out_frame_id);
             output_metadata = get_charts_metadata(out_buf, out_frame_id);
             if (!output_metadata)
-                throw std::runtime_error(
-                    "chartsAccumulate could not create output chartsMetadata");
+                throw std::runtime_error("chartsAccumulate could not create output chartsMetadata");
 
             validate_metadata(*output_metadata, *input_metadata);
             std::fill(accumulation.begin(), accumulation.end(), 0);
@@ -148,8 +145,7 @@ void chartsAccumulate::main_thread() {
             for (std::size_t i = 0; i < _num_values; ++i) {
                 if (accumulation[i] < std::numeric_limits<int32_t>::min()
                     || accumulation[i] > std::numeric_limits<int32_t>::max())
-                    throw std::overflow_error(
-                        "chartsAccumulate result does not fit in int32_t");
+                    throw std::overflow_error("chartsAccumulate result does not fit in int32_t");
                 output[i] = static_cast<int32_t>(accumulation[i]);
             }
 

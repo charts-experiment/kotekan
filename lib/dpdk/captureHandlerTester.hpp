@@ -13,15 +13,17 @@
 #include "dpdkCore.hpp"
 #include "packet_copy.h"
 #include "prometheusMetrics.hpp"
-#include <chrono>
+
+#include "json.hpp"
+
 #include <arpa/inet.h>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
-#include <rte_mbuf.h>
-#include <fstream>
-#include <vector>
 #include <endian.h>
-#include "json.hpp"
+#include <fstream>
+#include <rte_mbuf.h>
+#include <vector>
 
 /**
  * @brief A simple handler to capture uniformly sized packets into a kotekan buffer
@@ -53,7 +55,7 @@ public:
     int handle_packet(struct rte_mbuf* mbuf) override;
 
     /// Update stats, not used by this handler yet.
-    virtual void update_stats() override{};
+    virtual void update_stats() override {};
 
 protected:
     /// The output buffer
@@ -85,8 +87,7 @@ protected:
     std::chrono::steady_clock::time_point last_report;
     std::ofstream log_file;
     std::vector<u_int64_t> seq_buffer;
-    static constexpr size_t SEQ_BUFFER_SIZE_MAX= 4096;
-
+    static constexpr size_t SEQ_BUFFER_SIZE_MAX = 4096;
 };
 
 inline captureHandler::captureHandler(kotekan::Config& config, const std::string& unique_name,
@@ -113,13 +114,11 @@ inline captureHandler::captureHandler(kotekan::Config& config, const std::string
     }
     last_report = std::chrono::steady_clock::now();
 
-    log_file.open("seq_log_port_" + std::to_string(port) + ".txt", 
-                    std::ios::out | std::ios::trunc);
+    log_file.open("seq_log_port_" + std::to_string(port) + ".txt", std::ios::out | std::ios::trunc);
 
     if (!log_file.is_open()) {
         throw std::runtime_error("Failed to open log file for captureHandler");
     }
-
 }
 
 inline int captureHandler::handle_packet(struct rte_mbuf* mbuf) {
@@ -150,7 +149,7 @@ inline int captureHandler::handle_packet(struct rte_mbuf* mbuf) {
 #endif
 
     // Copy the packet.
-    const int ip_udp_header_size = 42; //skip header IP/UDP
+    const int ip_udp_header_size = 42; // skip header IP/UDP
     int offset = ip_udp_header_size;
     assert((packet_location + 1) * packet_size <= (uint32_t)out_buf->frame_size);
 
@@ -159,12 +158,12 @@ inline int captureHandler::handle_packet(struct rte_mbuf* mbuf) {
     constexpr uint64_t MAX_SEQ_JUMP = 4096;
 
     uint64_t seq_num_le;
-    std::memcpy(&seq_num_le, 
+    std::memcpy(&seq_num_le,
                 rte_pktmbuf_mtod_offset(mbuf, uint8_t*, ip_udp_header_size + SEQ_OFFSET),
                 sizeof(uint64_t));
 
-    uint64_t seq_num =le64toh(seq_num_le);
-    
+    uint64_t seq_num = le64toh(seq_num_le);
+
     // Log sequence numbers
     seq_buffer.push_back(seq_num);
     if (seq_buffer.size() >= SEQ_BUFFER_SIZE_MAX) {
@@ -191,7 +190,7 @@ inline int captureHandler::handle_packet(struct rte_mbuf* mbuf) {
         } else if (seq_num == expected_seq) {
             expected_seq++;
         }
-}
+    }
     INFO("Packet seq: {}, expected seq: {}", seq_num, expected_seq);
     copy_block(&mbuf, &out_frame[packet_location * packet_size], packet_size, (int*)&offset);
     bytes_received += packet_size;
@@ -215,18 +214,16 @@ inline int captureHandler::handle_packet(struct rte_mbuf* mbuf) {
         double pps = packets_received / (double)elapsed;
         double bps = (bytes_received * 8) / (double)elapsed;
 
-        INFO("Capture Handler Port {}, Packets Received: {}, Packets Lost: {}, Bits per second: {}, Packets per second: {}",
-               port, packets_received, packets_lost, bps, pps);
+        INFO("Capture Handler Port {}, Packets Received: {}, Packets Lost: {}, Bits per second: "
+             "{}, Packets per second: {}",
+             port, packets_received, packets_lost, bps, pps);
         last_report = now;
 
         packets_received = 0;
         bytes_received = 0;
         packets_lost = 0;
-
     }
 
     return 0;
-
-
 }
 #endif

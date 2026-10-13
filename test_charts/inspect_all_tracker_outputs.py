@@ -10,17 +10,18 @@ import os
 import struct
 import numpy as np
 
+
 def inspect_binary_dump(file_path, n_time=15360, n_freq=336, max_beams=4):
     print("=" * 80)
     print(f" Inspecting Dump: {file_path}")
     print("=" * 80)
-    
+
     if not os.path.exists(file_path):
         print(f"  [ERROR] File not found: {file_path}")
         return False
-        
+
     file_size = os.path.getsize(file_path)
-    
+
     with open(file_path, "rb") as f:
         meta_size_bytes = f.read(4)
         if len(meta_size_bytes) < 4:
@@ -29,42 +30,52 @@ def inspect_binary_dump(file_path, n_time=15360, n_freq=336, max_beams=4):
         meta_size = struct.unpack("I", meta_size_bytes)[0]
         meta_data = f.read(meta_size)
         payload = f.read()
-        
+
     actual_payload_bytes = len(payload)
-    print(f"  Total File Size: {file_size:,} bytes | Header Size: {meta_size:,} bytes | Payload: {actual_payload_bytes:,} bytes")
-    
+    print(
+        f"  Total File Size: {file_size:,} bytes | Header Size: {meta_size:,} bytes | Payload: {actual_payload_bytes:,} bytes"
+    )
+
     # Check if payload matches complex float2 (8 bytes/elem) or float32 intensity (4 bytes/elem)
     expected_complex_bytes = n_time * n_freq * max_beams * 8
     expected_intensity_bytes = n_time * n_freq * max_beams * 4
 
     if actual_payload_bytes == expected_complex_bytes:
         is_complex = True
-        print(f"  Format: Complex float2 (Real, Imag) [Total float pairs: {n_time*n_freq*max_beams:,}]")
+        print(
+            f"  Format: Complex float2 (Real, Imag) [Total float pairs: {n_time*n_freq*max_beams:,}]"
+        )
         raw_floats = np.frombuffer(payload, dtype=np.float32)
         complex_data = raw_floats[0::2] + 1j * raw_floats[1::2]
         data = complex_data.reshape((n_time, n_freq, max_beams))
-        power = np.abs(data)**2
+        power = np.abs(data) ** 2
     elif actual_payload_bytes == expected_intensity_bytes:
         is_complex = False
-        print(f"  Format: Float32 Power Intensity [Total samples: {n_time*n_freq*max_beams:,}]")
-        data = np.frombuffer(payload, dtype=np.float32).reshape((n_time, n_freq, max_beams))
+        print(
+            f"  Format: Float32 Power Intensity [Total samples: {n_time*n_freq*max_beams:,}]"
+        )
+        data = np.frombuffer(payload, dtype=np.float32).reshape(
+            (n_time, n_freq, max_beams)
+        )
         power = data
     else:
-        print(f"  [ERROR] Payload mismatch! Actual={actual_payload_bytes}, Expected Complex={expected_complex_bytes} or Intensity={expected_intensity_bytes}")
+        print(
+            f"  [ERROR] Payload mismatch! Actual={actual_payload_bytes}, Expected Complex={expected_complex_bytes} or Intensity={expected_intensity_bytes}"
+        )
         return False
-        
+
     # Statistical validation
     n_nans = int(np.isnan(power).sum())
     n_infs = int(np.isinf(power).sum())
     n_negs = int((power < 0).sum())
-    
+
     print(f"  Shape: {data.shape} (Time={n_time}, Freq={n_freq}, Beams={max_beams})")
     print(f"  Integrity: NaNs={n_nans}, Infs={n_infs}, Negatives={n_negs}")
-    
+
     if n_nans > 0 or n_infs > 0:
         print(f"  [ERROR] Data corrupted with NaNs or Infs!")
         return False
-        
+
     for b in range(max_beams):
         p_b = power[:, :, b]
         b_min = float(np.min(p_b))
@@ -77,12 +88,17 @@ def inspect_binary_dump(file_path, n_time=15360, n_freq=336, max_beams=4):
             r_max = float(np.max(np.real(v_b)))
             i_min = float(np.min(np.imag(v_b)))
             i_max = float(np.max(np.imag(v_b)))
-            print(f"  Beam Slot {b}: Power Mean={b_mean:.2f} (Min={b_min:.2f}, Max={b_max:.2f}) | Real=[{r_min:.2f}..{r_max:.2f}], Imag=[{i_min:.2f}..{i_max:.2f}]")
+            print(
+                f"  Beam Slot {b}: Power Mean={b_mean:.2f} (Min={b_min:.2f}, Max={b_max:.2f}) | Real=[{r_min:.2f}..{r_max:.2f}], Imag=[{i_min:.2f}..{i_max:.2f}]"
+            )
         else:
-            print(f"  Beam Slot {b}: Power Min={b_min:.2f}, Max={b_max:.2f}, Mean={b_mean:.2f}, Std={b_std:.2f}")
-        
+            print(
+                f"  Beam Slot {b}: Power Min={b_min:.2f}, Max={b_max:.2f}, Mean={b_mean:.2f}, Std={b_std:.2f}"
+            )
+
     print(f"  [PASS] File {os.path.basename(file_path)} validated successfully.\n")
     return True
+
 
 def main():
     dirs = [
@@ -92,7 +108,7 @@ def main():
         ("/tmp/test_charts_direct_tracker_64", "64 Antennas (Direct Beam Tracker)"),
         ("/tmp/test_charts_direct_tracker_256", "256 Antennas (Direct Beam Tracker)"),
     ]
-    
+
     all_ok = True
     found_any = False
     for d, label in dirs:
@@ -106,7 +122,7 @@ def main():
             ok = inspect_binary_dump(f)
             if not ok:
                 all_ok = False
-                
+
     if not found_any:
         print("\n[INFO] No output files found in any search directories.")
         sys.exit(0)
@@ -120,6 +136,7 @@ def main():
         print(" SOME OUTPUT DUMPS FAILED VALIDATION!")
         print("=" * 80)
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

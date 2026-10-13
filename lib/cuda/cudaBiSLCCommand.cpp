@@ -1,4 +1,5 @@
 #include "cudaBiSLCCommand.hpp"
+
 #include "cudaBiSLC.hpp"
 #include "cudaDirectBeamTrackerCommand.hpp"
 #include "cudaUtils.hpp"
@@ -16,9 +17,9 @@
 using kotekan::bufferContainer;
 using kotekan::Config;
 using kotekan::connectionInstance;
+using kotekan::cudaBiSLCCommand;
 using kotekan::HTTP_RESPONSE;
 using kotekan::restServer;
-using kotekan::cudaBiSLCCommand;
 
 REGISTER_CUDA_COMMAND(cudaBiSLCCommand);
 
@@ -40,11 +41,11 @@ BiSLCConfig cudaBiSLCCommand::get_shared_config() {
     return _shared_config;
 }
 
-cudaBiSLCCommand::cudaBiSLCCommand(
-    Config& config, const std::string& unique_name,
-    bufferContainer& host_buffers, cudaDeviceInterface& device, int inst)
-    : cudaCommand(config, unique_name, host_buffers, device, inst,
-                  no_cuda_command_state, "cudaBiSLCCommand") {
+cudaBiSLCCommand::cudaBiSLCCommand(Config& config, const std::string& unique_name,
+                                   bufferContainer& host_buffers, cudaDeviceInterface& device,
+                                   int inst) :
+    cudaCommand(config, unique_name, host_buffers, device, inst, no_cuda_command_state,
+                "cudaBiSLCCommand") {
 
     _num_elements = config.get<int>(unique_name, "num_elements");
     _num_local_freq = config.get<int>(unique_name, "num_local_freq");
@@ -52,12 +53,15 @@ cudaBiSLCCommand::cudaBiSLCCommand(
     _buffer_depth = config.get<int>(unique_name, "buffer_depth");
 
     _max_beams = config.get_default<int>(unique_name, "max_beams", 2);
-    _spacing_m = config.get_default<float>(unique_name, "spacing_m", charts::constants::charts_default_spacing_m);
+    _spacing_m = config.get_default<float>(unique_name, "spacing_m",
+                                           charts::constants::charts_default_spacing_m);
     _diagonal_loading = config.get_default<float>(unique_name, "diagonal_loading", 1.0e-4f);
     _enabled = config.get_default<bool>(unique_name, "enabled", true);
 
-    _gpu_mem_formed_beams = config.get_default<std::string>(unique_name, "gpu_mem_formed_beams", "formed_beams");
-    _gpu_mem_cleaned_beams = config.get_default<std::string>(unique_name, "gpu_mem_cleaned_beams", "cleaned_beams");
+    _gpu_mem_formed_beams =
+        config.get_default<std::string>(unique_name, "gpu_mem_formed_beams", "formed_beams");
+    _gpu_mem_cleaned_beams =
+        config.get_default<std::string>(unique_name, "gpu_mem_cleaned_beams", "cleaned_beams");
 
     const double freq_start_hz = config.get_default<double>(unique_name, "freq_start_hz", 300.0e6);
     const double freq_step_hz = config.get_default<double>(unique_name, "freq_step_hz", 300.0e3);
@@ -72,7 +76,8 @@ cudaBiSLCCommand::cudaBiSLCCommand(
         _shared_config.enabled = _enabled;
         _shared_config.diagonal_loading = _diagonal_loading;
         _shared_config.max_beams_stride = static_cast<std::size_t>(_max_beams);
-        _shared_config.num_active_beams = config.get_default<int>(unique_name, "initial_active_beams", 2);
+        _shared_config.num_active_beams =
+            config.get_default<int>(unique_name, "initial_active_beams", 2);
         _matrices_dirty = true;
 
         if (!_endpoints_registered) {
@@ -86,7 +91,8 @@ cudaBiSLCCommand::cudaBiSLCCommand(
                     _shared_config.enabled = en;
                     _matrices_dirty = true;
                     INFO_NON_OO("BiSLC: Unmixing stage {:s}", en ? "ENABLED" : "DISABLED");
-                    conn.send_text_reply(fmt::format("BiSLC unmixing {:s}\n", en ? "enabled" : "disabled"));
+                    conn.send_text_reply(
+                        fmt::format("BiSLC unmixing {:s}\n", en ? "enabled" : "disabled"));
                 } catch (const std::exception& e) {
                     conn.send_error(e.what(), HTTP_RESPONSE::BAD_REQUEST);
                 }
@@ -175,13 +181,14 @@ cudaBiSLCCommand::~cudaBiSLCCommand() {
 }
 
 void cudaBiSLCCommand::allocate_device_buffers() {
-    const std::size_t matrix_bytes = static_cast<std::size_t>(_num_local_freq) *
-                                     static_cast<std::size_t>(_max_beams) *
-                                     static_cast<std::size_t>(_max_beams) * sizeof(float2);
+    const std::size_t matrix_bytes = static_cast<std::size_t>(_num_local_freq)
+                                     * static_cast<std::size_t>(_max_beams)
+                                     * static_cast<std::size_t>(_max_beams) * sizeof(float2);
 
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_unmix_matrices, matrix_bytes));
     _h_unmix_matrices.resize(static_cast<std::size_t>(_num_local_freq) * _max_beams * _max_beams);
-    _h_coupling_matrices.resize(static_cast<std::size_t>(_num_local_freq) * _max_beams * _max_beams);
+    _h_coupling_matrices.resize(static_cast<std::size_t>(_num_local_freq) * _max_beams
+                                * _max_beams);
 }
 
 void cudaBiSLCCommand::free_device_buffers() {
@@ -201,9 +208,8 @@ void cudaBiSLCCommand::update_matrices_if_needed(cudaStream_t stream) {
         std::lock_guard<std::mutex> lock(_global_mutex);
         current_cfg = _shared_config;
 
-        if (_matrices_dirty ||
-            current_cfg.num_active_beams != tracker_cfg.num_active_beams ||
-            current_cfg.antenna_mask != tracker_cfg.antenna_mask) {
+        if (_matrices_dirty || current_cfg.num_active_beams != tracker_cfg.num_active_beams
+            || current_cfg.antenna_mask != tracker_cfg.antenna_mask) {
 
             current_cfg.num_active_beams = tracker_cfg.num_active_beams;
             current_cfg.antenna_mask = tracker_cfg.antenna_mask;
@@ -217,34 +223,30 @@ void cudaBiSLCCommand::update_matrices_if_needed(cudaStream_t stream) {
         }
     }
 
-    if (!needs_update) return;
+    if (!needs_update)
+        return;
 
-    const std::size_t B = std::min(current_cfg.num_active_beams, static_cast<std::size_t>(_max_beams));
-    if (B == 0) return;
+    const std::size_t B =
+        std::min(current_cfg.num_active_beams, static_cast<std::size_t>(_max_beams));
+    if (B == 0)
+        return;
 
     // Compute coupling matrices A(f) and unmix matrices M(f) = A^{-1}(f) on host
     compute_beam_coupling_and_inverses(
-        _h_unmix_matrices.data(),
-        _h_coupling_matrices.data(),
-        current_cfg.targets.data(),
-        _frequencies_hz,
-        current_cfg.antenna_positions.data(),
-        current_cfg.antenna_mask.data(),
-        B,
-        static_cast<std::size_t>(_num_local_freq),
-        static_cast<std::size_t>(_num_elements),
-        current_cfg.num_active_antennas,
-        current_cfg.diagonal_loading);
+        _h_unmix_matrices.data(), _h_coupling_matrices.data(), current_cfg.targets.data(),
+        _frequencies_hz, current_cfg.antenna_positions.data(), current_cfg.antenna_mask.data(), B,
+        static_cast<std::size_t>(_num_local_freq), static_cast<std::size_t>(_num_elements),
+        current_cfg.num_active_antennas, current_cfg.diagonal_loading);
 
     // Asynchronously upload unmixing matrices M(f) to GPU
-    const std::size_t matrix_bytes = static_cast<std::size_t>(_num_local_freq) * B * B * sizeof(float2);
-    CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(
-        _d_unmix_matrices, _h_unmix_matrices.data(),
-        matrix_bytes, cudaMemcpyHostToDevice, stream));
+    const std::size_t matrix_bytes =
+        static_cast<std::size_t>(_num_local_freq) * B * B * sizeof(float2);
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_d_unmix_matrices, _h_unmix_matrices.data(),
+                                            matrix_bytes, cudaMemcpyHostToDevice, stream));
 }
 
-cudaEvent_t cudaBiSLCCommand::execute(
-    cudaPipelineState& /*pipestate*/, const std::vector<cudaEvent_t>&) {
+cudaEvent_t cudaBiSLCCommand::execute(cudaPipelineState& /*pipestate*/,
+                                      const std::vector<cudaEvent_t>&) {
 
     pre_execute();
 
@@ -254,17 +256,16 @@ cudaEvent_t cudaBiSLCCommand::execute(
         current_config = _shared_config;
     }
 
-    const std::size_t buffer_bytes = static_cast<std::size_t>(_num_local_freq) *
-                                     static_cast<std::size_t>(_samples_per_data_set) *
-                                     static_cast<std::size_t>(_max_beams) *
-                                     sizeof(float2);
+    const std::size_t buffer_bytes = static_cast<std::size_t>(_num_local_freq)
+                                     * static_cast<std::size_t>(_samples_per_data_set)
+                                     * static_cast<std::size_t>(_max_beams) * sizeof(float2);
 
     void* input_memory = device.get_gpu_memory_array(_gpu_mem_formed_beams, gpu_frame_id,
                                                      _gpu_buffer_depth, buffer_bytes);
     void* output_memory = (_gpu_mem_cleaned_beams == _gpu_mem_formed_beams)
                               ? input_memory
                               : device.get_gpu_memory_array(_gpu_mem_cleaned_beams, gpu_frame_id,
-                                                             _gpu_buffer_depth, buffer_bytes);
+                                                            _gpu_buffer_depth, buffer_bytes);
 
     if (!input_memory || !output_memory) {
         return record_end_event();
@@ -272,7 +273,8 @@ cudaEvent_t cudaBiSLCCommand::execute(
 
     // Forward metadata to output buffer if separate
     if (_gpu_mem_cleaned_beams != _gpu_mem_formed_beams) {
-        std::shared_ptr<metadataObject> meta = device.get_gpu_memory_array_metadata(_gpu_mem_formed_beams, gpu_frame_id);
+        std::shared_ptr<metadataObject> meta =
+            device.get_gpu_memory_array_metadata(_gpu_mem_formed_beams, gpu_frame_id);
         if (meta) {
             device.claim_gpu_memory_array_metadata(_gpu_mem_cleaned_beams, gpu_frame_id, meta);
         }
@@ -284,9 +286,8 @@ cudaEvent_t cudaBiSLCCommand::execute(
     // Bypass mode: if disabled or only 1 active beam, pass formed beams straight through
     if (!current_config.enabled || current_config.num_active_beams <= 1) {
         if (output_memory != input_memory) {
-            CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(
-                output_memory, input_memory, buffer_bytes,
-                cudaMemcpyDeviceToDevice, stream));
+            CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(output_memory, input_memory, buffer_bytes,
+                                                    cudaMemcpyDeviceToDevice, stream));
         }
         return record_end_event();
     }
@@ -296,14 +297,10 @@ cudaEvent_t cudaBiSLCCommand::execute(
 
     // Launch CUDA Joint Matrix Unmixing kernel
     launch_bislc_unmixing(
-        reinterpret_cast<float2*>(output_memory),
-        reinterpret_cast<const float2*>(input_memory),
-        _d_unmix_matrices,
-        static_cast<std::size_t>(_samples_per_data_set),
-        static_cast<std::size_t>(_num_local_freq),
-        current_config.num_active_beams,
-        static_cast<std::size_t>(_max_beams),
-        stream);
+        reinterpret_cast<float2*>(output_memory), reinterpret_cast<const float2*>(input_memory),
+        _d_unmix_matrices, static_cast<std::size_t>(_samples_per_data_set),
+        static_cast<std::size_t>(_num_local_freq), current_config.num_active_beams,
+        static_cast<std::size_t>(_max_beams), stream);
 
     return record_end_event();
 }

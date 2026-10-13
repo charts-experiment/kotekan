@@ -1,3 +1,4 @@
+---
 # ==============================================================================
 # Auto-generated 3-Beam Celestial Target Recording Pipeline
 # Generated at: 2026-09-01T19:07:58Z
@@ -33,120 +34,120 @@ initial_active_beams: 3
 sizeof_complex_float: 8
 
 main_pool:
-  kotekan_metadata_pool: chartsMetadata
-  num_metadata_objects: buffer_depth * 15
+    kotekan_metadata_pool: chartsMetadata
+    num_metadata_objects: buffer_depth * 15
 
 network_capture_buf:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: bytes_per_dataset * num_elements
-  numa_node: 0
-  metadata_pool: main_pool
-  zero_new_frames: true
-  mlock_frames: false
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: bytes_per_dataset * num_elements
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
 
 mask_buffer_zeros:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: samples_per_data_set
-  numa_node: 0
-  metadata_pool: main_pool
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set
+    numa_node: 0
+    metadata_pool: main_pool
 
 host_formed_beams_buffer:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float
-  numa_node: 0
-  metadata_pool: main_pool
-  zero_new_frames: true
-  mlock_frames: false
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
 
 dpdk:
-  kotekan_stage: dpdkCore
-  lcore_cpu_map: [3]
-  main_lcore_cpu: 4
-  lcore_port_map:
-    - [0]
-  max_rx_pkt_len: 9000
-  num_mbufs: 9600
-  handlers:
-    - dpdk_handler: rfsocHandlerNoClk
-      out_buffer: network_capture_buf
-      alignment: 4000
-      mask_buf: mask_buffer_zeros
-    - dpdk_handler: none
+    kotekan_stage: dpdkCore
+    lcore_cpu_map: [3]
+    main_lcore_cpu: 4
+    lcore_port_map:
+        - [0]
+    max_rx_pkt_len: 9000
+    num_mbufs: 9600
+    handlers:
+        - dpdk_handler: rfsocHandlerNoClk
+          out_buffer: network_capture_buf
+          alignment: 4000
+          mask_buf: mask_buffer_zeros
+        - dpdk_handler: none
 
 zero_samples:
-  kotekan_stage: zeroSamples
-  out_buf: network_capture_buf
-  lost_samples_buf: mask_buffer_zeros
-  zero_value: 0
-  sample_size: 21504
+    kotekan_stage: zeroSamples
+    out_buf: network_capture_buf
+    lost_samples_buf: mask_buffer_zeros
+    zero_value: 0
+    sample_size: 21504
 
 gpu:
-  profiling: false
-  commands: &command_list
-    - name: cudaInputData
-      in_buf: host_voltage
-      gpu_mem: voltage
-    - name: cudaSyncInput
-    - name: cudaBeamTrackerCommand
-      gpu_mem_voltage: voltage
-      gpu_mem_formed_beams: formed_beams
-      num_elements: 32
-      num_local_freq: 672
-      samples_per_data_set: 153600
-      integration_spectra: 320
-      spacing_m: 0.6
-      max_beams: 3
-      initial_active_beams: 3
-      buffer_depth: 2
-      site_lat_deg: -33.4211146
-      site_lon_deg: -70.863471
-      site_alt_m: 458.0
-      freq_start_hz: 300000000.0
-      freq_step_hz: 300000.0
+    profiling: false
+    commands: &command_list
+        - name: cudaInputData
+          in_buf: host_voltage
+          gpu_mem: voltage
+        - name: cudaSyncInput
+        - name: cudaBeamTrackerCommand
+          gpu_mem_voltage: voltage
+          gpu_mem_formed_beams: formed_beams
+          num_elements: 32
+          num_local_freq: 672
+          samples_per_data_set: 153600
+          integration_spectra: 320
+          spacing_m: 0.6
+          max_beams: 3
+          initial_active_beams: 3
+          buffer_depth: 2
+          site_lat_deg: -33.4211146
+          site_lon_deg: -70.863471
+          site_alt_m: 458.0
+          freq_start_hz: 300000000.0
+          freq_step_hz: 300000.0
       # Beam 0: Galactic_Center_SgrA
-      source_l0: 0.82042414
-      source_m0: -0.23821565
-      source_dl: -7.356404738589e-11
-      source_dm: 1.098368188527e-10
+          source_l0: 0.82042414
+          source_m0: -0.23821565
+          source_dl: -7.356404738589e-11
+          source_dm: 1.098368188527e-10
       # Beam 1: Sun
-      source_l0_1: -0.58412601
-      source_m0_1: 0.55735764
-      source_dl_1: -1.938587628899e-10
-      source_dm_1: -7.820041635908e-11
+          source_l0_1: -0.58412601
+          source_m0_1: 0.55735764
+          source_dl_1: -1.938587628899e-10
+          source_dm_1: -7.820041635908e-11
       # Beam 2: Vela_Pulsar_B0833-45
-      source_l0_2: -0.65274697
-      source_m0_2: -0.44792364
-      source_dl_2: -6.397875434438e-11
-      source_dm_2: -8.739116875914e-11
-    - name: cudaSyncOutput
-    - name: cudaOutputData
-      in_buf: host_voltage
-      gpu_mem: formed_beams
-      out_buf: host_formed_beams
-  gpu_0:
-    kotekan_stage: cudaProcess
-    gpu_id: 0
-    buffer_depth: 2
-    commands: *command_list
-    in_buffers:
-      host_voltage: network_capture_buf
-    out_buffers:
-      host_formed_beams: host_formed_beams_buffer
+          source_l0_2: -0.65274697
+          source_m0_2: -0.44792364
+          source_dl_2: -6.397875434438e-11
+          source_dm_2: -8.739116875914e-11
+        - name: cudaSyncOutput
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: formed_beams
+          out_buf: host_formed_beams
+    gpu_0:
+        kotekan_stage: cudaProcess
+        gpu_id: 0
+        buffer_depth: 2
+        commands: *command_list
+        in_buffers:
+            host_voltage: network_capture_buf
+        out_buffers:
+            host_formed_beams: host_formed_beams_buffer
 
 inspect_beams:
-  kotekan_stage: restInspectFrame
-  in_buf: host_formed_beams_buffer
-  len: 4194304
+    kotekan_stage: restInspectFrame
+    in_buf: host_formed_beams_buffer
+    len: 4194304
 
 raw_file_write_beams:
-  kotekan_stage: rawFileWrite
-  in_buf: host_formed_beams_buffer
-  file_name: formed_beams_celestial
-  base_dir: /data/tracker/celestial_3beams_2s
-  file_ext: bin
-  num_frames_per_file: 1
-  prefix_hostname: false
-  exit_after_n_files: 4
+    kotekan_stage: rawFileWrite
+    in_buf: host_formed_beams_buffer
+    file_name: formed_beams_celestial
+    base_dir: /data/tracker/celestial_3beams_2s
+    file_ext: bin
+    num_frames_per_file: 1
+    prefix_hostname: false
+    exit_after_n_files: 4

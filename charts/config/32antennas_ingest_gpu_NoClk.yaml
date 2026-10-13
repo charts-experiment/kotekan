@@ -22,91 +22,91 @@ capture_n_frames: 40
 bytes_per_dataset: n_channels_per_packet * packets_per_spectrum * samples_per_data_set
 
 main_pool:
-  kotekan_metadata_pool: chartsMetadata
-  num_metadata_objects: buffer_depth * 15
+    kotekan_metadata_pool: chartsMetadata
+    num_metadata_objects: buffer_depth * 15
 
 network_capture_buf:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: bytes_per_dataset * num_elements
-  numa_node: 0
-  metadata_pool: main_pool
-  zero_new_frames: true
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: bytes_per_dataset * num_elements
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
 
 mask_buffer_zeros:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: samples_per_data_set
-  numa_node: 0
-  metadata_pool: main_pool
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set
+    numa_node: 0
+    metadata_pool: main_pool
 
 host_correlation_buffer:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: num_local_freq * num_blocks * (block_size * block_size) * 2 * num_data_sets * sizeof_int
-  metadata_pool: main_pool
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: num_local_freq * num_blocks * (block_size * block_size) * 2 * num_data_sets * sizeof_int
+    metadata_pool: main_pool
 
 dpdk:
-  kotekan_stage: dpdkCore
-  lcore_cpu_map: [3]
-  main_lcore_cpu: 4
-  lcore_port_map:
-    - [0]
-  max_rx_pkt_len: 9000
-  num_mbufs: 9600
-  mbuf_data_size: 9000
-  handlers:
-    - dpdk_handler: rfsocHandlerNoClk
-      out_buffer: network_capture_buf
-      alignment: 4000
-      mask_buf: mask_buffer_zeros
-      capture_n_frames: capture_n_frames
+    kotekan_stage: dpdkCore
+    lcore_cpu_map: [3]
+    main_lcore_cpu: 4
+    lcore_port_map:
+        - [0]
+    max_rx_pkt_len: 9000
+    num_mbufs: 9600
+    mbuf_data_size: 9000
+    handlers:
+        - dpdk_handler: rfsocHandlerNoClk
+          out_buffer: network_capture_buf
+          alignment: 4000
+          mask_buf: mask_buffer_zeros
+          capture_n_frames: capture_n_frames
     # Keep one handler record per DPDK-visible port. Port 1 is intentionally unused.
-    - dpdk_handler: none
+        - dpdk_handler: none
 
 zero_samples:
-  kotekan_stage: zeroSamples
-  out_buf: network_capture_buf
-  lost_samples_buf: mask_buffer_zeros
-  zero_value: 0
-  sample_size: 21504
+    kotekan_stage: zeroSamples
+    out_buf: network_capture_buf
+    lost_samples_buf: mask_buffer_zeros
+    zero_value: 0
+    sample_size: 21504
 
 gpu:
-  profiling: false
-  kernel_path: "lib/cuda/kernels"
-  commands: &command_list
-    - name: cudaInputData
-      in_buf: host_voltage
-      gpu_mem: voltage
-    - name: cudaSyncInput
-    - name: cudaShuffleAstron
-      gpu_mem_voltage: voltage
-      gpu_mem_ordered_voltage: ordered_voltage
-    - name: cudaCorrelatorAstron
-      gpu_mem_voltage: ordered_voltage
-      gpu_mem_correlation_matrix: correlation_matrix
-    - name: cudaSyncOutput
-    - name: cudaOutputData
-      in_buf: host_voltage
-      gpu_mem: correlation_matrix
-      out_buf: host_correlation
-  gpu_0:
-    kotekan_stage: cudaProcess
-    gpu_id: 0
-    commands: *command_list
-    in_buffers:
-      host_voltage: network_capture_buf
-    out_buffers:
-      host_correlation: host_correlation_buffer
+    profiling: false
+    kernel_path: "lib/cuda/kernels"
+    commands: &command_list
+        - name: cudaInputData
+          in_buf: host_voltage
+          gpu_mem: voltage
+        - name: cudaSyncInput
+        - name: cudaShuffleAstron
+          gpu_mem_voltage: voltage
+          gpu_mem_ordered_voltage: ordered_voltage
+        - name: cudaCorrelatorAstron
+          gpu_mem_voltage: ordered_voltage
+          gpu_mem_correlation_matrix: correlation_matrix
+        - name: cudaSyncOutput
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: correlation_matrix
+          out_buf: host_correlation
+    gpu_0:
+        kotekan_stage: cudaProcess
+        gpu_id: 0
+        commands: *command_list
+        in_buffers:
+            host_voltage: network_capture_buf
+        out_buffers:
+            host_correlation: host_correlation_buffer
 
 # This is the only disk writer in this configuration. It stores GPU correlations,
 # not network voltages, and stops the run after capture_n_frames output files.
 raw_correlation_write:
-  kotekan_stage: rawFileWrite
-  in_buf: host_correlation_buffer
-  file_name: correlation_0
-  base_dir: "__CORR_RAW_DIR__"
-  file_ext: bin
-  prefix_hostname: false
-  num_frames_per_file: 1
-  exit_after_n_files: capture_n_frames
+    kotekan_stage: rawFileWrite
+    in_buf: host_correlation_buffer
+    file_name: correlation_0
+    base_dir: "__CORR_RAW_DIR__"
+    file_ext: bin
+    prefix_hostname: false
+    num_frames_per_file: 1
+    exit_after_n_files: capture_n_frames

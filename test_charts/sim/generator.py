@@ -109,7 +109,10 @@ def schedule_random_events(
         l0 = float(0.96 * math.sin(az))
         m0 = float(0.96 * math.cos(az))
         chans = sorted(persistent_rfi_channels)
-        freqs_str = ", ".join(f"{DEFAULT_FREQUENCY_START_MHZ + ch * CHARTS_CHANNEL_WIDTH_MHZ:.1f} MHz" for ch in chans)
+        freqs_str = ", ".join(
+            f"{DEFAULT_FREQUENCY_START_MHZ + ch * CHARTS_CHANNEL_WIDTH_MHZ:.1f} MHz"
+            for ch in chans
+        )
         events.append(
             SimulatedEvent(
                 event_id="site_persistent_rfi",
@@ -145,13 +148,15 @@ def schedule_random_events(
 
         if ev_type == "frb":
             dm = float(rng.uniform(100.0, 350.0))
-            sweep_s = 4148.8 * dm * (1.0 / (300.0 ** 2) - 1.0 / (400.5 ** 2))
+            sweep_s = 4148.8 * dm * (1.0 / (300.0**2) - 1.0 / (400.5**2))
             width_ms = float(rng.uniform(1.2, 3.5))
             amp = float(rng.uniform(2.8, 4.5))
             ra_deg = float(rng.uniform(0.0, 360.0))
             dec_deg = float(rng.uniform(-65.0, 10.0))
             if unix_t0 is not None:
-                l_arr, m_arr, _ = direction_cosines_track(ra_deg, dec_deg, np.array([unix_t0 + t0]))
+                l_arr, m_arr, _ = direction_cosines_track(
+                    ra_deg, dec_deg, np.array([unix_t0 + t0])
+                )
                 l0 = float(l_arr[0])
                 m0 = float(m_arr[0])
             else:
@@ -184,7 +189,9 @@ def schedule_random_events(
                 width_ms = 0.18
                 amp = float(rng.uniform(1.8, 2.8))
                 duration = min(duration_s - t0, 15.0)
-                desc = f"PSR J0437-4715 MSP train (P={period_s*1e3:.2f} ms, DM={dm:.2f})"
+                desc = (
+                    f"PSR J0437-4715 MSP train (P={period_s*1e3:.2f} ms, DM={dm:.2f})"
+                )
                 ra_deg = 69.316
                 dec_deg = -47.252
                 src_name = "PSR J0437-4715"
@@ -200,7 +207,9 @@ def schedule_random_events(
                 src_name = "Vela SNR / PSR B0833-45"
 
             if unix_t0 is not None:
-                l_arr, m_arr, _ = direction_cosines_track(ra_deg, dec_deg, np.array([unix_t0 + t0]))
+                l_arr, m_arr, _ = direction_cosines_track(
+                    ra_deg, dec_deg, np.array([unix_t0 + t0])
+                )
                 l0 = float(l_arr[0])
                 m0 = float(m_arr[0])
             else:
@@ -228,7 +237,11 @@ def schedule_random_events(
 
         elif ev_type == "rfi_narrow":
             num_bad_chans = int(rng.integers(1, min(4, max(2, num_freq))))
-            chans = sorted(rng.choice(num_freq, size=min(num_bad_chans, num_freq), replace=False).tolist())
+            chans = sorted(
+                rng.choice(
+                    num_freq, size=min(num_bad_chans, num_freq), replace=False
+                ).tolist()
+            )
             duration = float(min(duration_s - t0, rng.uniform(15.0, 30.0)))
             amp = float(rng.uniform(3.5, 7.5))
             az = rng.uniform(0.0, 2.0 * math.pi)
@@ -296,7 +309,9 @@ def build_frame_selection_schedule(
 
     # 2. Event captures
     dense_frames_count = max(1, int(round(event_dense_s / frame_duration_s)))
-    sparse_step = max(1, int(round((event_sparse_cadence_ms * 1e-3) / frame_duration_s)))
+    sparse_step = max(
+        1, int(round((event_sparse_cadence_ms * 1e-3) / frame_duration_s))
+    )
 
     for ev in events:
         if ev.is_persistent:
@@ -359,7 +374,9 @@ def render_and_write_frame(job: Dict[str, Any]) -> Tuple[int, int, float, float,
     total_clipped = 0
     total_elements = samples_per_frame * num_freq * num_ant * 2
 
-    noise_sigma = (sigma_ant[None, None, :] * bandpass[None, :, None]).astype(np.float32)
+    noise_sigma = (sigma_ant[None, None, :] * bandpass[None, :, None]).astype(
+        np.float32
+    )
     f_top_hz = freqs_hz[-1]
     f_top_ghz = f_top_hz / 1e9
 
@@ -372,8 +389,14 @@ def render_and_write_frame(job: Dict[str, Any]) -> Tuple[int, int, float, float,
         t_utc_s = unix_start_s + t_abs_s
 
         # 1. Independent receiver & sky thermal noise (direct float32)
-        v_real = rng.standard_normal(size=(n_chunk, num_freq, num_ant), dtype=np.float32) * noise_sigma
-        v_imag = rng.standard_normal(size=(n_chunk, num_freq, num_ant), dtype=np.float32) * noise_sigma
+        v_real = (
+            rng.standard_normal(size=(n_chunk, num_freq, num_ant), dtype=np.float32)
+            * noise_sigma
+        )
+        v_imag = (
+            rng.standard_normal(size=(n_chunk, num_freq, num_ant), dtype=np.float32)
+            * noise_sigma
+        )
 
         # 2. Coherent Sun emission if up
         if sun_info is not None and sun_info["amp"] > 0.005:
@@ -381,14 +404,20 @@ def render_and_write_frame(job: Dict[str, Any]) -> Tuple[int, int, float, float,
             sun_ra = sun_info.get("ra_deg")
             sun_dec = sun_info.get("dec_deg")
             if sun_ra is not None and sun_dec is not None and unix_start_s > 0:
-                sun_l, sun_m, _ = direction_cosines_track(sun_ra, sun_dec, t_utc_s, lat_deg, lon_deg)
-                sun_delays = (sun_l[:, None] * pos_x[None, :] + sun_m[:, None] * pos_y[None, :]) * c_inv
+                sun_l, sun_m, _ = direction_cosines_track(
+                    sun_ra, sun_dec, t_utc_s, lat_deg, lon_deg
+                )
+                sun_delays = (
+                    sun_l[:, None] * pos_x[None, :] + sun_m[:, None] * pos_y[None, :]
+                ) * c_inv
                 geom_phase = two_pi * (sun_delays[:, None, :] * freqs_hz[None, :, None])
             else:
                 sun_l = np.float32(sun_info["l"])
                 sun_m = np.float32(sun_info["m"])
                 sun_delays = (sun_l * pos_x + sun_m * pos_y) * c_inv
-                geom_phase = two_pi * (sun_delays[None, None, :] * freqs_hz[None, :, None])
+                geom_phase = two_pi * (
+                    sun_delays[None, None, :] * freqs_hz[None, :, None]
+                )
             tot_sun_phase = -geom_phase.astype(np.float32)
             v_real += sun_amp * np.cos(tot_sun_phase)
             v_imag += sun_amp * np.sin(tot_sun_phase)
@@ -401,14 +430,24 @@ def render_and_write_frame(job: Dict[str, Any]) -> Tuple[int, int, float, float,
             ev_dec = ev.get("dec_deg")
 
             if ev_ra is not None and ev_dec is not None and unix_start_s > 0:
-                ev_l, ev_m, _ = direction_cosines_track(ev_ra, ev_dec, t_utc_s, lat_deg, lon_deg)
-                delays = (ev_l[:, None] * pos_x[None, :] + ev_m[:, None] * pos_y[None, :]) * c_inv
+                ev_l, ev_m, _ = direction_cosines_track(
+                    ev_ra, ev_dec, t_utc_s, lat_deg, lon_deg
+                )
+                delays = (
+                    ev_l[:, None] * pos_x[None, :] + ev_m[:, None] * pos_y[None, :]
+                ) * c_inv
                 geom_phases = two_pi * (delays[:, None, :] * freqs_hz[None, :, None])
             elif ev_type == "rfi_leo":
                 t_rel = (t_abs_s - ev["t_start_s"]).astype(np.float32)
-                l_t = (np.float32(ev["l0"]) + np.float32(ev["drift_dl"]) * t_rel).astype(np.float32)
-                m_t = (np.float32(ev["m0"]) + np.float32(ev["drift_dm"]) * t_rel).astype(np.float32)
-                delays = (l_t[:, None] * pos_x[None, :] + m_t[:, None] * pos_y[None, :]) * c_inv
+                l_t = (
+                    np.float32(ev["l0"]) + np.float32(ev["drift_dl"]) * t_rel
+                ).astype(np.float32)
+                m_t = (
+                    np.float32(ev["m0"]) + np.float32(ev["drift_dm"]) * t_rel
+                ).astype(np.float32)
+                delays = (
+                    l_t[:, None] * pos_x[None, :] + m_t[:, None] * pos_y[None, :]
+                ) * c_inv
                 geom_phases = two_pi * (delays[:, None, :] * freqs_hz[None, :, None])
             else:
                 l_ev = np.float32(ev["l0"])
@@ -423,7 +462,9 @@ def render_and_write_frame(job: Dict[str, Any]) -> Tuple[int, int, float, float,
                 width_s = np.float32(ev["pulse_width_ms"] * 1e-3)
                 t_arrival_top = ev["t_start_s"]
                 f_ghz = freqs_hz / 1e9
-                dm_delays_s = ((K_DM * 1e-6) * dm * (1.0 / (f_ghz ** 2) - 1.0 / (f_top_ghz ** 2))).astype(np.float32)
+                dm_delays_s = (
+                    (K_DM * 1e-6) * dm * (1.0 / (f_ghz**2) - 1.0 / (f_top_ghz**2))
+                ).astype(np.float32)
 
                 t_chan_center = t_arrival_top + dm_delays_s[None, :]
                 t_diff = (t_abs_s[:, None] - t_chan_center).astype(np.float32)
@@ -437,7 +478,9 @@ def render_and_write_frame(job: Dict[str, Any]) -> Tuple[int, int, float, float,
                 width_s = np.float32(ev["pulse_width_ms"] * 1e-3)
                 dm = ev["dm"]
                 f_ghz = freqs_hz / 1e9
-                dm_delays_s = ((K_DM * 1e-6) * dm * (1.0 / (f_ghz ** 2) - 1.0 / (f_top_ghz ** 2))).astype(np.float32)
+                dm_delays_s = (
+                    (K_DM * 1e-6) * dm * (1.0 / (f_ghz**2) - 1.0 / (f_top_ghz**2))
+                ).astype(np.float32)
 
                 t_min = t_abs_s[0] - dm_delays_s[-1] - 3.0 * width_s
                 t_max = t_abs_s[-1] + 3.0 * width_s
@@ -462,10 +505,12 @@ def render_and_write_frame(job: Dict[str, Any]) -> Tuple[int, int, float, float,
                 v_real += ev_amp * np.cos(tot_phase)
                 v_imag += ev_amp * np.sin(tot_phase)
 
-        pwr_chunk = v_real ** 2 + v_imag ** 2
+        pwr_chunk = v_real**2 + v_imag**2
         total_power_sum += float(np.sum(pwr_chunk))
         max_power_val = max(max_power_val, float(np.max(pwr_chunk)))
-        total_clipped += int(np.sum(np.abs(v_real) > 7.5)) + int(np.sum(np.abs(v_imag) > 7.5))
+        total_clipped += int(np.sum(np.abs(v_real) > 7.5)) + int(
+            np.sum(np.abs(v_imag) > 7.5)
+        )
 
         r_quant = np.clip(np.round(v_real), -7, 7).astype(np.int8)
         i_quant = np.clip(np.round(v_imag), -7, 7).astype(np.int8)
@@ -515,18 +560,18 @@ def compute_analytic_lightcurve(
     f_ghz = freqs_hz / 1e9
 
     for ev in events:
-        amp_sq = ev.nominal_amp ** 2
+        amp_sq = ev.nominal_amp**2
         t0 = ev.t_start_s
         dur = ev.duration_s
 
         if ev.event_type == "frb":
             dm = ev.dm
             width_s = ev.pulse_width_ms * 1e-3
-            dm_delays_s = (K_DM * 1e-6) * dm * (1.0 / (f_ghz ** 2) - 1.0 / (f_top_ghz ** 2))
+            dm_delays_s = (K_DM * 1e-6) * dm * (1.0 / (f_ghz**2) - 1.0 / (f_top_ghz**2))
             for idx, t in enumerate(t_points):
                 if t0 - 0.5 <= t <= t0 + dur + 0.5:
                     t_chan = t0 + dm_delays_s
-                    env_sq = np.exp(-((t - t_chan) / width_s) ** 2)
+                    env_sq = np.exp(-(((t - t_chan) / width_s) ** 2))
                     p_total[idx] += amp_sq * float(np.mean(env_sq))
 
         elif ev.event_type == "pulsar":
@@ -579,12 +624,17 @@ def generate_simulation_window(
     frame_duration_s = config.samples_per_frame * dt_s
     total_window_frames = int(math.floor(config.duration_s / frame_duration_s))
 
-    freqs_hz = (config.frequency_start_mhz + np.arange(config.num_freq) * CHARTS_CHANNEL_WIDTH_MHZ) * 1e6
+    freqs_hz = (
+        config.frequency_start_mhz
+        + np.arange(config.num_freq) * CHARTS_CHANNEL_WIDTH_MHZ
+    ) * 1e6
     pos_x, pos_y = get_antenna_positions(num_antennas=config.antennas)
 
     seed = int(1000 * config.utc_hour + 42)
     noise_model = ChartsNoiseModel()
-    sigma_ant_base = noise_model.generate_antenna_gain_dispersion(num_antennas=config.antennas, seed=seed)
+    sigma_ant_base = noise_model.generate_antenna_gain_dispersion(
+        num_antennas=config.antennas, seed=seed
+    )
     bandpass = noise_model.generate_bandpass_shape(freqs_hz)
 
     # Solar state
@@ -601,15 +651,27 @@ def generate_simulation_window(
     doy = dt_mid.timetuple().tm_yday
     gamma = 2.0 * math.pi * (doy - 1) / 365.0
     decl_deg = (
-        0.006918 - 0.399912 * math.cos(gamma) + 0.070257 * math.sin(gamma)
-        - 0.006758 * math.cos(2.0 * gamma) + 0.000907 * math.sin(2.0 * gamma)
-        - 0.002697 * math.cos(3.0 * gamma) + 0.001480 * math.sin(3.0 * gamma)
+        0.006918
+        - 0.399912 * math.cos(gamma)
+        + 0.070257 * math.sin(gamma)
+        - 0.006758 * math.cos(2.0 * gamma)
+        + 0.000907 * math.sin(2.0 * gamma)
+        - 0.002697 * math.cos(3.0 * gamma)
+        + 0.001480 * math.sin(3.0 * gamma)
     ) * (180.0 / math.pi)
     eot_min = 229.18 * (
-        0.000075 + 0.001868 * math.cos(gamma) - 0.032077 * math.sin(gamma)
-        - 0.014615 * math.cos(2.0 * gamma) - 0.040849 * math.sin(2.0 * gamma)
+        0.000075
+        + 0.001868 * math.cos(gamma)
+        - 0.032077 * math.sin(gamma)
+        - 0.014615 * math.cos(2.0 * gamma)
+        - 0.040849 * math.sin(2.0 * gamma)
     )
-    hour_frac = dt_mid.hour + dt_mid.minute / 60.0 + dt_mid.second / 3600.0 + dt_mid.microsecond / 3.6e9
+    hour_frac = (
+        dt_mid.hour
+        + dt_mid.minute / 60.0
+        + dt_mid.second / 3600.0
+        + dt_mid.microsecond / 3.6e9
+    )
     solar_time_h = (hour_frac + (CHARTS_LONGITUDE_DEG / 15.0) + (eot_min / 60.0)) % 24.0
     ha_deg = (solar_time_h - 12.0) * 15.0
     lst_deg = datetime_to_lst_hours(dt_mid) * 15.0
@@ -669,14 +731,24 @@ def generate_simulation_window(
     num_written = len(written_indices)
 
     print("=" * 76)
-    print(f" CHARTS BASEBAND SIMULATION: {config.window_name} ({dt_start.strftime('%Y-%m-%d %H:%M:%S UTC')}, LST={config.initial_lst_hours:.3f}h)")
+    print(
+        f" CHARTS BASEBAND SIMULATION: {config.window_name} ({dt_start.strftime('%Y-%m-%d %H:%M:%S UTC')}, LST={config.initial_lst_hours:.3f}h)"
+    )
     print("=" * 76)
     print(f" Target Directory        : {target_dir}")
-    print(f" Duration                : {config.duration_s:.1f} s ({total_window_frames} physical frames)")
-    print(f" Written Frames          : {num_written} frames{' [DRY-RUN sample]' if getattr(config, 'dry_run', False) else ''}")
+    print(
+        f" Duration                : {config.duration_s:.1f} s ({total_window_frames} physical frames)"
+    )
+    print(
+        f" Written Frames          : {num_written} frames{' [DRY-RUN sample]' if getattr(config, 'dry_run', False) else ''}"
+    )
     print(f" Antennas                : {config.antennas}")
-    print(f" Frequency Channels      : {config.num_freq} ({config.frequency_start_mhz:.1f} - {config.frequency_start_mhz + config.num_freq*CHARTS_CHANNEL_WIDTH_MHZ:.1f} MHz)")
-    print(f" Sun Elevation           : {sun_el:+.2f} deg ({'UP' if sun_is_up else 'DOWN'})")
+    print(
+        f" Frequency Channels      : {config.num_freq} ({config.frequency_start_mhz:.1f} - {config.frequency_start_mhz + config.num_freq*CHARTS_CHANNEL_WIDTH_MHZ:.1f} MHz)"
+    )
+    print(
+        f" Sun Elevation           : {sun_el:+.2f} deg ({'UP' if sun_is_up else 'DOWN'})"
+    )
     print(f" Active Events Scheduled : {len(events)}")
     print(f" Workers                 : {config.workers}")
     print("=" * 76)
@@ -692,27 +764,29 @@ def generate_simulation_window(
             if ev.event_id in ev_ids:
                 active_evs.append(ev.to_dict())
 
-        jobs.append({
-            "out_idx": out_idx,
-            "frame_idx": frame_idx,
-            "out_file_path": str(out_bin_file),
-            "num_antennas": config.antennas,
-            "num_freq": config.num_freq,
-            "samples_per_frame": config.samples_per_frame,
-            "dt_s": dt_s,
-            "t_start_s": t_start_s,
-            "unix_start_s": unix_start_s,
-            "site_lat_deg": CHARTS_LATITUDE_DEG,
-            "site_lon_deg": CHARTS_LONGITUDE_DEG,
-            "freqs_hz": freqs_hz,
-            "pos_x": pos_x,
-            "pos_y": pos_y,
-            "sigma_ant": sigma_ant,
-            "bandpass": bandpass,
-            "sun_info": sun_info,
-            "active_events": active_evs,
-            "seed": seed + frame_idx,
-        })
+        jobs.append(
+            {
+                "out_idx": out_idx,
+                "frame_idx": frame_idx,
+                "out_file_path": str(out_bin_file),
+                "num_antennas": config.antennas,
+                "num_freq": config.num_freq,
+                "samples_per_frame": config.samples_per_frame,
+                "dt_s": dt_s,
+                "t_start_s": t_start_s,
+                "unix_start_s": unix_start_s,
+                "site_lat_deg": CHARTS_LATITUDE_DEG,
+                "site_lon_deg": CHARTS_LONGITUDE_DEG,
+                "freqs_hz": freqs_hz,
+                "pos_x": pos_x,
+                "pos_y": pos_y,
+                "sigma_ant": sigma_ant,
+                "bandpass": bandpass,
+                "sun_info": sun_info,
+                "active_events": active_evs,
+                "seed": seed + frame_idx,
+            }
+        )
 
     t0_gen = time.perf_counter()
     pool_workers = min(config.workers, mp.cpu_count() or 4)
@@ -722,23 +796,34 @@ def generate_simulation_window(
         with mp.Pool(processes=pool_workers, maxtasksperchild=100) as pool:
             for res in pool.imap_unordered(render_and_write_frame, jobs, chunksize=1):
                 stats_list.append(res)
-                if len(stats_list) % max(1, num_written // 10) == 0 or len(stats_list) == num_written:
+                if (
+                    len(stats_list) % max(1, num_written // 10) == 0
+                    or len(stats_list) == num_written
+                ):
                     pct = (len(stats_list) / num_written) * 100.0
-                    print(f"  Progress: {len(stats_list):4d}/{num_written} frames ({pct:.1f}%)", flush=True)
+                    print(
+                        f"  Progress: {len(stats_list):4d}/{num_written} frames ({pct:.1f}%)",
+                        flush=True,
+                    )
     else:
         for idx, job in enumerate(jobs):
             res = render_and_write_frame(job)
             stats_list.append(res)
             if (idx + 1) % max(1, num_written // 5) == 0 or (idx + 1) == num_written:
                 pct = ((idx + 1) / num_written) * 100.0
-                print(f"  Progress: {idx + 1:4d}/{num_written} frames ({pct:.1f}%)", flush=True)
+                print(
+                    f"  Progress: {idx + 1:4d}/{num_written} frames ({pct:.1f}%)",
+                    flush=True,
+                )
 
     t_gen_s = time.perf_counter() - t0_gen
     stats_list.sort(key=lambda x: x[0])
 
     # Compute analytic lightcurve
-    noise_pwr_base = float(np.mean(2.0 * (sigma_ant ** 2)) * np.mean(bandpass ** 2))
-    sun_pwr_series = np.full(int(round(config.duration_s * 10.0)), sun_amp ** 2 if sun_is_up else 0.0)
+    noise_pwr_base = float(np.mean(2.0 * (sigma_ant**2)) * np.mean(bandpass**2))
+    sun_pwr_series = np.full(
+        int(round(config.duration_s * 10.0)), sun_amp**2 if sun_is_up else 0.0
+    )
 
     lc_t, lc_power = compute_analytic_lightcurve(
         duration_s=config.duration_s,

@@ -45,6 +45,7 @@ from typing import Dict, List, Optional, Tuple
 
 try:
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.patches as patches
     import matplotlib.pyplot as plt
@@ -67,6 +68,7 @@ if str(_test_charts_dir) not in sys.path:
 
 try:
     import h5py
+
     HAS_H5PY = True
 except ImportError:
     HAS_H5PY = False
@@ -105,7 +107,9 @@ def load_baseband_frame(
     """Loads 1 frame of baseband data from either .h5 or .bin file."""
     if file_path.suffix.lower() in [".h5", ".hdf5"]:
         if not HAS_H5PY:
-            raise ImportError("h5py is required to read .h5 files. Install via: pip install h5py")
+            raise ImportError(
+                "h5py is required to read .h5 files. Install via: pip install h5py"
+            )
         with h5py.File(file_path, "r") as f:
             meta = {k: f.attrs[k] for k in f.attrs.keys()}
             if "baseband" in f:
@@ -121,7 +125,9 @@ def load_baseband_frame(
                 end_t = min(start_t + samples_per_frame, total_time)
                 frame_packed = dset[:, 0, :, start_t:end_t]
             else:
-                raise KeyError(f"No valid baseband dataset found in {file_path}. Keys: {list(f.keys())}")
+                raise KeyError(
+                    f"No valid baseband dataset found in {file_path}. Keys: {list(f.keys())}"
+                )
 
         meta.setdefault("num_antennas", n_ant)
         meta.setdefault("num_freq", n_freq)
@@ -180,7 +186,7 @@ def extract_spectrum_at_time(
 ) -> Tuple[np.ndarray, np.ndarray, float, int]:
     """
     Extracts the instantaneous frequency spectrum slice P(f) at target_time_ms.
-    
+
     Returns:
         power_spectrum: np.ndarray shape (64, num_freq)
         freqs_mhz: np.ndarray shape (num_freq,)
@@ -215,6 +221,7 @@ def extract_spectrum_at_time(
 # =============================================================================
 # Visualization 1: 8x8 Physical Grid Dashboard (dB vs Freq)
 # =============================================================================
+
 
 def plot_8x8_spectrum_grid(
     power_spectrum: np.ndarray,
@@ -264,15 +271,23 @@ def plot_8x8_spectrum_grid(
 
     plt.style.use("dark_background")
     fig, axes = plt.subplots(
-        8, 8,
+        8,
+        8,
         figsize=(24, 20),
         sharex=True,
         sharey=True,
-        gridspec_kw={"wspace": 0.08, "hspace": 0.08, "left": 0.06, "right": 0.95, "top": 0.91, "bottom": 0.06},
+        gridspec_kw={
+            "wspace": 0.08,
+            "hspace": 0.08,
+            "left": 0.06,
+            "right": 0.95,
+            "top": 0.91,
+            "bottom": 0.06,
+        },
     )
 
     for a in range(64):
-        col = a & 7   # 0 to 7 (West to East)
+        col = a & 7  # 0 to 7 (West to East)
         row = a >> 3  # 0 to 7 (South to North)
 
         plot_row = 7 - row
@@ -311,14 +326,21 @@ def plot_8x8_spectrum_grid(
 
         # Antenna badge
         ax.text(
-            0.05, 0.90,
+            0.05,
+            0.90,
             badge_text,
             transform=ax.transAxes,
             fontsize=8.5,
             fontweight="bold",
             color=badge_color,
             verticalalignment="top",
-            bbox=dict(boxstyle="round,pad=0.2", facecolor=badge_bg, edgecolor=badge_color, alpha=0.85, linewidth=0.8),
+            bbox=dict(
+                boxstyle="round,pad=0.2",
+                facecolor=badge_bg,
+                edgecolor=badge_color,
+                alpha=0.85,
+                linewidth=0.8,
+            ),
         )
 
         ax.tick_params(axis="both", which="both", labelsize=7.5, colors="#94a3b8")
@@ -331,13 +353,53 @@ def plot_8x8_spectrum_grid(
     for c in range(8):
         axes[7, c].set_xlabel("Freq [MHz]", fontsize=9.5, color="#e2e8f0", labelpad=3)
     for r in range(8):
-        axes[r, 0].set_ylabel(f"{unit_label}", fontsize=9.5, color="#e2e8f0", labelpad=3)
+        axes[r, 0].set_ylabel(
+            f"{unit_label}", fontsize=9.5, color="#e2e8f0", labelpad=3
+        )
 
     # Cardinal orientation labels
-    fig.text(0.50, 0.932, "[^] NORTH (+Y, Row 7)", ha="center", va="center", fontsize=11, fontweight="bold", color="#38bdf8")
-    fig.text(0.50, 0.024, "[v] SOUTH (-Y, Row 0)", ha="center", va="center", fontsize=11, fontweight="bold", color="#38bdf8")
-    fig.text(0.015, 0.485, "[<] WEST (-X, Col 0)", ha="center", va="center", rotation=90, fontsize=11, fontweight="bold", color="#38bdf8")
-    fig.text(0.965, 0.485, "EAST (+X, Col 7) [>]", ha="center", va="center", rotation=-90, fontsize=11, fontweight="bold", color="#38bdf8")
+    fig.text(
+        0.50,
+        0.932,
+        "[^] NORTH (+Y, Row 7)",
+        ha="center",
+        va="center",
+        fontsize=11,
+        fontweight="bold",
+        color="#38bdf8",
+    )
+    fig.text(
+        0.50,
+        0.024,
+        "[v] SOUTH (-Y, Row 0)",
+        ha="center",
+        va="center",
+        fontsize=11,
+        fontweight="bold",
+        color="#38bdf8",
+    )
+    fig.text(
+        0.015,
+        0.485,
+        "[<] WEST (-X, Col 0)",
+        ha="center",
+        va="center",
+        rotation=90,
+        fontsize=11,
+        fontweight="bold",
+        color="#38bdf8",
+    )
+    fig.text(
+        0.965,
+        0.485,
+        "EAST (+X, Col 7) [>]",
+        ha="center",
+        va="center",
+        rotation=-90,
+        fontsize=11,
+        fontweight="bold",
+        color="#38bdf8",
+    )
 
     target_name = meta.get("target_name", meta.get("scenario", "Simulation"))
     scenario = meta.get("scenario", "CHARTS-64")
@@ -364,6 +426,7 @@ def plot_8x8_spectrum_grid(
 # =============================================================================
 # Visualization 2: Master Overlay & Diagnostics Dashboard
 # =============================================================================
+
 
 def plot_spectrum_overlay(
     power_spectrum: np.ndarray,
@@ -395,9 +458,17 @@ def plot_spectrum_overlay(
 
     plt.style.use("dark_background")
     fig, (ax_main, ax_stat) = plt.subplots(
-        1, 2,
+        1,
+        2,
         figsize=(18, 9),
-        gridspec_kw={"width_ratios": [3.2, 1], "wspace": 0.18, "left": 0.07, "right": 0.95, "top": 0.90, "bottom": 0.10},
+        gridspec_kw={
+            "width_ratios": [3.2, 1],
+            "wspace": 0.18,
+            "left": 0.07,
+            "right": 0.95,
+            "top": 0.90,
+            "bottom": 0.10,
+        },
     )
 
     data_fmin = float(freqs_mhz[0])
@@ -410,7 +481,15 @@ def plot_spectrum_overlay(
     for a in range(64):
         if a not in saturated_antennas:
             lbl = "Operational Feeds (60)" if not normal_labeled else None
-            ax_main.plot(freqs_mhz, disp_spectrum[a], color="#38bdf8", alpha=0.30, linewidth=0.9, label=lbl, zorder=2)
+            ax_main.plot(
+                freqs_mhz,
+                disp_spectrum[a],
+                color="#38bdf8",
+                alpha=0.30,
+                linewidth=0.9,
+                label=lbl,
+                zorder=2,
+            )
             normal_labeled = True
 
     # Plot saturated feeds in high contrast
@@ -433,15 +512,45 @@ def plot_spectrum_overlay(
         mean_spectrum = disp_spectrum[normal_ant_mask].mean(axis=0)
         median_spectrum = np.median(disp_spectrum[normal_ant_mask], axis=0)
 
-        ax_main.plot(freqs_mhz, mean_spectrum, color="#ffffff", linewidth=2.5, linestyle="-", label="Array Mean (Normal Feeds)", zorder=5)
-        ax_main.plot(freqs_mhz, median_spectrum, color="#22c55e", linewidth=2.0, linestyle="--", label="Array Median (Normal Feeds)", zorder=5)
+        ax_main.plot(
+            freqs_mhz,
+            mean_spectrum,
+            color="#ffffff",
+            linewidth=2.5,
+            linestyle="-",
+            label="Array Mean (Normal Feeds)",
+            zorder=5,
+        )
+        ax_main.plot(
+            freqs_mhz,
+            median_spectrum,
+            color="#22c55e",
+            linewidth=2.0,
+            linestyle="--",
+            label="Array Median (Normal Feeds)",
+            zorder=5,
+        )
 
     ax_main.set_xlim(disp_fmin, disp_fmax)
-    ax_main.set_xlabel("Frequency [MHz]", fontsize=12, fontweight="bold", color="#f8fafc", labelpad=8)
-    ax_main.set_ylabel(f"Spectrum Intensity ({unit_label})", fontsize=12, fontweight="bold", color="#f8fafc", labelpad=8)
+    ax_main.set_xlabel(
+        "Frequency [MHz]", fontsize=12, fontweight="bold", color="#f8fafc", labelpad=8
+    )
+    ax_main.set_ylabel(
+        f"Spectrum Intensity ({unit_label})",
+        fontsize=12,
+        fontweight="bold",
+        color="#f8fafc",
+        labelpad=8,
+    )
     ax_main.grid(True, linestyle="--", color="#334155", alpha=0.6, zorder=1)
     ax_main.tick_params(colors="#94a3b8", labelsize=10)
-    ax_main.legend(loc="upper right", framealpha=0.85, facecolor="#0f172a", edgecolor="#475569", fontsize=9.5)
+    ax_main.legend(
+        loc="upper right",
+        framealpha=0.85,
+        facecolor="#0f172a",
+        edgecolor="#475569",
+        fontsize=9.5,
+    )
 
     # Side Panel: Physical Array Mini-map & Statistics
     ax_stat.axis("off")
@@ -453,7 +562,9 @@ def plot_spectrum_overlay(
     ax_inset.set_facecolor("#0f172a")
     for a in range(64):
         if a in saturated_antennas:
-            ax_inset.scatter(pos_x[a], pos_y[a], c="#ef4444", s=60, marker="X", zorder=4)
+            ax_inset.scatter(
+                pos_x[a], pos_y[a], c="#ef4444", s=60, marker="X", zorder=4
+            )
         else:
             ax_inset.scatter(pos_x[a], pos_y[a], c="#38bdf8", s=30, zorder=3)
     ax_inset.set_title("Array Geometry (8x8)", fontsize=9.5, color="#f8fafc", pad=4)
@@ -465,7 +576,9 @@ def plot_spectrum_overlay(
     # Statistical text block
     norm_mean = disp_spectrum[normal_ant_mask].mean() if normal_ant_mask else 0.0
     norm_std = disp_spectrum[normal_ant_mask].std() if normal_ant_mask else 0.0
-    sat_mean = disp_spectrum[list(saturated_antennas)].mean() if saturated_antennas else 0.0
+    sat_mean = (
+        disp_spectrum[list(saturated_antennas)].mean() if saturated_antennas else 0.0
+    )
 
     stat_box_text = (
         f"--- SPECTRUM SLICE INFO ---\n"
@@ -483,14 +596,20 @@ def plot_spectrum_overlay(
     )
 
     ax_stat.text(
-        0.05, 0.40,
+        0.05,
+        0.40,
         stat_box_text,
         transform=ax_stat.transAxes,
         fontsize=9.5,
         family="monospace",
         color="#e2e8f0",
         verticalalignment="top",
-        bbox=dict(boxstyle="round,pad=0.6", facecolor="#1e293b", edgecolor="#475569", linewidth=1.2),
+        bbox=dict(
+            boxstyle="round,pad=0.6",
+            facecolor="#1e293b",
+            edgecolor="#475569",
+            linewidth=1.2,
+        ),
     )
 
     fig.suptitle(
@@ -513,6 +632,7 @@ def plot_spectrum_overlay(
 # =============================================================================
 # CLI Main Routine
 # =============================================================================
+
 
 def find_candidate_file(baseband_dir: Path, scenario: str) -> Optional[Path]:
     """Finds matching .h5 or .bin file for a scenario in baseband_dir."""
@@ -540,7 +660,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--input", "-i",
+        "--input",
+        "-i",
         type=Path,
         default=None,
         help="Path to .h5 or .bin baseband file.",
@@ -552,13 +673,15 @@ def main():
         help="Directory containing baseband dumps (default: ./dumps_charts_64ant/baseband).",
     )
     parser.add_argument(
-        "--scenario", "-s",
+        "--scenario",
+        "-s",
         type=str,
         default="vela_with_noise",
         help="Scenario name to find if --input is omitted (default: vela_with_noise).",
     )
     parser.add_argument(
-        "--time", "-t",
+        "--time",
+        "-t",
         type=float,
         default=0.5,
         help="Target time slice in milliseconds (default: 0.5 ms).",
@@ -587,7 +710,8 @@ def main():
         help="Plot linear power instead of logarithmic dB scale.",
     )
     parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         type=Path,
         default=None,
         help="Explicit output PNG path (if omitted, generates both 8x8 grid and overlay).",
@@ -599,7 +723,8 @@ def main():
         help="Directory to save generated plots (default: ./dumps_charts_64ant/plots).",
     )
     parser.add_argument(
-        "--frame", "-f",
+        "--frame",
+        "-f",
         type=int,
         default=0,
         help="Frame index to load (default: 0).",
@@ -628,7 +753,9 @@ def main():
             print(f"[ERROR] Baseband directory does not exist: {args.baseband_dir}")
             sys.exit(1)
 
-        files = sorted(list(args.baseband_dir.glob("*.h5")) + list(args.baseband_dir.glob("*.bin")))
+        files = sorted(
+            list(args.baseband_dir.glob("*.h5")) + list(args.baseband_dir.glob("*.bin"))
+        )
         if not files:
             print(f"[WARN] No .h5 or .bin files found in {args.baseband_dir}")
             sys.exit(0)
@@ -645,18 +772,37 @@ def main():
             print(f"\nProcessing {filepath.name} at t = {args.time:.2f} ms ...")
             try:
                 frame_packed, meta = load_baseband_frame(filepath, frame_idx=args.frame)
-                power_spectrum, freqs_mhz, actual_t_ms, sample_idx = extract_spectrum_at_time(
-                    frame_packed, meta, target_time_ms=args.time, window_samples=args.window_samples
+                power_spectrum, freqs_mhz, actual_t_ms, sample_idx = (
+                    extract_spectrum_at_time(
+                        frame_packed,
+                        meta,
+                        target_time_ms=args.time,
+                        window_samples=args.window_samples,
+                    )
                 )
                 if not args.overlay_only:
                     plot_8x8_spectrum_grid(
-                        power_spectrum, freqs_mhz, meta, actual_t_ms, sample_idx, grid_out,
-                        use_db=not args.linear, freq_min=args.freq_min, freq_max=args.freq_max
+                        power_spectrum,
+                        freqs_mhz,
+                        meta,
+                        actual_t_ms,
+                        sample_idx,
+                        grid_out,
+                        use_db=not args.linear,
+                        freq_min=args.freq_min,
+                        freq_max=args.freq_max,
                     )
                 if not args.grid_only:
                     plot_spectrum_overlay(
-                        power_spectrum, freqs_mhz, meta, actual_t_ms, sample_idx, over_out,
-                        use_db=not args.linear, freq_min=args.freq_min, freq_max=args.freq_max
+                        power_spectrum,
+                        freqs_mhz,
+                        meta,
+                        actual_t_ms,
+                        sample_idx,
+                        over_out,
+                        use_db=not args.linear,
+                        freq_min=args.freq_min,
+                        freq_max=args.freq_max,
                     )
             except Exception as e:
                 print(f"[ERROR] Failed to process {filepath}: {e}")
@@ -669,7 +815,9 @@ def main():
     if target_file is None:
         target_file = find_candidate_file(args.baseband_dir, args.scenario)
         if target_file is None:
-            print(f"[ERROR] Could not find baseband file for scenario '{args.scenario}' in {args.baseband_dir}")
+            print(
+                f"[ERROR] Could not find baseband file for scenario '{args.scenario}' in {args.baseband_dir}"
+            )
             print("Please specify an explicit path using --input <path.h5 | path.bin>")
             sys.exit(1)
 
@@ -684,14 +832,18 @@ def main():
         frame_packed, meta, target_time_ms=args.time, window_samples=args.window_samples
     )
     extract_ms = (time.perf_counter() - t0) * 1000.0
-    print(f"Extracted spectrum slice at t = {actual_t_ms:.3f} ms (sample #{sample_idx}) in {extract_ms:.1f} ms.")
+    print(
+        f"Extracted spectrum slice at t = {actual_t_ms:.3f} ms (sample #{sample_idx}) in {extract_ms:.1f} ms."
+    )
 
     stem = target_file.stem.replace("_64ant_5ms", "")
     t_str = f"t{args.time:.1f}ms"
 
     if args.output is not None:
         grid_out = args.output
-        over_out = args.output.parent / f"{args.output.stem}_overlay{args.output.suffix}"
+        over_out = (
+            args.output.parent / f"{args.output.stem}_overlay{args.output.suffix}"
+        )
     else:
         args.plots_dir.mkdir(parents=True, exist_ok=True)
         grid_out = args.plots_dir / f"spectrum_8x8_{stem}_{t_str}.png"
@@ -699,14 +851,28 @@ def main():
 
     if not args.overlay_only:
         plot_8x8_spectrum_grid(
-            power_spectrum, freqs_mhz, meta, actual_t_ms, sample_idx, grid_out,
-            use_db=not args.linear, freq_min=args.freq_min, freq_max=args.freq_max
+            power_spectrum,
+            freqs_mhz,
+            meta,
+            actual_t_ms,
+            sample_idx,
+            grid_out,
+            use_db=not args.linear,
+            freq_min=args.freq_min,
+            freq_max=args.freq_max,
         )
 
     if not args.grid_only:
         plot_spectrum_overlay(
-            power_spectrum, freqs_mhz, meta, actual_t_ms, sample_idx, over_out,
-            use_db=not args.linear, freq_min=args.freq_min, freq_max=args.freq_max
+            power_spectrum,
+            freqs_mhz,
+            meta,
+            actual_t_ms,
+            sample_idx,
+            over_out,
+            use_db=not args.linear,
+            freq_min=args.freq_min,
+            freq_max=args.freq_max,
         )
 
     print(f"[OK] Completed spectrum slice visualizations at t = {actual_t_ms:.3f} ms.")

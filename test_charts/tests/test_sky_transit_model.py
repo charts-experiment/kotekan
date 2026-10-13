@@ -56,7 +56,9 @@ class TestSkyTransitModel(unittest.TestCase):
         catalog_keys = list(self.catalog.keys())
         for exp in expected_keys:
             matched = any(exp in k for k in catalog_keys)
-            self.assertTrue(matched, f"Expected target containing '{exp}' in catalog keys")
+            self.assertTrue(
+                matched, f"Expected target containing '{exp}' in catalog keys"
+            )
 
     def test_fuzzy_target_lookup(self):
         """Fuzzy lookup should resolve case-insensitively and on substrings."""
@@ -89,20 +91,26 @@ class TestSkyTransitModel(unittest.TestCase):
 
         # Check sorted order by transit_utc
         for i in range(len(summary) - 1):
-            self.assertLessEqual(summary[i]["transit_utc"], summary[i + 1]["transit_utc"])
+            self.assertLessEqual(
+                summary[i]["transit_utc"], summary[i + 1]["transit_utc"]
+            )
 
     def test_transit_anchored_window(self):
         """resolve_window_start with 'transit:<target>' anchors mid-window at transit time."""
         vela = find_verified_target("vela", self.catalog)
         duration_s = 60.0
-        start_dt = resolve_window_start("transit:Vela", duration_s=duration_s, catalog=self.catalog)
+        start_dt = resolve_window_start(
+            "transit:Vela", duration_s=duration_s, catalog=self.catalog
+        )
         mid_dt = start_dt + datetime.timedelta(seconds=duration_s / 2.0)
         diff_s = abs((mid_dt - vela.transit_dt).total_seconds())
         self.assertAlmostEqual(diff_s, 0.0, places=3)
 
     def test_transit_offsets_and_slots(self):
         """resolve_window_start supports slot:HH:MM and clock hour formats."""
-        dt_slot = resolve_window_start("slot:09:00", duration_s=10.0, catalog=self.catalog)
+        dt_slot = resolve_window_start(
+            "slot:09:00", duration_s=10.0, catalog=self.catalog
+        )
         self.assertIsInstance(dt_slot, datetime.datetime)
 
         dt_hhmm = resolve_window_start("15:00", duration_s=10.0, catalog=self.catalog)
@@ -119,11 +127,17 @@ class TestSkyTransitModel(unittest.TestCase):
         for v in self.catalog.values():
             l_t, m_t = v.direction_cosines_at_transit(lat_deg=lat_deg)
             # l should be very close to 0 on the meridian (|l| < 0.01 due to ephemeris rounding)
-            self.assertLess(abs(l_t), 0.01, f"Target {v.label} had large l at transit: {l_t}")
+            self.assertLess(
+                abs(l_t), 0.01, f"Target {v.label} had large l at transit: {l_t}"
+            )
 
             expected_m = math.sin(math.radians(v.dec_deg - lat_deg))
-            self.assertAlmostEqual(m_t, expected_m, places=3,
-                                   msg=f"Target {v.label} m ({m_t}) did not match sin(dec-lat) ({expected_m})")
+            self.assertAlmostEqual(
+                m_t,
+                expected_m,
+                places=3,
+                msg=f"Target {v.label} m ({m_t}) did not match sin(dec-lat) ({expected_m})",
+            )
 
     def test_direction_cosines_track_smoothness_and_bounds(self):
         """direction_cosines_track produces continuous, bounded (l, m, n) tracks."""
@@ -145,7 +159,7 @@ class TestSkyTransitModel(unittest.TestCase):
         self.assertTrue(np.all(np.abs(n_track) <= 1.0))
 
         # Sum of squares l^2 + m^2 + n^2 ~= 1
-        trans_sq = l_track ** 2 + m_track ** 2 + n_track ** 2
+        trans_sq = l_track**2 + m_track**2 + n_track**2
         np.testing.assert_allclose(trans_sq, 1.0, atol=1e-6)
 
         # Smoothness: diff between adjacent seconds should be very small (~ Earth rotation rate)

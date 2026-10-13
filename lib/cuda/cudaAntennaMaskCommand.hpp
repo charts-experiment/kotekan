@@ -24,8 +24,7 @@ namespace kotekan {
 class cudaAntennaMaskCommand : public cudaCommand {
 public:
     cudaAntennaMaskCommand(Config& config, const std::string& unique_name,
-                           bufferContainer& host_buffers,
-                           cudaDeviceInterface& device, int inst);
+                           bufferContainer& host_buffers, cudaDeviceInterface& device, int inst);
     ~cudaAntennaMaskCommand() override;
 
     cudaEvent_t execute(cudaPipelineState& pipestate,

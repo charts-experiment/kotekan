@@ -42,14 +42,15 @@ logger = logging.getLogger("kotekan.charts.sim.benchmark")
 
 # CHARTS Telescope Physical Cadence Constants
 FPGA_TIME_RESOLUTION_US = 10.0 / 3.0  # 3.333333 us per time sample (8192 / 2457.6 MHz)
-DEFAULT_CADENCE_SAMPLES = 1536        # Standard CHARTS frame (5.12 ms)
-LOW_LATENCY_CADENCE_SAMPLES = 3840    # Low-VRAM / Low-latency frame (12.8 ms)
-FULL_FRAME_CADENCE_SAMPLES = 15360    # Extended payload frame (51.2 ms)
+DEFAULT_CADENCE_SAMPLES = 1536  # Standard CHARTS frame (5.12 ms)
+LOW_LATENCY_CADENCE_SAMPLES = 3840  # Low-VRAM / Low-latency frame (12.8 ms)
+FULL_FRAME_CADENCE_SAMPLES = 15360  # Extended payload frame (51.2 ms)
 
 
 @dataclass
 class GpuDeviceProfile:
     """Hardware specifications for target GPU."""
+
     name: str
     vram_total_mb: float
     tdp_watts: float
@@ -200,9 +201,9 @@ def calculate_direct_tracker_vram(
     weights_bytes = max_beams * n_freq * n_ant * 8
 
     # 4. Auxiliary Geometry & Lookups
-    dirs_bytes = max_beams * 12        # float3 per beam
-    wavenumbers_bytes = n_freq * 8     # double per channel
-    positions_bytes = n_ant * 12       # float3 per antenna
+    dirs_bytes = max_beams * 12  # float3 per beam
+    wavenumbers_bytes = n_freq * 8  # double per channel
+    positions_bytes = n_ant * 12  # float3 per antenna
     aux_bytes = dirs_bytes + wavenumbers_bytes + positions_bytes
 
     # 5. Kotekan Ring Buffers (multiplied by buffer_depth)
@@ -289,23 +290,39 @@ def analyze_direct_tracker_cadence_and_power(
     # During the active kernel execution burst:
     # Power scales with memory bus saturation and SM activity
     bus_saturation = min(1.0, eff_bandwidth_gb_s / gpu.peak_bandwidth_gb_s)
-    active_power_w = gpu.idle_watts + (gpu.tdp_watts - gpu.idle_watts) * (0.45 + 0.50 * bus_saturation)
+    active_power_w = gpu.idle_watts + (gpu.tdp_watts - gpu.idle_watts) * (
+        0.45 + 0.50 * bus_saturation
+    )
     active_power_w = min(gpu.tdp_watts, active_power_w)
 
     # Under REAL CADENCE: The kernel runs for exec_ms, then the GPU idles for slack_time_ms!
     # P_avg = DutyCycle * P_active + (1 - DutyCycle) * P_idle
-    continuous_power_w = (duty_cycle * active_power_w) + ((1.0 - duty_cycle) * gpu.idle_watts)
+    continuous_power_w = (duty_cycle * active_power_w) + (
+        (1.0 - duty_cycle) * gpu.idle_watts
+    )
 
     # Energy calculations
     energy_per_frame_mj = active_power_w * exec_ms  # Watts * ms = milliJoules
-    energy_per_sample_nj = (energy_per_frame_mj * 1e6) / (n_time * n_freq)  # nanoJoules / complex spectrum
+    energy_per_sample_nj = (energy_per_frame_mj * 1e6) / (
+        n_time * n_freq
+    )  # nanoJoules / complex spectrum
     energy_efficiency_gflops_per_w = eff_tflops * 1000.0 / active_power_w
     frames_per_kwh = (1000.0 * 3600.0) / (energy_per_frame_mj * 1e-3)
 
     # 6. VRAM Usage
-    vram_info = calculate_direct_tracker_vram(n_ant, n_freq, n_time, num_beams, buffer_depth=buffer_depth)
+    vram_info = calculate_direct_tracker_vram(
+        n_ant, n_freq, n_time, num_beams, buffer_depth=buffer_depth
+    )
     vram_occupancy_pct = (vram_info["total_vram_mb"] / gpu.vram_total_mb) * 100.0
-    max_safe_buffer_depth = max(1, int(math.floor((gpu.vram_total_mb - 500.0) / (vram_info["input_frame_mb"] + vram_info["output_frame_mb"]))))
+    max_safe_buffer_depth = max(
+        1,
+        int(
+            math.floor(
+                (gpu.vram_total_mb - 500.0)
+                / (vram_info["input_frame_mb"] + vram_info["output_frame_mb"])
+            )
+        ),
+    )
 
     return {
         "gpu_target": gpu.name,
@@ -363,13 +380,23 @@ def run_direct_tracker_benchmark(
     cadence_ms = (samples_per_frame * FPGA_TIME_RESOLUTION_US) / 1000.0
 
     print("=" * 118)
-    print(" CHARTS DIRECT BEAM TRACKER (cudaDirectBeamTracker) BENCHMARK & SYSTEM ANALYSIS")
-    print(f" Target Hardware     : {gpu.name} ({gpu.vram_total_mb / 1024.0:.1f} GB VRAM, TDP {gpu.tdp_watts:.0f} W)")
-    print(f" Real Frame Cadence  : {cadence_ms:.2f} ms ({samples_per_frame} samples @ {FPGA_TIME_RESOLUTION_US:.3f} us/sample, {1000.0 / cadence_ms:.1f} Hz)")
-    print(f" Frequency Channels  : {num_freq} (Full Bandwidth: {num_freq * 0.3:.1f} MHz)")
+    print(
+        " CHARTS DIRECT BEAM TRACKER (cudaDirectBeamTracker) BENCHMARK & SYSTEM ANALYSIS"
+    )
+    print(
+        f" Target Hardware     : {gpu.name} ({gpu.vram_total_mb / 1024.0:.1f} GB VRAM, TDP {gpu.tdp_watts:.0f} W)"
+    )
+    print(
+        f" Real Frame Cadence  : {cadence_ms:.2f} ms ({samples_per_frame} samples @ {FPGA_TIME_RESOLUTION_US:.3f} us/sample, {1000.0 / cadence_ms:.1f} Hz)"
+    )
+    print(
+        f" Frequency Channels  : {num_freq} (Full Bandwidth: {num_freq * 0.3:.1f} MHz)"
+    )
     print(f" Buffer Depth        : {buffer_depth} (Ring multiplier)")
     if live_telemetry:
-        print(f" Live GPU Status     : Temp={live_telemetry['temp_c']}°C, SM Clock={live_telemetry['sm_clock_mhz']} MHz, VRAM Used={live_telemetry['memory_used_mb']:.0f} MB")
+        print(
+            f" Live GPU Status     : Temp={live_telemetry['temp_c']}°C, SM Clock={live_telemetry['sm_clock_mhz']} MHz, VRAM Used={live_telemetry['memory_used_mb']:.0f} MB"
+        )
     print("=" * 118 + "\n")
 
     records: List[Dict[str, Any]] = []
@@ -412,13 +439,25 @@ def run_direct_tracker_benchmark(
     return report_data
 
 
-def print_cadence_and_vram_table(records: List[Dict[str, Any]], cadence_ms: float) -> None:
+def print_cadence_and_vram_table(
+    records: List[Dict[str, Any]], cadence_ms: float
+) -> None:
     """Renders formatted table of Cadence, Real-time headroom, Ingestion rates, and VRAM."""
-    print("----------------------------------------------------------------------------------------------------------------------")
-    print(f" SECTION 1: REAL CADENCE & VRAM CONSUMPTION (Cadence Period = {cadence_ms:.2f} ms)")
-    print("----------------------------------------------------------------------------------------------------------------------")
-    print(f"| {'Ant':<4} | {'Beams':<5} | {'Exec Time':<10} | {'Cadence Budget':<15} | {'Headroom':<9} | {'Ingest Rate':<12} | {'VRAM (GB)':<10} | {'Occupancy':<10} | {'Max Depth':<9} |")
-    print("----------------------------------------------------------------------------------------------------------------------")
+    print(
+        "----------------------------------------------------------------------------------------------------------------------"
+    )
+    print(
+        f" SECTION 1: REAL CADENCE & VRAM CONSUMPTION (Cadence Period = {cadence_ms:.2f} ms)"
+    )
+    print(
+        "----------------------------------------------------------------------------------------------------------------------"
+    )
+    print(
+        f"| {'Ant':<4} | {'Beams':<5} | {'Exec Time':<10} | {'Cadence Budget':<15} | {'Headroom':<9} | {'Ingest Rate':<12} | {'VRAM (GB)':<10} | {'Occupancy':<10} | {'Max Depth':<9} |"
+    )
+    print(
+        "----------------------------------------------------------------------------------------------------------------------"
+    )
     for r in records:
         t_exec = f"{r['exec_latency_ms']:.3f} ms"
         budget = f"{r['budget_utilization_pct']:.1f}% used"
@@ -431,16 +470,26 @@ def print_cadence_and_vram_table(records: List[Dict[str, Any]], cadence_ms: floa
         print(
             f"| {r['n_ant']:<4} | {r['num_beams']:<5} | {t_exec:<10} | {budget:<15} | {headroom:<9} | {ingest:<12} | {vram:<10} | {occupancy:<10} | {max_d:<9} |"
         )
-    print("----------------------------------------------------------------------------------------------------------------------\n")
+    print(
+        "----------------------------------------------------------------------------------------------------------------------\n"
+    )
 
 
 def print_power_and_energy_table(records: List[Dict[str, Any]]) -> None:
     """Renders formatted table of Active Power, Real-Cadence Continuous Power, and Energy per Frame."""
-    print("----------------------------------------------------------------------------------------------------------------------")
+    print(
+        "----------------------------------------------------------------------------------------------------------------------"
+    )
     print(" SECTION 2: GPU POWER & REAL-CADENCE ENERGY EFFICIENCY")
-    print("----------------------------------------------------------------------------------------------------------------------")
-    print(f"| {'Ant':<4} | {'Beams':<5} | {'Active Power':<13} | {'Real-Cadence Avg':<17} | {'Energy/Frame':<13} | {'Energy/Sample':<14} | {'Efficiency':<12} | {'Frames/kWh':<11} |")
-    print("----------------------------------------------------------------------------------------------------------------------")
+    print(
+        "----------------------------------------------------------------------------------------------------------------------"
+    )
+    print(
+        f"| {'Ant':<4} | {'Beams':<5} | {'Active Power':<13} | {'Real-Cadence Avg':<17} | {'Energy/Frame':<13} | {'Energy/Sample':<14} | {'Efficiency':<12} | {'Frames/kWh':<11} |"
+    )
+    print(
+        "----------------------------------------------------------------------------------------------------------------------"
+    )
     for r in records:
         p_act = f"{r['active_kernel_power_w']:.1f} W"
         p_cad = f"{r['real_cadence_power_w']:.1f} W"
@@ -452,7 +501,9 @@ def print_power_and_energy_table(records: List[Dict[str, Any]]) -> None:
         print(
             f"| {r['n_ant']:<4} | {r['num_beams']:<5} | {p_act:<13} | {p_cad:<17} | {e_frame:<13} | {e_sample:<14} | {eff:<12} | {fp_kwh:<11} |"
         )
-    print("----------------------------------------------------------------------------------------------------------------------\n")
+    print(
+        "----------------------------------------------------------------------------------------------------------------------\n"
+    )
 
 
 def generate_direct_tracker_markdown(data: Dict[str, Any], output_path: Path) -> Path:
@@ -488,19 +539,21 @@ def generate_direct_tracker_markdown(data: Dict[str, Any], output_path: Path) ->
             f"{r['vram_occupancy_pct']:.1f}% | {r['max_safe_buffer_depth']} |"
         )
 
-    lines.extend([
-        "",
-        "---",
-        "",
-        "## 2. GPU Power Draw & Energy Efficiency under Real Cadence",
-        "",
-        "Under real continuous streaming, the kernel completes within `exec_latency_ms`, and the GPU waits during the remainder of the `cadence_ms` period. "
-        "The **Real-Cadence Average Power** reflects the actual wall-socket continuous draw:",
-        r"$$P_{\text{cadence}} = D \cdot P_{\text{active}} + (1 - D) \cdot P_{\text{idle}}$$",
-        "",
-        "| Antennas | Beams | Peak Active Power | Real-Cadence Avg Power | Energy per Frame | Energy per Sample | GFLOPS / Watt | Frames per kWh |",
-        "|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|",
-    ])
+    lines.extend(
+        [
+            "",
+            "---",
+            "",
+            "## 2. GPU Power Draw & Energy Efficiency under Real Cadence",
+            "",
+            "Under real continuous streaming, the kernel completes within `exec_latency_ms`, and the GPU waits during the remainder of the `cadence_ms` period. "
+            "The **Real-Cadence Average Power** reflects the actual wall-socket continuous draw:",
+            r"$$P_{\text{cadence}} = D \cdot P_{\text{active}} + (1 - D) \cdot P_{\text{idle}}$$",
+            "",
+            "| Antennas | Beams | Peak Active Power | Real-Cadence Avg Power | Energy per Frame | Energy per Sample | GFLOPS / Watt | Frames per kWh |",
+            "|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|",
+        ]
+    )
 
     for r in records:
         lines.append(
@@ -509,18 +562,20 @@ def generate_direct_tracker_markdown(data: Dict[str, Any], output_path: Path) ->
             f"{r['energy_per_sample_nj']:.2f} nJ | {r['energy_efficiency_gflops_per_w']:.1f} | {r['frames_per_kwh']:,} |"
         )
 
-    lines.extend([
-        "",
-        "---",
-        "",
-        "## 3. Key Observations & Sizing Guidelines",
-        "",
-        f"1. **Continuous Power Savings**: Because the Direct Beam Tracker processes each frame with a duty cycle under **{max(r['budget_utilization_pct'] for r in records):.1f}%**, the continuous GPU power draw remains extremely low (**{min(r['real_cadence_power_w'] for r in records):.1f} W - {max(r['real_cadence_power_w'] for r in records):.1f} W**), compared to the peak TDP.",
-        f"2. **Real-Time Headroom**: With at least **{min(r['headroom_factor'] for r in records):.1f}x real-time headroom**, the GPU can easily absorb system jitter, PCIe bus delays, and operating system interruptions without dropping frames.",
-        f"3. **VRAM Safety**: The maximum VRAM consumption for 256 antennas with 8 beams is **{max(r['vram_allocated_gb'] for r in records):.2f} GB**, easily fitting within standard 24 GB / 32 GB GPUs with substantial headroom for OS and background tasks.",
-        "",
-        f"*Report generated automatically on {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}*",
-    ])
+    lines.extend(
+        [
+            "",
+            "---",
+            "",
+            "## 3. Key Observations & Sizing Guidelines",
+            "",
+            f"1. **Continuous Power Savings**: Because the Direct Beam Tracker processes each frame with a duty cycle under **{max(r['budget_utilization_pct'] for r in records):.1f}%**, the continuous GPU power draw remains extremely low (**{min(r['real_cadence_power_w'] for r in records):.1f} W - {max(r['real_cadence_power_w'] for r in records):.1f} W**), compared to the peak TDP.",
+            f"2. **Real-Time Headroom**: With at least **{min(r['headroom_factor'] for r in records):.1f}x real-time headroom**, the GPU can easily absorb system jitter, PCIe bus delays, and operating system interruptions without dropping frames.",
+            f"3. **VRAM Safety**: The maximum VRAM consumption for 256 antennas with 8 beams is **{max(r['vram_allocated_gb'] for r in records):.2f} GB**, easily fitting within standard 24 GB / 32 GB GPUs with substantial headroom for OS and background tasks.",
+            "",
+            f"*Report generated automatically on {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}*",
+        ]
+    )
 
     output_path.write_text("\n".join(lines), encoding="utf-8")
     return output_path

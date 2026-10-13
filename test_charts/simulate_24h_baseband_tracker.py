@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Tuple
 
 import h5py
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -60,36 +61,36 @@ from constants import (
 ASTRONOMICAL_CATALOG = [
     {
         "name": "Vela Pulsar (PSR J0835-4510)",
-        "ra_deg": 128.836,   # 08h 35m 20.6s
+        "ra_deg": 128.836,  # 08h 35m 20.6s
         "dec_deg": -45.176,  # -45° 10' 35"
         "type": "Pulsar",
         "description": "Brightest southern radio pulsar",
     },
     {
         "name": "Sagittarius A* (Galactic Center)",
-        "ra_deg": 266.417,   # 17h 45m 40.0s
+        "ra_deg": 266.417,  # 17h 45m 40.0s
         "dec_deg": -29.008,  # -29° 00' 28"
         "type": "Galactic Center",
         "description": "Supermassive black hole / Galactic Center",
     },
     {
         "name": "Centaurus A (NGC 5128)",
-        "ra_deg": 201.365,   # 13h 25m 27.6s
+        "ra_deg": 201.365,  # 13h 25m 27.6s
         "dec_deg": -43.019,  # -43° 01' 09"
         "type": "Radio Galaxy",
         "description": "Prominent southern giant radio galaxy",
     },
     {
         "name": "Crab Pulsar (PSR J0534+2200)",
-        "ra_deg": 83.633,    # 05h 34m 32.0s
+        "ra_deg": 83.633,  # 05h 34m 32.0s
         "dec_deg": +22.014,  # +22° 00' 52"
         "type": "Pulsar",
         "description": "Young energetic pulsar / SNR",
     },
     {
         "name": "Carén Zenith Transit Field",
-        "ra_deg": 24.346,    # Transits at UTC 01:37:22
-        "dec_deg": CHARTS_LATITUDE_DEG, # -33.4211°
+        "ra_deg": 24.346,  # Transits at UTC 01:37:22
+        "dec_deg": CHARTS_LATITUDE_DEG,  # -33.4211°
         "type": "Zenith Field",
         "description": "Transits directly through local zenith (n=1.0)",
     },
@@ -105,7 +106,9 @@ def unpack_4bit_complex(u8_array: np.ndarray) -> np.ndarray:
     return real.astype(np.float32) + 1j * imag.astype(np.float32)
 
 
-def get_antenna_positions(num_antennas: int, spacing_m: float = DEFAULT_SPACING_M) -> np.ndarray:
+def get_antenna_positions(
+    num_antennas: int, spacing_m: float = DEFAULT_SPACING_M
+) -> np.ndarray:
     """Computes (x, y, z) coordinates for 32, 64, 128, or 256 array layout."""
     if num_antennas <= 64:
         cols = np.arange(num_antennas) & 7
@@ -113,7 +116,9 @@ def get_antenna_positions(num_antennas: int, spacing_m: float = DEFAULT_SPACING_
     else:
         cols = np.arange(num_antennas) & 15
         rows = np.arange(num_antennas) >> 4
-    return np.column_stack([cols * spacing_m, rows * spacing_m, np.zeros(num_antennas, dtype=np.float32)])
+    return np.column_stack(
+        [cols * spacing_m, rows * spacing_m, np.zeros(num_antennas, dtype=np.float32)]
+    )
 
 
 def compute_topocentric_coordinates(
@@ -129,8 +134,12 @@ def compute_topocentric_coordinates(
 
     # Direction cosines in Topocentric East-North-Up coordinate system
     l = -math.cos(dec_rad) * math.sin(ha_rad)
-    m = math.sin(dec_rad) * math.cos(lat_rad) - math.cos(dec_rad) * math.sin(lat_rad) * math.cos(ha_rad)
-    n = math.sin(dec_rad) * math.sin(lat_rad) + math.cos(dec_rad) * math.cos(lat_rad) * math.cos(ha_rad)
+    m = math.sin(dec_rad) * math.cos(lat_rad) - math.cos(dec_rad) * math.sin(
+        lat_rad
+    ) * math.cos(ha_rad)
+    n = math.sin(dec_rad) * math.sin(lat_rad) + math.cos(dec_rad) * math.cos(
+        lat_rad
+    ) * math.cos(ha_rad)
 
     elevation_deg = math.degrees(math.asin(max(-1.0, min(1.0, n))))
     azimuth_rad = math.atan2(l, m)
@@ -139,13 +148,15 @@ def compute_topocentric_coordinates(
     return l, m, n, elevation_deg, azimuth_deg
 
 
-def analyze_antenna_health(raw_slice: np.ndarray, power_thresh: float = 0.05) -> Tuple[np.ndarray, np.ndarray]:
+def analyze_antenna_health(
+    raw_slice: np.ndarray, power_thresh: float = 0.05
+) -> Tuple[np.ndarray, np.ndarray]:
     """Detects active vs unplugged antennas."""
     n_ant = raw_slice.shape[0]
     powers = np.zeros(n_ant, dtype=np.float64)
     mask = np.zeros(n_ant, dtype=np.uint8)
 
-    sample = raw_slice[:, :, ::max(1, raw_slice.shape[2] // 1024)]
+    sample = raw_slice[:, :, :: max(1, raw_slice.shape[2] // 1024)]
     cdata = unpack_4bit_complex(sample)
     powers = np.mean(np.abs(cdata) ** 2, axis=(1, 2))
     mask[powers > power_thresh] = 1
@@ -172,7 +183,7 @@ def simulate_24h_beam_tracker(
 
     # 1. Ingest Baseband Data & Analyze Health
     print(f"\n[1/4] Ingesting Real Site Baseband Snapshot: {h5_path.name}...")
-    file_size_gb = os.path.getsize(h5_path) / (1024 ** 3)
+    file_size_gb = os.path.getsize(h5_path) / (1024**3)
     print(f"  -> File Size on Disk: {file_size_gb:.3f} GB")
 
     with h5py.File(h5_path, "r") as f:
@@ -180,7 +191,9 @@ def simulate_24h_beam_tracker(
         shape = dset.shape  # (n_ant, n_freq, n_time)
         n_ant_file, n_freq_file, n_time_file = shape
 
-        freq_start_mhz = float(f.attrs.get("freq_start_MHz", DEFAULT_FREQUENCY_START_MHZ))
+        freq_start_mhz = float(
+            f.attrs.get("freq_start_MHz", DEFAULT_FREQUENCY_START_MHZ)
+        )
         delta_freq_mhz = float(f.attrs.get("delta_freq_MHz", CHARTS_CHANNEL_WIDTH_MHZ))
         delta_time_us = float(f.attrs.get("delta_time_us", FPGA_TIME_RESOLUTION_US))
         start_utc_us = int(f.attrs.get("start_time_utc_us", 1786844242813333))
@@ -190,36 +203,52 @@ def simulate_24h_beam_tracker(
 
         raw_data = dset[:, :n_freq, :n_time]
 
-    freqs_hz = (freq_start_mhz + np.arange(n_freq, dtype=np.float64) * delta_freq_mhz) * 1e6
+    freqs_hz = (
+        freq_start_mhz + np.arange(n_freq, dtype=np.float64) * delta_freq_mhz
+    ) * 1e6
     obs_start_utc = datetime.fromtimestamp(start_utc_us / 1e6, tz=timezone.utc)
 
-    print(f"  -> Dataset Dimensions : {n_ant_file} Antennas x {n_freq} Channels x {n_time:,} Time Samples")
-    print(f"  -> Observation Start  : {obs_start_utc.isoformat()} (Carén Site Local Time)")
-    print(f"  -> Bandwidth Range    : {freq_start_mhz:.1f} MHz to {freq_start_mhz + n_freq * delta_freq_mhz:.1f} MHz")
+    print(
+        f"  -> Dataset Dimensions : {n_ant_file} Antennas x {n_freq} Channels x {n_time:,} Time Samples"
+    )
+    print(
+        f"  -> Observation Start  : {obs_start_utc.isoformat()} (Carén Site Local Time)"
+    )
+    print(
+        f"  -> Bandwidth Range    : {freq_start_mhz:.1f} MHz to {freq_start_mhz + n_freq * delta_freq_mhz:.1f} MHz"
+    )
 
     # Antenna health detection
     mask, powers = analyze_antenna_health(raw_data)
     active_ants = np.where(mask == 1)[0]
     print(f"\n[2/4] Antenna Health & Hardware Line Analysis:")
-    print(f"  -> Active / Connected Antennas : {len(active_ants)} / {n_ant_file} ({list(active_ants)})")
-    print(f"  -> Auto-Masked (Unplugged) Lines: {n_ant_file - len(active_ants)} / {n_ant_file}")
+    print(
+        f"  -> Active / Connected Antennas : {len(active_ants)} / {n_ant_file} ({list(active_ants)})"
+    )
+    print(
+        f"  -> Auto-Masked (Unplugged) Lines: {n_ant_file - len(active_ants)} / {n_ant_file}"
+    )
     for a in range(min(16, n_ant_file)):
         status_tag = "[ACTIVE] " if mask[a] else "[UNPLUGGED]"
         print(f"     Antenna #{a:02d}: Power = {powers[a]:8.3f}  {status_tag}")
 
     # 2. Compute 24-Hour Diurnal Orbit & Visibility Trajectories
-    print(f"\n[3/4] Modeling 24-Hour Diurnal Orbit & Multi-Source Tracking Kinematics...")
+    print(
+        f"\n[3/4] Modeling 24-Hour Diurnal Orbit & Multi-Source Tracking Kinematics..."
+    )
     lst_hours = np.linspace(0.0, num_hours, num_steps)
     lst_degrees = (lst_hours * 15.0) % 360.0
     ant_pos = get_antenna_positions(n_ant_file, DEFAULT_SPACING_M)
 
     # 2. Timing Cadence & Integration Window Physical Validation
     sample_cadence_us = FPGA_TIME_RESOLUTION_US  # 3.333333 us (8192 / 2457.6 MHz)
-    sample_rate_hz = 1e6 / sample_cadence_us     # 300,000 spectra/sec
+    sample_rate_hz = 1e6 / sample_cadence_us  # 300,000 spectra/sec
     integration_spectra = 320
-    integration_window_ms = integration_spectra * sample_cadence_us / 1000.0  # 1.066667 ms
-    dump_duration_ms = n_time * sample_cadence_us / 1000.0                    # 51.2 ms for 15360
-    windows_per_dump = n_time // integration_spectra                          # 48 windows
+    integration_window_ms = (
+        integration_spectra * sample_cadence_us / 1000.0
+    )  # 1.066667 ms
+    dump_duration_ms = n_time * sample_cadence_us / 1000.0  # 51.2 ms for 15360
+    windows_per_dump = n_time // integration_spectra  # 48 windows
 
     # Sidereal rate: omega_earth = 7.292115e-5 rad/s
     omega_earth_rad_s = 7.292115e-5
@@ -231,19 +260,37 @@ def simulate_24h_beam_tracker(
     max_baseline_m = (int(np.sqrt(n_ant_file)) - 1) * DEFAULT_SPACING_M
     # Max phase shift at highest frequency (e.g. 500 MHz -> lambda = 0.6m)
     highest_freq_hz = np.max(freqs_hz)
-    max_phase_shift_rad = (2.0 * np.pi * highest_freq_hz / C_LIGHT) * max_baseline_m * angular_shift_per_window_rad
+    max_phase_shift_rad = (
+        (2.0 * np.pi * highest_freq_hz / C_LIGHT)
+        * max_baseline_m
+        * angular_shift_per_window_rad
+    )
     coherence_efficiency = math.cos(max_phase_shift_rad) * 100.0
 
     print(f"\n[3/5] Integration Window & Timing Cadence Physics:")
-    print(f"  -> Sampling Cadence (Delta t) : {sample_cadence_us:.6f} us ({sample_rate_hz:,.0f} spectra/sec, 8192-pt FFT @ 2457.6 MHz)")
-    print(f"  -> Integration Window (N_int) : {integration_spectra} spectra = {integration_window_ms:.4f} ms ({windows_per_dump} windows/dump)")
-    print(f"  -> Baseband Dump Time Span    : {n_time:,} spectra = {dump_duration_ms:.2f} ms of real continuous sky data")
-    print(f"  -> Sidereal Motion / Window   : {angular_shift_per_window_rad * 1e6:.3f} micro-rad ({angular_shift_per_window_rad * 3600 * 180 / np.pi:.3f} arcsec)")
-    print(f"  -> Max Intra-Window Phase Shift: {max_phase_shift_rad:.2e} rad ({math.degrees(max_phase_shift_rad):.5f}° across {max_baseline_m:.1f}m array)")
-    print(f"  -> Coherent Phase Efficiency   : {coherence_efficiency:.6f}% (>99.9999% ideal coherence)")
+    print(
+        f"  -> Sampling Cadence (Delta t) : {sample_cadence_us:.6f} us ({sample_rate_hz:,.0f} spectra/sec, 8192-pt FFT @ 2457.6 MHz)"
+    )
+    print(
+        f"  -> Integration Window (N_int) : {integration_spectra} spectra = {integration_window_ms:.4f} ms ({windows_per_dump} windows/dump)"
+    )
+    print(
+        f"  -> Baseband Dump Time Span    : {n_time:,} spectra = {dump_duration_ms:.2f} ms of real continuous sky data"
+    )
+    print(
+        f"  -> Sidereal Motion / Window   : {angular_shift_per_window_rad * 1e6:.3f} micro-rad ({angular_shift_per_window_rad * 3600 * 180 / np.pi:.3f} arcsec)"
+    )
+    print(
+        f"  -> Max Intra-Window Phase Shift: {max_phase_shift_rad:.2e} rad ({math.degrees(max_phase_shift_rad):.5f}° across {max_baseline_m:.1f}m array)"
+    )
+    print(
+        f"  -> Coherent Phase Efficiency   : {coherence_efficiency:.6f}% (>99.9999% ideal coherence)"
+    )
 
     # 3. Compute 24-Hour Diurnal Orbit & Visibility Trajectories
-    print(f"\n[4/5] Modeling 24-Hour Diurnal Orbit & Multi-Source Tracking Kinematics...")
+    print(
+        f"\n[4/5] Modeling 24-Hour Diurnal Orbit & Multi-Source Tracking Kinematics..."
+    )
     lst_hours = np.linspace(0.0, num_hours, num_steps)
     lst_degrees = (lst_hours * 15.0) % 360.0
     ant_pos = get_antenna_positions(n_ant_file, DEFAULT_SPACING_M)
@@ -272,13 +319,15 @@ def simulate_24h_beam_tracker(
         visible_mask = np.zeros(num_steps, dtype=bool)
 
         for step_idx, lst_deg in enumerate(lst_degrees):
-            l, m, n, el, az = compute_topocentric_coordinates(ra, dec, lst_deg, CHARTS_LATITUDE_DEG)
+            l, m, n, el, az = compute_topocentric_coordinates(
+                ra, dec, lst_deg, CHARTS_LATITUDE_DEG
+            )
             l_track[step_idx] = l
             m_track[step_idx] = m
             n_track[step_idx] = n
             el_track[step_idx] = el
             az_track[step_idx] = az
-            visible = (el > 0.0)
+            visible = el > 0.0
             visible_mask[step_idx] = visible
 
             if visible:
@@ -315,12 +364,16 @@ def simulate_24h_beam_tracker(
             "transit_lst_hours": float((ra / 15.0) % 24.0),
             "peak_formed_power": float(np.max(power_track)),
         }
-        print(f"  -> {name:38s}: Transit LST = {(ra/15.0):5.2f}h, Max El = {np.max(el_track):5.1f}°, Peak Power = {np.max(power_track):.2f}")
+        print(
+            f"  -> {name:38s}: Transit LST = {(ra/15.0):5.2f}h, Max El = {np.max(el_track):5.1f}°, Peak Power = {np.max(power_track):.2f}"
+        )
 
     # Generate Dynamic Waterfall Dynamic Spectrum for the Zenith Transiting Beam
     zenith_l, zenith_m, _, _, _ = compute_topocentric_coordinates(
-        ASTRONOMICAL_CATALOG[4]["ra_deg"], ASTRONOMICAL_CATALOG[4]["dec_deg"],
-        ASTRONOMICAL_CATALOG[4]["ra_deg"], CHARTS_LATITUDE_DEG
+        ASTRONOMICAL_CATALOG[4]["ra_deg"],
+        ASTRONOMICAL_CATALOG[4]["dec_deg"],
+        ASTRONOMICAL_CATALOG[4]["ra_deg"],
+        CHARTS_LATITUDE_DEG,
     )
     delays_m = ant_pos[:, 0] * zenith_l + ant_pos[:, 1] * zenith_m
     phases = (2.0 * np.pi / C_LIGHT) * np.outer(delays_m, freqs_hz)
@@ -334,29 +387,68 @@ def simulate_24h_beam_tracker(
         zenith_waterfall[f_idx, :] = np.abs(formed_ft) ** 2
 
     # 4. Generate 4-Panel Visualization Dashboard
-    print(f"\n[5/5] Generating 24-Hour Astronomical Tracking & Verification Dashboard...")
+    print(
+        f"\n[5/5] Generating 24-Hour Astronomical Tracking & Verification Dashboard..."
+    )
     if save_plot_path is None:
-        save_plot_path = _kotekan_root / "test_charts" / "charts_24h_baseband_tracker_dashboard.png"
+        save_plot_path = (
+            _kotekan_root / "test_charts" / "charts_24h_baseband_tracker_dashboard.png"
+        )
 
     fig = plt.figure(figsize=(18, 12), facecolor="#0E1117")
     fig.suptitle(
         f"CHARTS 24-Hour Baseband Multi-Beam Tracker Simulation (Carén Observatory Site, Lat -33.42°)\n"
         f"Real 32-Antenna Baseband Snapshot | {n_freq} Frequencies (300.0 - {300.0+n_freq*0.3:.1f} MHz) | CUDA V5 Tracking Engine",
-        color="white", fontsize=15, fontweight="bold", y=0.97
+        color="white",
+        fontsize=15,
+        fontweight="bold",
+        y=0.97,
     )
 
     colors = ["#00FFCC", "#FF7043", "#AB47BC", "#FFEE58", "#42A5F5"]
 
     # Panel 1: 2D Topocentric Sky Map (Direction Cosines l vs m)
     ax1 = fig.add_subplot(2, 2, 1, facecolor="#161B22")
-    ax1.set_title("24-Hour Topocentric Sky Trajectories (l, m Space)", color="white", fontsize=12, fontweight="bold")
+    ax1.set_title(
+        "24-Hour Topocentric Sky Trajectories (l, m Space)",
+        color="white",
+        fontsize=12,
+        fontweight="bold",
+    )
     # Draw horizon circle
     theta = np.linspace(0, 2 * np.pi, 200)
-    ax1.plot(np.sin(theta), np.cos(theta), color="#8B949E", linestyle="--", linewidth=1.5, label="Horizon (El = 0°)")
+    ax1.plot(
+        np.sin(theta),
+        np.cos(theta),
+        color="#8B949E",
+        linestyle="--",
+        linewidth=1.5,
+        label="Horizon (El = 0°)",
+    )
     # Draw 30° and 60° elevation contours
-    ax1.plot(np.cos(np.radians(30)) * np.sin(theta), np.cos(np.radians(30)) * np.cos(theta), color="#30363D", linestyle=":", label="El = 30°")
-    ax1.plot(np.cos(np.radians(60)) * np.sin(theta), np.cos(np.radians(60)) * np.cos(theta), color="#30363D", linestyle="-.", label="El = 60°")
-    ax1.scatter([0], [0], color="#FFEE58", marker="+", s=150, linewidth=2, label="Zenith (n=1.0)")
+    ax1.plot(
+        np.cos(np.radians(30)) * np.sin(theta),
+        np.cos(np.radians(30)) * np.cos(theta),
+        color="#30363D",
+        linestyle=":",
+        label="El = 30°",
+    )
+    ax1.plot(
+        np.cos(np.radians(60)) * np.sin(theta),
+        np.cos(np.radians(60)) * np.cos(theta),
+        color="#30363D",
+        linestyle="-.",
+        label="El = 60°",
+    )
+    ax1.scatter(
+        [0],
+        [0],
+        color="#FFEE58",
+        marker="+",
+        s=150,
+        linewidth=2,
+        label="Zenith (n=1.0)",
+    )
 
     for idx, (src_name, data) in enumerate(source_results.items()):
         l_arr = np.array(data["l"])
@@ -369,7 +461,14 @@ def simulate_24h_beam_tracker(
             ax1.plot(l_arr[vis], m_arr[vis], color=c, linewidth=2.5, label=short_name)
             # Mark transit / peak position
             peak_idx = np.argmax(data["elevation"])
-            ax1.scatter(l_arr[peak_idx], m_arr[peak_idx], color=c, edgecolors="white", s=80, zorder=5)
+            ax1.scatter(
+                l_arr[peak_idx],
+                m_arr[peak_idx],
+                color=c,
+                edgecolors="white",
+                s=80,
+                zorder=5,
+            )
 
     ax1.set_xlabel("East-West Direction Cosine (l)", color="#C9D1D9", fontsize=10)
     ax1.set_ylabel("North-South Direction Cosine (m)", color="#C9D1D9", fontsize=10)
@@ -378,19 +477,38 @@ def simulate_24h_beam_tracker(
     ax1.tick_params(colors="#8B949E")
     for spine in ax1.spines.values():
         spine.set_color("#30363D")
-    ax1.legend(loc="upper right", facecolor="#161B22", edgecolor="#30363D", labelcolor="#C9D1D9", fontsize=8)
+    ax1.legend(
+        loc="upper right",
+        facecolor="#161B22",
+        edgecolor="#30363D",
+        labelcolor="#C9D1D9",
+        fontsize=8,
+    )
     ax1.grid(True, color="#21262D", linestyle="--", alpha=0.6)
 
     # Panel 2: 24-Hour Elevation Angle vs LST
     ax2 = fig.add_subplot(2, 2, 2, facecolor="#161B22")
-    ax2.set_title("24-Hour Visibility & Elevation Profiles over Carén", color="white", fontsize=12, fontweight="bold")
+    ax2.set_title(
+        "24-Hour Visibility & Elevation Profiles over Carén",
+        color="white",
+        fontsize=12,
+        fontweight="bold",
+    )
     for idx, (src_name, data) in enumerate(source_results.items()):
         el_arr = np.array(data["elevation"])
         c = colors[idx % len(colors)]
         short_name = src_name.split("(")[0].strip()
-        ax2.plot(lst_hours, el_arr, color=c, linewidth=2.0, label=f"{short_name} (Max: {data['max_elevation']:.1f}°)")
+        ax2.plot(
+            lst_hours,
+            el_arr,
+            color=c,
+            linewidth=2.0,
+            label=f"{short_name} (Max: {data['max_elevation']:.1f}°)",
+        )
 
-    ax2.axhline(0, color="#FF5252", linestyle="--", linewidth=1.2, label="Horizon Limit (0°)")
+    ax2.axhline(
+        0, color="#FF5252", linestyle="--", linewidth=1.2, label="Horizon Limit (0°)"
+    )
     ax2.axhline(45, color="#8B949E", linestyle=":", alpha=0.5)
     ax2.set_xlabel("Local Sidereal Time (LST Hours)", color="#C9D1D9", fontsize=10)
     ax2.set_ylabel("Elevation Angle (Degrees)", color="#C9D1D9", fontsize=10)
@@ -400,31 +518,61 @@ def simulate_24h_beam_tracker(
     ax2.tick_params(colors="#8B949E")
     for spine in ax2.spines.values():
         spine.set_color("#30363D")
-    ax2.legend(loc="upper right", facecolor="#161B22", edgecolor="#30363D", labelcolor="#C9D1D9", fontsize=8)
+    ax2.legend(
+        loc="upper right",
+        facecolor="#161B22",
+        edgecolor="#30363D",
+        labelcolor="#C9D1D9",
+        fontsize=8,
+    )
     ax2.grid(True, color="#21262D", linestyle="--", alpha=0.6)
 
     # Panel 3: Real Formed Beam Power Dynamics vs LST
     ax3 = fig.add_subplot(2, 2, 3, facecolor="#161B22")
-    ax3.set_title("Synthesized Multi-Beam Power Dynamics on Real Site Baseband", color="white", fontsize=12, fontweight="bold")
+    ax3.set_title(
+        "Synthesized Multi-Beam Power Dynamics on Real Site Baseband",
+        color="white",
+        fontsize=12,
+        fontweight="bold",
+    )
     for idx, (src_name, data) in enumerate(source_results.items()):
         p_arr = np.array(data["power"])
         c = colors[idx % len(colors)]
         short_name = src_name.split("(")[0].strip()
-        ax3.plot(lst_hours, p_arr, color=c, linewidth=2.0, label=f"{short_name} (Peak: {data['peak_formed_power']:.1f})")
+        ax3.plot(
+            lst_hours,
+            p_arr,
+            color=c,
+            linewidth=2.0,
+            label=f"{short_name} (Peak: {data['peak_formed_power']:.1f})",
+        )
 
     ax3.set_xlabel("Local Sidereal Time (LST Hours)", color="#C9D1D9", fontsize=10)
-    ax3.set_ylabel("Coherent Beam Power (Arbitrary Scale)", color="#C9D1D9", fontsize=10)
+    ax3.set_ylabel(
+        "Coherent Beam Power (Arbitrary Scale)", color="#C9D1D9", fontsize=10
+    )
     ax3.set_xlim(0, 24)
     ax3.set_xticks(np.arange(0, 25, 4))
     ax3.tick_params(colors="#8B949E")
     for spine in ax3.spines.values():
         spine.set_color("#30363D")
-    ax3.legend(loc="upper right", facecolor="#161B22", edgecolor="#30363D", labelcolor="#C9D1D9", fontsize=8)
+    ax3.legend(
+        loc="upper right",
+        facecolor="#161B22",
+        edgecolor="#30363D",
+        labelcolor="#C9D1D9",
+        fontsize=8,
+    )
     ax3.grid(True, color="#21262D", linestyle="--", alpha=0.6)
 
     # Panel 4: Dynamic Waterfall Spectrum (Frequency vs Time for Tracked Zenith Beam)
     ax4 = fig.add_subplot(2, 2, 4, facecolor="#161B22")
-    ax4.set_title("Tracked Beam Dynamic Spectrum Waterfall (Real Baseband Ingest)", color="white", fontsize=12, fontweight="bold")
+    ax4.set_title(
+        "Tracked Beam Dynamic Spectrum Waterfall (Real Baseband Ingest)",
+        color="white",
+        fontsize=12,
+        fontweight="bold",
+    )
     # Subsample time for plot rendering
     t_plot_samples = min(2048, zenith_waterfall.shape[1])
     wf_plot = zenith_waterfall[:, :t_plot_samples]
@@ -455,14 +603,18 @@ def simulate_24h_beam_tracker(
 
     plt.tight_layout(rect=[0.02, 0.02, 0.98, 0.94])
     save_plot_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_plot_path, dpi=180, facecolor=fig.get_facecolor(), edgecolor="none")
+    fig.savefig(
+        save_plot_path, dpi=180, facecolor=fig.get_facecolor(), edgecolor="none"
+    )
     plt.close(fig)
 
     print(f"  -> Saved 24-Hour Tracking Dashboard Plot: {save_plot_path}")
 
     # Save JSON summary report
     if save_json_path is None:
-        save_json_path = _kotekan_root / "test_charts" / "charts_24h_simulation_report.json"
+        save_json_path = (
+            _kotekan_root / "test_charts" / "charts_24h_simulation_report.json"
+        )
 
     report = {
         "dataset": {
@@ -501,14 +653,31 @@ def simulate_24h_beam_tracker(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CHARTS 24-Hour Baseband Beam Tracker Simulation")
+    parser = argparse.ArgumentParser(
+        description="CHARTS 24-Hour Baseband Beam Tracker Simulation"
+    )
     default_h5 = get_default_charts_h5_path()
-    parser.add_argument("--h5-path", type=Path, default=default_h5, help="Path to baseband HDF5 file")
-    parser.add_argument("--n-time", type=int, default=15360, help="Time samples per dump")
-    parser.add_argument("--n-freq", type=int, default=336, help="Frequency channels (e.g. 84, 168, 336, 672)")
-    parser.add_argument("--steps", type=int, default=96, help="Number of sidereal steps across 24h")
-    parser.add_argument("--out-plot", type=Path, default=None, help="Output plot filename")
-    parser.add_argument("--out-json", type=Path, default=None, help="Output JSON report filename")
+    parser.add_argument(
+        "--h5-path", type=Path, default=default_h5, help="Path to baseband HDF5 file"
+    )
+    parser.add_argument(
+        "--n-time", type=int, default=15360, help="Time samples per dump"
+    )
+    parser.add_argument(
+        "--n-freq",
+        type=int,
+        default=336,
+        help="Frequency channels (e.g. 84, 168, 336, 672)",
+    )
+    parser.add_argument(
+        "--steps", type=int, default=96, help="Number of sidereal steps across 24h"
+    )
+    parser.add_argument(
+        "--out-plot", type=Path, default=None, help="Output plot filename"
+    )
+    parser.add_argument(
+        "--out-json", type=Path, default=None, help="Output JSON report filename"
+    )
     args = parser.parse_args()
 
     simulate_24h_beam_tracker(

@@ -4,10 +4,10 @@
 #include "DataType.hpp"
 #include "chartsConstants.hpp"
 
-#include <cuda_runtime.h>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cuda_runtime.h>
 #include <string>
 #include <vector>
 
@@ -28,11 +28,16 @@ enum class AntennaHealthStatus : std::uint8_t {
 
 inline const char* antenna_health_status_to_string(AntennaHealthStatus s) {
     switch (s) {
-        case AntennaHealthStatus::HEALTHY: return "HEALTHY";
-        case AntennaHealthStatus::DEAD: return "DEAD";
-        case AntennaHealthStatus::SATURATED: return "SATURATED";
-        case AntennaHealthStatus::MANUAL_MASK: return "MANUAL_MASK";
-        default: return "UNKNOWN";
+        case AntennaHealthStatus::HEALTHY:
+            return "HEALTHY";
+        case AntennaHealthStatus::DEAD:
+            return "DEAD";
+        case AntennaHealthStatus::SATURATED:
+            return "SATURATED";
+        case AntennaHealthStatus::MANUAL_MASK:
+            return "MANUAL_MASK";
+        default:
+            return "UNKNOWN";
     }
 }
 
@@ -54,12 +59,16 @@ struct AntennaHealthMetrics {
  */
 struct AntennaMaskConfig {
     bool auto_detect_enabled = true;
-    bool blank_voltages_enabled = true;   ///< Level 1: In-place zeroing of bad antennas in GPU memory
-    float dead_power_threshold = 5.0f;    ///< Mean power <= this value classified as DEAD (open ADC noise floor ~0.25)
-    float sat_power_threshold = 80.0f;    ///< Mean power >= this value classified as SATURATED
-    float clip_fraction_threshold = 0.15f;///< Clipping fraction >= this value classified as SATURATED (15%)
-    std::uint16_t revival_frames = 5;     ///< Required consecutive healthy frames to revive a masked antenna
-    std::size_t sample_stride = 1;        ///< Stride over spectra (1 = inspect 100% of data, 4 = inspect 25%)
+    bool blank_voltages_enabled = true; ///< Level 1: In-place zeroing of bad antennas in GPU memory
+    float dead_power_threshold =
+        5.0f; ///< Mean power <= this value classified as DEAD (open ADC noise floor ~0.25)
+    float sat_power_threshold = 80.0f; ///< Mean power >= this value classified as SATURATED
+    float clip_fraction_threshold =
+        0.15f; ///< Clipping fraction >= this value classified as SATURATED (15%)
+    std::uint16_t revival_frames =
+        5; ///< Required consecutive healthy frames to revive a masked antenna
+    std::size_t sample_stride =
+        1; ///< Stride over spectra (1 = inspect 100% of data, 4 = inspect 25%)
 
     std::array<std::uint8_t, MAX_MASK_ANTENNAS> manual_mask; ///< 1 = enabled, 0 = masked
 
@@ -85,15 +94,11 @@ struct AntennaMaskConfig {
  * @param sample_stride      Subsampling stride across spectra
  * @param stream             CUDA stream
  */
-void launch_inspect_antenna_health(
-    const int4x2_t* __restrict__ d_voltages,
-    float* __restrict__ d_antenna_powers,
-    std::uint32_t* __restrict__ d_antenna_clips,
-    std::size_t n_time,
-    std::size_t n_freq,
-    std::size_t n_ant,
-    std::size_t sample_stride,
-    cudaStream_t stream);
+void launch_inspect_antenna_health(const int4x2_t* __restrict__ d_voltages,
+                                   float* __restrict__ d_antenna_powers,
+                                   std::uint32_t* __restrict__ d_antenna_clips, std::size_t n_time,
+                                   std::size_t n_freq, std::size_t n_ant, std::size_t sample_stride,
+                                   cudaStream_t stream);
 
 /**
  * @brief Blanks (zeroes) voltages in-place for specified bad antenna indices.
@@ -106,39 +111,27 @@ void launch_inspect_antenna_health(
  * @param n_ant              Number of antenna elements
  * @param stream             CUDA stream
  */
-void launch_zero_bad_antennas(
-    int4x2_t* __restrict__ d_voltages,
-    const int* __restrict__ d_bad_antennas,
-    int num_bad_antennas,
-    std::size_t total_spectra,
-    std::size_t n_ant,
-    cudaStream_t stream);
+void launch_zero_bad_antennas(int4x2_t* __restrict__ d_voltages,
+                              const int* __restrict__ d_bad_antennas, int num_bad_antennas,
+                              std::size_t total_spectra, std::size_t n_ant, cudaStream_t stream);
 
 /**
  * @brief Extracts the alive antennas from the full voltage buffer into a compact
  *        contiguous baseband buffer for disk streaming and recording.
  */
-void launch_extract_alive_antennas(
-    const int4x2_t* __restrict__ d_voltages,
-    int4x2_t* __restrict__ d_alive_voltages,
-    const int* __restrict__ d_alive_antennas,
-    int num_to_extract,
-    int max_alive_antennas,
-    std::size_t total_spectra,
-    std::size_t n_ant,
-    cudaStream_t stream);
+void launch_extract_alive_antennas(const int4x2_t* __restrict__ d_voltages,
+                                   int4x2_t* __restrict__ d_alive_voltages,
+                                   const int* __restrict__ d_alive_antennas, int num_to_extract,
+                                   int max_alive_antennas, std::size_t total_spectra,
+                                   std::size_t n_ant, cudaStream_t stream);
 
 /**
  * @brief Injects simulated antenna faults (dead=0, saturated=+/-7, -8) directly into
  *        device voltage buffer in microseconds for testing & chaos engineering.
  */
-void launch_inject_faults(
-    int4x2_t* __restrict__ d_voltages,
-    const std::uint8_t* __restrict__ d_fault_types,
-    std::size_t total_spectra,
-    std::size_t n_ant,
-    unsigned int seed,
-    cudaStream_t stream);
+void launch_inject_faults(int4x2_t* __restrict__ d_voltages,
+                          const std::uint8_t* __restrict__ d_fault_types, std::size_t total_spectra,
+                          std::size_t n_ant, unsigned int seed, cudaStream_t stream);
 
 } // namespace kotekan
 

@@ -1,4 +1,5 @@
 #include "chartsMetadata.hpp"
+
 #include "factory.hpp"
 
 #include <algorithm>
@@ -6,8 +7,7 @@
 
 REGISTER_TYPE_WITH_FACTORY(metadataObject, chartsMetadata);
 
-chartsMetadata::chartsMetadata() :
-    type(kotekan::unknown_type), dims(-1), offset(0) {
+chartsMetadata::chartsMetadata() : type(kotekan::unknown_type), dims(-1), offset(0) {
 
     name[0] = '\0';
 
@@ -118,7 +118,6 @@ struct chartsMetadataFormat {
     timeval first_packet_recv_time;
 
     uint64_t time0_fpga;
-
 };
 
 size_t chartsMetadata::get_serialized_size() {
@@ -131,8 +130,7 @@ size_t chartsMetadata::serialize(char* bytes) {
 
     fmt->frame_counter = has_frame_counter() ? get_frame_counter() : -1;
     fmt->fpga_seq_num = has_fpga_seq_num() ? get_fpga_seq_num() : -1;
-    fmt->time_downsampling_fpga =
-        has_time_downsampling_fpga() ? get_time_downsampling_fpga() : -1;
+    fmt->time_downsampling_fpga = has_time_downsampling_fpga() ? get_time_downsampling_fpga() : -1;
 
     memcpy(fmt->name, name, sizeof(name));
     fmt->type = static_cast<int32_t>(type);
@@ -154,8 +152,7 @@ size_t chartsMetadata::serialize(char* bytes) {
         fmt->nfreq = 0;
     }
 
-    fmt->lost_timesamples =
-        has_lost_timesamples() ? get_lost_timesamples() : -1;
+    fmt->lost_timesamples = has_lost_timesamples() ? get_lost_timesamples() : -1;
 
     fmt->time0_fpga = has_time0_fpga() ? get_time0_fpga() : 0;
 
@@ -167,8 +164,10 @@ size_t chartsMetadata::set_from_bytes(const char* bytes, size_t length) {
     assert(length >= sizeof(chartsMetadataFormat));
     const auto* fmt = reinterpret_cast<const chartsMetadataFormat*>(bytes);
 
-    if (fmt->frame_counter != -1) set_frame_counter(fmt->frame_counter);
-    if (fmt->fpga_seq_num != -1) set_fpga_seq_num(fmt->fpga_seq_num);
+    if (fmt->frame_counter != -1)
+        set_frame_counter(fmt->frame_counter);
+    if (fmt->fpga_seq_num != -1)
+        set_fpga_seq_num(fmt->fpga_seq_num);
     if (fmt->time_downsampling_fpga != -1)
         set_time_downsampling_fpga(fmt->time_downsampling_fpga);
 
@@ -185,9 +184,7 @@ size_t chartsMetadata::set_from_bytes(const char* bytes, size_t length) {
     offset = fmt->offset;
 
     if (fmt->nfreq > 0) {
-        set_coarse_freq(std::vector<int>(
-            fmt->coarse_freq,
-            fmt->coarse_freq + fmt->nfreq));
+        set_coarse_freq(std::vector<int>(fmt->coarse_freq, fmt->coarse_freq + fmt->nfreq));
     }
 
     if (fmt->lost_timesamples != -1)
@@ -203,7 +200,7 @@ size_t chartsMetadata::set_from_bytes(const char* bytes, size_t length) {
 }
 nlohmann::json chartsMetadata::to_json() {
     nlohmann::json j;
-    
+
     j["max_dim"] = CHARTS_META_MAX_DIM;
     j["max_dimname"] = CHARTS_META_MAX_DIMNAME;
     j["max_freq"] = CHARTS_META_MAX_FREQ;
@@ -216,10 +213,15 @@ nlohmann::json chartsMetadata::to_json() {
     j["dim"] = std::vector<int>(dim, dim + dims);
     j["stride"] = std::vector<int64_t>(stride, stride + dims);
 
-    if (has_fpga_seq_num()) j["fpga_seq_num"] = get_fpga_seq_num();
-    if (has_frame_counter()) j["frame_counter"] = get_frame_counter();
-    if (has_coarse_freq()) j["coarse_freq"] = get_coarse_freq();
-    if (has_lost_timesamples()) j["lost_timesamples"] = get_lost_timesamples();
-    if (has_time0_fpga()) j["time0_fpga"] = get_time0_fpga();
+    if (has_fpga_seq_num())
+        j["fpga_seq_num"] = get_fpga_seq_num();
+    if (has_frame_counter())
+        j["frame_counter"] = get_frame_counter();
+    if (has_coarse_freq())
+        j["coarse_freq"] = get_coarse_freq();
+    if (has_lost_timesamples())
+        j["lost_timesamples"] = get_lost_timesamples();
+    if (has_time0_fpga())
+        j["time0_fpga"] = get_time0_fpga();
     return j;
 }

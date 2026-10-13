@@ -2,18 +2,19 @@
 
 #include "StageFactory.hpp"
 #include "kotekanLogging.hpp"
+
 #include "json.hpp"
 
-#include <fstream>
-#include <filesystem>
-#include <functional>
 #include <chrono>
+#include <cmath>
 #include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <functional>
 #include <iomanip>
+#include <set>
 #include <sstream>
 #include <system_error>
-#include <cmath>
-#include <set>
 
 using kotekan::Config;
 using kotekan::Stage;
@@ -47,14 +48,11 @@ runMetadataWriter::runMetadataWriter(Config& config, const std::string& unique_n
                                      kotekan::bufferContainer& buffer_container) :
     Stage(config, unique_name, buffer_container, std::bind(&runMetadataWriter::main_thread, this)),
     _base_dir(config.get<std::string>(unique_name, "base_dir")),
-    _config_file(config.get_config_file()),
-    _config_snapshot(config.get_full_config_json().dump(2)),
+    _config_file(config.get_config_file()), _config_snapshot(config.get_full_config_json().dump(2)),
     _num_antennas(config.get_default<int>(unique_name, "num_antennas",
                                           config.get_default<int>("/", "num_elements", 0))),
-    _signal_antennas(
-        config.get_default<std::vector<int>>(unique_name, "signal_antennas", {})),
-    _position_outliers(
-        config.get_default<std::vector<int>>(unique_name, "position_outliers", {})),
+    _signal_antennas(config.get_default<std::vector<int>>(unique_name, "signal_antennas", {})),
+    _position_outliers(config.get_default<std::vector<int>>(unique_name, "position_outliers", {})),
     _position_overrides(
         config.get_default<std::vector<nlohmann::json>>(unique_name, "position_overrides", {})) {
 
@@ -68,9 +66,8 @@ runMetadataWriter::runMetadataWriter(Config& config, const std::string& unique_n
                     _num_antennas - 1);
     for (const auto& override : _position_overrides) {
         if (!override.is_object() || !override.contains("antenna")
-            || !override["antenna"].is_number_integer()
-            || !override.contains("position_m") || !override["position_m"].is_array()
-            || override["position_m"].size() != 3) {
+            || !override["antenna"].is_number_integer() || !override.contains("position_m")
+            || !override["position_m"].is_array() || override["position_m"].size() != 3) {
             FATAL_ERROR("runMetadataWriter: each position_overrides entry must contain integer "
                         "antenna and a three-element position_m array");
         }

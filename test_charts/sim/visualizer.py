@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.animation as animation
 from matplotlib.gridspec import GridSpec
@@ -52,13 +53,19 @@ def plot_casm_correlation_matrix(
     selected_files = corr_files[::step][:max_time_samples]
     num_times = len(selected_files)
 
-    freqs_mhz = DEFAULT_FREQUENCY_START_MHZ + np.arange(num_channels) * CHARTS_CHANNEL_WIDTH_MHZ
+    freqs_mhz = (
+        DEFAULT_FREQUENCY_START_MHZ + np.arange(num_channels) * CHARTS_CHANNEL_WIDTH_MHZ
+    )
     time_s = np.linspace(0, duration_s, num_times)
 
     # Pre-allocate visibility cube: (times, freqs, ant_i, ant_j)
-    v_cube = np.zeros((num_times, num_channels, num_antennas, num_antennas), dtype=np.complex64)
+    v_cube = np.zeros(
+        (num_times, num_channels, num_antennas, num_antennas), dtype=np.complex64
+    )
     for t_idx, fpath in enumerate(selected_files):
-        vis = load_astron_correlator_dump(fpath, num_elements=64, num_channels=num_channels)
+        vis = load_astron_correlator_dump(
+            fpath, num_elements=64, num_channels=num_channels
+        )
         v_cube[t_idx] = vis[:, :num_antennas, :num_antennas]
 
     # Create upper triangular grid figure
@@ -136,7 +143,9 @@ def plot_correlator_waterfalls(
     selected_files = corr_files[::step][:max_time_samples]
     num_times = len(selected_files)
 
-    freqs_mhz = DEFAULT_FREQUENCY_START_MHZ + np.arange(num_channels) * CHARTS_CHANNEL_WIDTH_MHZ
+    freqs_mhz = (
+        DEFAULT_FREQUENCY_START_MHZ + np.arange(num_channels) * CHARTS_CHANNEL_WIDTH_MHZ
+    )
     time_s = np.linspace(0, duration_s, num_times)
     t_extent = [time_s[0], time_s[-1], freqs_mhz[0], freqs_mhz[-1]]
 
@@ -151,7 +160,9 @@ def plot_correlator_waterfalls(
     long_wf = np.zeros((num_channels, num_times), dtype=np.float32)
 
     for t_idx, fpath in enumerate(selected_files):
-        vis = load_astron_correlator_dump(fpath, num_elements=num_elements, num_channels=num_channels)
+        vis = load_astron_correlator_dump(
+            fpath, num_elements=num_elements, num_channels=num_channels
+        )
         auto_wf[:, t_idx] = np.mean(np.real(np.diagonal(vis, axis1=1, axis2=2)), axis=1)
         short_wf[:, t_idx] = np.real(vis[:, 0, 1])
         diag_wf[:, t_idx] = np.real(vis[:, 0, min(9, num_elements - 1)])
@@ -161,7 +172,9 @@ def plot_correlator_waterfalls(
     gs = GridSpec(2, 2, figure=fig, hspace=0.28, wspace=0.2)
 
     ax1 = fig.add_subplot(gs[0, 0])
-    im1 = ax1.imshow(auto_wf, origin="lower", extent=t_extent, aspect="auto", cmap="viridis")
+    im1 = ax1.imshow(
+        auto_wf, origin="lower", extent=t_extent, aspect="auto", cmap="viridis"
+    )
     ax1.set_title("Full Array Mean Auto-Power P_auto(t, f)")
     ax1.set_xlabel("Time (s)")
     ax1.set_ylabel("Frequency (MHz)")
@@ -240,6 +253,7 @@ def plot_tracker_waterfall(
         raise FileNotFoundError(f"No tracker dumps found in {tracker_dir}")
 
     from .pipeline import parse_beam_targets
+
     targets = parse_beam_targets(beam_targets_str, max_beams=max_beams)
     beam_labels = [f"Beam {t['beam']}: {t['name']}" for t in targets]
 
@@ -249,7 +263,7 @@ def plot_tracker_waterfall(
     for f_idx, fpath in enumerate(tracker_files):
         raw = np.fromfile(str(fpath), dtype=np.uint8)
         meta_size = int(np.frombuffer(raw[:4].tobytes(), dtype="<u4", count=1)[0])
-        payload = raw[4 + meta_size:]
+        payload = raw[4 + meta_size :]
         n_floats = samples_per_frame * num_freq * max_beams * 2
         raw_floats = np.frombuffer(payload, dtype="<f4", count=n_floats)
         shaped = raw_floats.reshape(samples_per_frame, num_freq, max_beams, 2)

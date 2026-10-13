@@ -1,3 +1,4 @@
+---
 # ==============================================================================
 # CHARTS 64-Antenna Live DPDK Ingest & Real-Time GPU DIRECT Beam Tracker Pipeline
 # with BiSLC Sidelobe Unmixing and Real-Time Transient Detection Ring Buffering
@@ -46,317 +47,317 @@ sizeof_complex_float: 8           # float2 (4-byte real + 4-byte imag) per forme
 # Metadata Pool
 # ------------------------------------------------------------------------------
 main_pool:
-  kotekan_metadata_pool: chartsMetadata
-  num_metadata_objects: buffer_depth * 15
+    kotekan_metadata_pool: chartsMetadata
+    num_metadata_objects: buffer_depth * 15
 
 # ------------------------------------------------------------------------------
 # Host Buffer Definitions
 # ------------------------------------------------------------------------------
 network_capture_buf_0:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: bytes_per_dataset * num_elements # ~330.3 MB per frame
-  numa_node: 0
-  metadata_pool: main_pool
-  zero_new_frames: true
-  mlock_frames: false
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: bytes_per_dataset * num_elements # ~330.3 MB per frame
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
 
 mask_buffer_zeros_0:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: samples_per_data_set
-  numa_node: 0
-  metadata_pool: main_pool
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set
+    numa_node: 0
+    metadata_pool: main_pool
 
 network_capture_buf_1:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: bytes_per_dataset * num_elements # ~330.3 MB per frame
-  numa_node: 0
-  metadata_pool: main_pool
-  zero_new_frames: true
-  mlock_frames: false
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: bytes_per_dataset * num_elements # ~330.3 MB per frame
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
 
 mask_buffer_zeros_1:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: samples_per_data_set
-  numa_node: 0
-  metadata_pool: main_pool
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set
+    numa_node: 0
+    metadata_pool: main_pool
 
 host_formed_beams_buffer_0:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float # ~82.58 MB
-  numa_node: 0
-  metadata_pool: main_pool
-  zero_new_frames: true
-  mlock_frames: false
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float # ~82.58 MB
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
 
 host_formed_beams_buffer_1:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float # ~82.58 MB
-  numa_node: 0
-  metadata_pool: main_pool
-  zero_new_frames: true
-  mlock_frames: false
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float # ~82.58 MB
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
 
 
 # ------------------------------------------------------------------------------
 # Network Ingest Stage: DPDK Core
 # ------------------------------------------------------------------------------
 dpdk:
-  kotekan_stage: dpdkCore
-  lcore_cpu_map: [3, 5]
-  main_lcore_cpu: 4
-  lcore_port_map:
-    - [0]
-    - [1]
-  max_rx_pkt_len: 9000
-  num_mbufs: 9600
-  mbuf_data_size: 9216
-  startup_sleep: 40                 # 40s wait for Intel E810 PHY/link stabilization
+    kotekan_stage: dpdkCore
+    lcore_cpu_map: [3, 5]
+    main_lcore_cpu: 4
+    lcore_port_map:
+        - [0]
+        - [1]
+    max_rx_pkt_len: 9000
+    num_mbufs: 9600
+    mbuf_data_size: 9216
+    startup_sleep: 40               # 40s wait for Intel E810 PHY/link stabilization
 
-  handlers:
-    - dpdk_handler: rfsocHandlerShuffle
-      out_buffer: network_capture_buf_0
-      alignment: 15360
-      mask_buf: mask_buffer_zeros_0
-      first_subband: 0
-      coarse_freq_start: 0
-      num_local_freq: 336
+    handlers:
+        - dpdk_handler: rfsocHandlerShuffle
+          out_buffer: network_capture_buf_0
+          alignment: 15360
+          mask_buf: mask_buffer_zeros_0
+          first_subband: 0
+          coarse_freq_start: 0
+          num_local_freq: 336
 
-    - dpdk_handler: rfsocHandlerShuffle
-      out_buffer: network_capture_buf_1
-      alignment: 15360
-      mask_buf: mask_buffer_zeros_1
-      first_subband: 2
-      coarse_freq_start: 336
-      num_local_freq: 336
+        - dpdk_handler: rfsocHandlerShuffle
+          out_buffer: network_capture_buf_1
+          alignment: 15360
+          mask_buf: mask_buffer_zeros_1
+          first_subband: 2
+          coarse_freq_start: 336
+          num_local_freq: 336
 
 # ------------------------------------------------------------------------------
 # Dropped Packet Zeroing Stages
 # ------------------------------------------------------------------------------
 zero_samples_0:
-  kotekan_stage: zeroSamples
-  out_buf: network_capture_buf_0
-  lost_samples_buf: mask_buffer_zeros_0
-  zero_value: 0
-  sample_size: 21504
+    kotekan_stage: zeroSamples
+    out_buf: network_capture_buf_0
+    lost_samples_buf: mask_buffer_zeros_0
+    zero_value: 0
+    sample_size: 21504
 
 zero_samples_1:
-  kotekan_stage: zeroSamples
-  out_buf: network_capture_buf_1
-  lost_samples_buf: mask_buffer_zeros_1
-  zero_value: 0
-  sample_size: 21504
+    kotekan_stage: zeroSamples
+    out_buf: network_capture_buf_1
+    lost_samples_buf: mask_buffer_zeros_1
+    zero_value: 0
+    sample_size: 21504
 
 # ------------------------------------------------------------------------------
 # GPU Pipeline: Masking -> Direct Tracker -> BiSLC -> Transient Trigger Monitor
 # ------------------------------------------------------------------------------
 gpu:
-  profiling: false
+    profiling: false
 
   # Command Pipeline for Stream 0 (Frequencies 0..335, 300.0 - 400.5 MHz)
-  commands_0: &command_list_0
-    - name: cudaInputData
-      in_buf: host_voltage
-      gpu_mem: voltage_0
-    - name: cudaSyncInput
+    commands_0: &command_list_0
+        - name: cudaInputData
+          in_buf: host_voltage
+          gpu_mem: voltage_0
+        - name: cudaSyncInput
 
     # Real-Time Automatic Dead & Saturated Antenna Detection/Masking
-    - name: cudaAntennaMaskCommand
-      gpu_mem_voltage: voltage_0
-      num_elements: 64
-      num_local_freq: 336
-      samples_per_data_set: 15360
-      buffer_depth: 2
-      auto_detect_enabled: true
-      blank_voltages_enabled: false
-      dead_power_threshold: 5.0
-      sat_power_threshold: 80.0
-      clip_fraction_threshold: 0.15
-      revival_frames: 5
+        - name: cudaAntennaMaskCommand
+          gpu_mem_voltage: voltage_0
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          buffer_depth: 2
+          auto_detect_enabled: true
+          blank_voltages_enabled: false
+          dead_power_threshold: 5.0
+          sat_power_threshold: 80.0
+          clip_fraction_threshold: 0.15
+          revival_frames: 5
 
     # Direct Fused Multi-Beam Tracker Kernel with Sub-Frame Phase Interpolation
-    - name: cudaDirectBeamTrackerCommand
-      gpu_mem_voltage: voltage_0
-      gpu_mem_formed_beams: formed_beams_0
-      num_elements: 64
-      num_local_freq: 336
-      samples_per_data_set: 15360
-      spacing_m: 0.6
-      max_beams: 2
-      initial_active_beams: 2
-      buffer_depth: 2
-      time_chunk_size: 256
-      time_unroll: 4
-      beam_tile_size: 4
-      enable_cuda_graph: false
-      site_lat_deg: -33.4211146
-      site_lon_deg: -70.8634710
-      site_alt_m: 458.0
-      freq_start_hz: 300000000.0
-      freq_step_hz: 300000.0
+        - name: cudaDirectBeamTrackerCommand
+          gpu_mem_voltage: voltage_0
+          gpu_mem_formed_beams: formed_beams_0
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          spacing_m: 0.6
+          max_beams: 2
+          initial_active_beams: 2
+          buffer_depth: 2
+          time_chunk_size: 256
+          time_unroll: 4
+          beam_tile_size: 4
+          enable_cuda_graph: false
+          site_lat_deg: -33.4211146
+          site_lon_deg: -70.8634710
+          site_alt_m: 458.0
+          freq_start_hz: 300000000.0
+          freq_step_hz: 300000.0
       # Beam 0: Target Beam (Galactic Center Sgr A*)
-      source_ra_deg: 266.4168
-      source_dec_deg: -29.0078
+          source_ra_deg: 266.4168
+          source_dec_deg: -29.0078
       # Beam 1: Off-Axis Reference Beam (Vela Pulsar PSR B0833-45)
-      source_ra_deg_1: 128.8361
-      source_dec_deg_1: -45.1764
+          source_ra_deg_1: 128.8361
+          source_dec_deg_1: -45.1764
 
     # Real-Time Joint Matrix Unmixing (BiSLC Sidelobe Cancellation - In-Place)
-    - name: cudaBiSLCCommand
-      gpu_mem_formed_beams: formed_beams_0
-      gpu_mem_cleaned_beams: formed_beams_0
-      num_elements: 64
-      num_local_freq: 336
-      samples_per_data_set: 15360
-      spacing_m: 0.6
-      max_beams: 2
-      initial_active_beams: 2
-      buffer_depth: 2
-      diagonal_loading: 1.0e-4
-      enabled: true
-      freq_start_hz: 300000000.0
-      freq_step_hz: 300000.0
+        - name: cudaBiSLCCommand
+          gpu_mem_formed_beams: formed_beams_0
+          gpu_mem_cleaned_beams: formed_beams_0
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          spacing_m: 0.6
+          max_beams: 2
+          initial_active_beams: 2
+          buffer_depth: 2
+          diagonal_loading: 1.0e-4
+          enabled: true
+          freq_start_hz: 300000000.0
+          freq_step_hz: 300000.0
 
     # Real-Time Transient Trigger & VRAM Circular Buffer Dump Node
-    - name: cudaTransientTriggerCommand
-      gpu_mem_cleaned_beams: formed_beams_0
-      num_local_freq: 336
-      samples_per_data_set: 15360
-      max_beams: 2
-      buffer_depth: 2
-      ring_buffer_depth: 16
-      pre_trigger_frames: 4
-      post_trigger_frames: 4
-      sk_threshold: 0.08
-      rfi_threshold: 0.30
-      min_flagged_channels: 8
-      dump_directory: "/data/tracker/tracker_64ant/transient_candidates/stream_0"
-      auto_dump_enabled: true
-      cooldown_frames: 200              # Refractory holdoff: ~10.2 seconds between dumps
-      min_free_disk_gb: 20              # Hard safety floor: abort if free space < 20 GB
-      max_auto_dumps: 10                # Session ceiling: max 10 auto-dumps before pausing
-      enabled: true
+        - name: cudaTransientTriggerCommand
+          gpu_mem_cleaned_beams: formed_beams_0
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          max_beams: 2
+          buffer_depth: 2
+          ring_buffer_depth: 16
+          pre_trigger_frames: 4
+          post_trigger_frames: 4
+          sk_threshold: 0.08
+          rfi_threshold: 0.30
+          min_flagged_channels: 8
+          dump_directory: "/data/tracker/tracker_64ant/transient_candidates/stream_0"
+          auto_dump_enabled: true
+          cooldown_frames: 200          # Refractory holdoff: ~10.2 seconds between dumps
+          min_free_disk_gb: 20          # Hard safety floor: abort if free space < 20 GB
+          max_auto_dumps: 10            # Session ceiling: max 10 auto-dumps before pausing
+          enabled: true
 
-    - name: cudaSyncOutput
-    - name: cudaOutputData
-      in_buf: host_voltage
-      gpu_mem: formed_beams_0
-      out_buf: host_formed_beams
+        - name: cudaSyncOutput
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: formed_beams_0
+          out_buf: host_formed_beams
 
   # Command Pipeline for Stream 1 (Frequencies 336..671, 400.8 - 501.3 MHz)
-  commands_1: &command_list_1
-    - name: cudaInputData
-      in_buf: host_voltage
-      gpu_mem: voltage_1
-    - name: cudaSyncInput
+    commands_1: &command_list_1
+        - name: cudaInputData
+          in_buf: host_voltage
+          gpu_mem: voltage_1
+        - name: cudaSyncInput
 
     # Real-Time Automatic Dead & Saturated Antenna Detection/Masking
-    - name: cudaAntennaMaskCommand
-      gpu_mem_voltage: voltage_1
-      num_elements: 64
-      num_local_freq: 336
-      samples_per_data_set: 15360
-      buffer_depth: 2
-      auto_detect_enabled: true
-      blank_voltages_enabled: false
-      dead_power_threshold: 5.0
-      sat_power_threshold: 80.0
-      clip_fraction_threshold: 0.15
-      revival_frames: 5
+        - name: cudaAntennaMaskCommand
+          gpu_mem_voltage: voltage_1
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          buffer_depth: 2
+          auto_detect_enabled: true
+          blank_voltages_enabled: false
+          dead_power_threshold: 5.0
+          sat_power_threshold: 80.0
+          clip_fraction_threshold: 0.15
+          revival_frames: 5
 
     # Direct Fused Multi-Beam Tracker Kernel with Sub-Frame Phase Interpolation
-    - name: cudaDirectBeamTrackerCommand
-      gpu_mem_voltage: voltage_1
-      gpu_mem_formed_beams: formed_beams_1
-      num_elements: 64
-      num_local_freq: 336
-      samples_per_data_set: 15360
-      spacing_m: 0.6
-      max_beams: 2
-      initial_active_beams: 2
-      buffer_depth: 2
-      time_chunk_size: 256
-      time_unroll: 4
-      beam_tile_size: 4
-      enable_cuda_graph: false
-      site_lat_deg: -33.4211146
-      site_lon_deg: -70.8634710
-      site_alt_m: 458.0
-      freq_start_hz: 400800000.0
-      freq_step_hz: 300000.0
+        - name: cudaDirectBeamTrackerCommand
+          gpu_mem_voltage: voltage_1
+          gpu_mem_formed_beams: formed_beams_1
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          spacing_m: 0.6
+          max_beams: 2
+          initial_active_beams: 2
+          buffer_depth: 2
+          time_chunk_size: 256
+          time_unroll: 4
+          beam_tile_size: 4
+          enable_cuda_graph: false
+          site_lat_deg: -33.4211146
+          site_lon_deg: -70.8634710
+          site_alt_m: 458.0
+          freq_start_hz: 400800000.0
+          freq_step_hz: 300000.0
       # Beam 0: Target Beam (Galactic Center Sgr A*)
-      source_ra_deg: 266.4168
-      source_dec_deg: -29.0078
+          source_ra_deg: 266.4168
+          source_dec_deg: -29.0078
       # Beam 1: Off-Axis Reference Beam (Vela Pulsar PSR B0833-45)
-      source_ra_deg_1: 128.8361
-      source_dec_deg_1: -45.1764
+          source_ra_deg_1: 128.8361
+          source_dec_deg_1: -45.1764
 
     # Real-Time Joint Matrix Unmixing (BiSLC Sidelobe Cancellation - In-Place)
-    - name: cudaBiSLCCommand
-      gpu_mem_formed_beams: formed_beams_1
-      gpu_mem_cleaned_beams: formed_beams_1
-      num_elements: 64
-      num_local_freq: 336
-      samples_per_data_set: 15360
-      spacing_m: 0.6
-      max_beams: 2
-      initial_active_beams: 2
-      buffer_depth: 2
-      diagonal_loading: 1.0e-4
-      enabled: true
-      freq_start_hz: 400800000.0
-      freq_step_hz: 300000.0
+        - name: cudaBiSLCCommand
+          gpu_mem_formed_beams: formed_beams_1
+          gpu_mem_cleaned_beams: formed_beams_1
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          spacing_m: 0.6
+          max_beams: 2
+          initial_active_beams: 2
+          buffer_depth: 2
+          diagonal_loading: 1.0e-4
+          enabled: true
+          freq_start_hz: 400800000.0
+          freq_step_hz: 300000.0
 
     # Real-Time Transient Trigger & VRAM Circular Buffer Dump Node
-    - name: cudaTransientTriggerCommand
-      gpu_mem_cleaned_beams: formed_beams_1
-      num_local_freq: 336
-      samples_per_data_set: 15360
-      max_beams: 2
-      buffer_depth: 2
-      ring_buffer_depth: 16
-      pre_trigger_frames: 4
-      post_trigger_frames: 4
-      sk_threshold: 0.08
-      rfi_threshold: 0.30
-      min_flagged_channels: 8
-      dump_directory: "/data/tracker/tracker_64ant/transient_candidates/stream_1"
-      auto_dump_enabled: true
-      cooldown_frames: 200              # Refractory holdoff: ~10.2 seconds between dumps
-      min_free_disk_gb: 20              # Hard safety floor: abort if free space < 20 GB
-      max_auto_dumps: 10                # Session ceiling: max 10 auto-dumps before pausing
-      enabled: true
+        - name: cudaTransientTriggerCommand
+          gpu_mem_cleaned_beams: formed_beams_1
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          max_beams: 2
+          buffer_depth: 2
+          ring_buffer_depth: 16
+          pre_trigger_frames: 4
+          post_trigger_frames: 4
+          sk_threshold: 0.08
+          rfi_threshold: 0.30
+          min_flagged_channels: 8
+          dump_directory: "/data/tracker/tracker_64ant/transient_candidates/stream_1"
+          auto_dump_enabled: true
+          cooldown_frames: 200          # Refractory holdoff: ~10.2 seconds between dumps
+          min_free_disk_gb: 20          # Hard safety floor: abort if free space < 20 GB
+          max_auto_dumps: 10            # Session ceiling: max 10 auto-dumps before pausing
+          enabled: true
 
-    - name: cudaSyncOutput
-    - name: cudaOutputData
-      in_buf: host_voltage
-      gpu_mem: formed_beams_1
-      out_buf: host_formed_beams
+        - name: cudaSyncOutput
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: formed_beams_1
+          out_buf: host_formed_beams
 
-  gpu_0:
-    kotekan_stage: cudaProcess
-    gpu_id: 0
-    buffer_depth: 2
-    commands: *command_list_0
-    in_buffers:
-      host_voltage: network_capture_buf_0
-    out_buffers:
-      host_formed_beams: host_formed_beams_buffer_0
+    gpu_0:
+        kotekan_stage: cudaProcess
+        gpu_id: 0
+        buffer_depth: 2
+        commands: *command_list_0
+        in_buffers:
+            host_voltage: network_capture_buf_0
+        out_buffers:
+            host_formed_beams: host_formed_beams_buffer_0
 
-  gpu_1:
-    kotekan_stage: cudaProcess
-    gpu_id: 0
-    buffer_depth: 2
-    commands: *command_list_1
-    in_buffers:
-      host_voltage: network_capture_buf_1
-    out_buffers:
-      host_formed_beams: host_formed_beams_buffer_1
+    gpu_1:
+        kotekan_stage: cudaProcess
+        gpu_id: 0
+        buffer_depth: 2
+        commands: *command_list_1
+        in_buffers:
+            host_voltage: network_capture_buf_1
+        out_buffers:
+            host_formed_beams: host_formed_beams_buffer_1
 # ------------------------------------------------------------------------------
 # Monitoring & Live Telemetry Sinks (In-Memory Only, Zero Continuous Disk I/O)
 # ------------------------------------------------------------------------------
@@ -367,14 +368,14 @@ gpu:
 
 # Live REST inspection endpoints for waterfall telemetry & beam health snapshots
 inspect_beams_0:
-  kotekan_stage: restInspectFrame
-  in_buf: host_formed_beams_buffer_0
-  len: 4194304                     # 4 MB snapshot for dashboard telemetry
+    kotekan_stage: restInspectFrame
+    in_buf: host_formed_beams_buffer_0
+    len: 4194304                   # 4 MB snapshot for dashboard telemetry
 
 inspect_beams_1:
-  kotekan_stage: restInspectFrame
-  in_buf: host_formed_beams_buffer_1
-  len: 4194304                     # 4 MB snapshot for dashboard telemetry
+    kotekan_stage: restInspectFrame
+    in_buf: host_formed_beams_buffer_1
+    len: 4194304                   # 4 MB snapshot for dashboard telemetry
 
 # Continuous raw baseband recording is disabled by default to prevent disk filling.
 # (Uncomment below only if full un-triggered continuous recording is explicitly needed)

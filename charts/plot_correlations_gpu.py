@@ -19,7 +19,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-
 DEFAULT_CHANNELS = 672
 DEFAULT_ELEMENTS = 32
 DEFAULT_POLARIZATIONS = 2
@@ -83,12 +82,16 @@ def read_correlation_frame(
             "Check --channels, --elements, and --polarizations."
         )
 
-    payload = np.frombuffer(raw, dtype="<i4", count=expected_bytes // 4, offset=payload_offset)
+    payload = np.frombuffer(
+        raw, dtype="<i4", count=expected_bytes // 4, offset=payload_offset
+    )
     packed = payload.reshape(channels, baselines, polarizations, polarizations, 2)
     return packed[..., 0].astype(np.float64) + 1j * packed[..., 1].astype(np.float64)
 
 
-def extract_visibility(correlation: np.ndarray, element_a: int, element_b: int, polarizations: int) -> np.ndarray:
+def extract_visibility(
+    correlation: np.ndarray, element_a: int, element_b: int, polarizations: int
+) -> np.ndarray:
     """Return V[a,b] across frequency, applying Hermitian conjugation as needed."""
     receiver_a, pol_a = divmod(element_a, polarizations)
     receiver_b, pol_b = divmod(element_b, polarizations)
@@ -109,10 +112,14 @@ def plot_element_pairs(
     partners = [element for element in selected if element != reference]
     columns = min(4, len(partners))
     rows = math.ceil(len(partners) / columns)
-    figure, axes = plt.subplots(rows, columns, figsize=(4.6 * columns, 2.9 * rows), squeeze=False)
+    figure, axes = plt.subplots(
+        rows, columns, figsize=(4.6 * columns, 2.9 * rows), squeeze=False
+    )
 
     for axis, partner in zip(axes.flat, partners):
-        amplitude = np.abs(extract_visibility(correlation, reference, partner, polarizations))
+        amplitude = np.abs(
+            extract_visibility(correlation, reference, partner, polarizations)
+        )
         axis.plot(frequencies_mhz, amplitude, linewidth=0.7)
         axis.set_title(f"|V[{reference}, {partner}]|", fontsize=10)
         axis.set_xlabel("Frequency [MHz]", fontsize=8)
@@ -140,16 +147,22 @@ def plot_global_matrix(
     matrix = np.empty((len(selected), len(selected)), dtype=np.float64)
     for row, element_a in enumerate(selected):
         for column, element_b in enumerate(selected):
-            visibility = extract_visibility(correlation, element_a, element_b, polarizations)
+            visibility = extract_visibility(
+                correlation, element_a, element_b, polarizations
+            )
             matrix[row, column] = np.mean(np.abs(visibility), dtype=np.float64)
 
     finite_positive = matrix[np.isfinite(matrix) & (matrix > 0)]
     reference = np.max(finite_positive) if finite_positive.size else 1.0
-    matrix_db = 20.0 * np.log10(np.maximum(matrix, np.finfo(np.float64).tiny) / reference)
+    matrix_db = 20.0 * np.log10(
+        np.maximum(matrix, np.finfo(np.float64).tiny) / reference
+    )
 
     figure_size = max(7.0, 0.42 * len(selected))
     figure, axis = plt.subplots(figsize=(figure_size, figure_size))
-    image = axis.imshow(matrix_db, origin="lower", aspect="equal", cmap="viridis", vmin=-60.0, vmax=0.0)
+    image = axis.imshow(
+        matrix_db, origin="lower", aspect="equal", cmap="viridis", vmin=-60.0, vmax=0.0
+    )
     axis.set_xticks(range(len(selected)), selected, rotation=90)
     axis.set_yticks(range(len(selected)), selected)
     axis.set_xlabel("Input element b")
@@ -174,17 +187,42 @@ def select_files(data_dir: Path, pattern: str, count: int, position: str) -> lis
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data-dir", type=Path, required=True, help="Directory containing raw correlation files")
-    parser.add_argument("--output-dir", type=Path, required=True, help="Directory for PNG and NPZ output")
-    parser.add_argument("--pattern", default="correlation_0_*.bin", help="Glob for rawFileWrite correlation files")
-    parser.add_argument("--file-count", type=int, default=5, help="Frames to average; 0 means all matching files")
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        required=True,
+        help="Directory containing raw correlation files",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="Directory for PNG and NPZ output",
+    )
+    parser.add_argument(
+        "--pattern",
+        default="correlation_0_*.bin",
+        help="Glob for rawFileWrite correlation files",
+    )
+    parser.add_argument(
+        "--file-count",
+        type=int,
+        default=5,
+        help="Frames to average; 0 means all matching files",
+    )
     parser.add_argument("--file-position", choices=("first", "last"), default="last")
-    parser.add_argument("--antennas", default="all", help="Input elements: all, 0,2,4, or 0-7,16-23")
+    parser.add_argument(
+        "--antennas", default="all", help="Input elements: all, 0,2,4, or 0-7,16-23"
+    )
     parser.add_argument("--channels", type=int, default=DEFAULT_CHANNELS)
     parser.add_argument("--elements", type=int, default=DEFAULT_ELEMENTS)
     parser.add_argument("--polarizations", type=int, default=DEFAULT_POLARIZATIONS)
-    parser.add_argument("--frequency-start-mhz", type=float, default=DEFAULT_FREQ_START_MHZ)
-    parser.add_argument("--channel-width-mhz", type=float, default=DEFAULT_CHANNEL_WIDTH_MHZ)
+    parser.add_argument(
+        "--frequency-start-mhz", type=float, default=DEFAULT_FREQ_START_MHZ
+    )
+    parser.add_argument(
+        "--channel-width-mhz", type=float, default=DEFAULT_CHANNEL_WIDTH_MHZ
+    )
     return parser.parse_args()
 
 
@@ -198,28 +236,38 @@ def main() -> None:
         selected = parse_elements(args.antennas, args.elements)
         if len(selected) < 2:
             raise ValueError("select at least two input elements")
-        files = select_files(args.data_dir, args.pattern, args.file_count, args.file_position)
+        files = select_files(
+            args.data_dir, args.pattern, args.file_count, args.file_position
+        )
     except ValueError as error:
         raise SystemExit(str(error)) from error
 
     average = None
     for path in files:
-        frame = read_correlation_frame(path, args.channels, args.elements, args.polarizations)
+        frame = read_correlation_frame(
+            path, args.channels, args.elements, args.polarizations
+        )
         average = frame if average is None else average + frame
         print(f"Read {path}")
     assert average is not None
     average /= len(files)
 
-    frequencies_mhz = args.frequency_start_mhz + args.channel_width_mhz * np.arange(args.channels)
+    frequencies_mhz = args.frequency_start_mhz + args.channel_width_mhz * np.arange(
+        args.channels
+    )
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     for element in selected:
         output_path = args.output_dir / f"correlations_input_{element:02d}.png"
-        plot_element_pairs(average, element, selected, args.polarizations, frequencies_mhz, output_path)
+        plot_element_pairs(
+            average, element, selected, args.polarizations, frequencies_mhz, output_path
+        )
         print(f"Saved {output_path}")
 
     matrix_path = args.output_dir / "correlations_selected_matrix.png"
-    mean_magnitude = plot_global_matrix(average, selected, args.polarizations, matrix_path)
+    mean_magnitude = plot_global_matrix(
+        average, selected, args.polarizations, matrix_path
+    )
     npz_path = args.output_dir / "correlations_selected.npz"
     np.savez(
         npz_path,

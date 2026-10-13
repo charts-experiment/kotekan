@@ -40,10 +40,10 @@
 #include <vector>                  // for vector
 
 // CHARTS RFSoC capture handlers
+#include "rfsocHandlerBaseband.hpp"
+#include "rfsocHandlerCPT.hpp"
 #include "rfsocHandlerNoClk.hpp"
 #include "rfsocHandlerShuffle.hpp"
-#include "rfsocHandlerCPT.hpp"
-#include "rfsocHandlerBaseband.hpp"
 
 using nlohmann::json;
 using std::string;
@@ -255,13 +255,17 @@ void dpdkCore::create_handlers(bufferContainer& buffer_container) {
             handlers[port] =
                 new captureHandler(config, handler_unique_name, buffer_container, port);
         } else if (handler_name == "rfsocHandlerCPT") {
-            handlers[port] = new rfsocHandlerCPT(config, handler_unique_name, buffer_container, port);
+            handlers[port] =
+                new rfsocHandlerCPT(config, handler_unique_name, buffer_container, port);
         } else if (handler_name == "rfsocHandlerNoClk") {
-            handlers[port] = new rfsocHandlerNoClk(config, handler_unique_name, buffer_container, port);
+            handlers[port] =
+                new rfsocHandlerNoClk(config, handler_unique_name, buffer_container, port);
         } else if (handler_name == "rfsocHandlerShuffle") {
-            handlers[port] = new rfsocHandlerShuffle(config, handler_unique_name, buffer_container, port);
+            handlers[port] =
+                new rfsocHandlerShuffle(config, handler_unique_name, buffer_container, port);
         } else if (handler_name == "rfsocHandlerBaseband") {
-            handlers[port] = new rfsocHandlerBaseband(config, handler_unique_name, buffer_container, port);
+            handlers[port] =
+                new rfsocHandlerBaseband(config, handler_unique_name, buffer_container, port);
         } else if (handler_name == "crs1BoardDistributor") {
             handlers[port] = new crs1BoardDistributor(config, handler_unique_name, buffer_container,
                                                       port, worker_rings);

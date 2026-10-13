@@ -17,7 +17,6 @@ import sys
 import h5py
 import numpy as np
 
-
 METADATA_SIZE = 96
 METADATA_STRUCT = struct.Struct("<QQQQQdddqqQii")
 RAW_FILE_RE = re.compile(r"^baseband_(?P<event>\d+)_(?P<freq>\d+)(?:\.data)?$")
@@ -111,8 +110,14 @@ def inspect_file(path, filename_event_id, filename_freq_id, args):
 
     if not frames:
         fail(f"{path}: contains no frames")
-    return {"path": path, "event_id": filename_event_id, "freq_id": filename_freq_id,
-            "frames": frames, "data_bytes": data_bytes, "record_bytes": record_bytes}
+    return {
+        "path": path,
+        "event_id": filename_event_id,
+        "freq_id": filename_freq_id,
+        "frames": frames,
+        "data_bytes": data_bytes,
+        "record_bytes": record_bytes,
+    }
 
 
 def validate_streams(streams, args):
@@ -125,20 +130,28 @@ def validate_streams(streams, args):
     for stream in streams:
         f0 = stream["freq_id"]
         if f0 + args.local_num_freq > args.total_num_freq:
-            fail(f"{stream['path']}: frequency range {f0}:{f0 + args.local_num_freq} exceeds "
-                 f"--total-num-freq={args.total_num_freq}")
-    for left, right in zip(sorted(streams, key=lambda item: item["freq_id"]),
-                           sorted(streams, key=lambda item: item["freq_id"])[1:]):
+            fail(
+                f"{stream['path']}: frequency range {f0}:{f0 + args.local_num_freq} exceeds "
+                f"--total-num-freq={args.total_num_freq}"
+            )
+    for left, right in zip(
+        sorted(streams, key=lambda item: item["freq_id"]),
+        sorted(streams, key=lambda item: item["freq_id"])[1:],
+    ):
         if left["freq_id"] + args.local_num_freq > right["freq_id"]:
             fail("input frequency blocks overlap")
 
     # rfsocHandlerShuffle records a packet timestamp in every frame, so time0_fpga
     # legitimately differs between frames and NICs. Preserve it in frame_metadata
     # and use the earliest frame only as the event-level time reference.
-    earliest_frame = min((frame for stream in streams for frame in stream["frames"]),
-                         key=lambda frame: frame[8])
+    earliest_frame = min(
+        (frame for stream in streams for frame in stream["frames"]),
+        key=lambda frame: frame[8],
+    )
     first_fpga = earliest_frame[8]
-    last_fpga = max(frame[8] + frame[9] for stream in streams for frame in stream["frames"])
+    last_fpga = max(
+        frame[8] + frame[9] for stream in streams for frame in stream["frames"]
+    )
     if (last_fpga - first_fpga) <= 0:
         fail("input frames have an empty time range")
     return next(iter(event_ids)), earliest_frame[4], first_fpga, last_fpga
@@ -147,7 +160,8 @@ def validate_streams(streams, args):
 def source_descriptor(source_dir, freq_start, freq_end, chunk_index, total_samples):
     time_start = chunk_index * MAX_SAMPLES_CHUNK
     return {
-        "path": source_dir / f"bb_f{freq_start:04d}_{freq_end:04d}_chunk{chunk_index:05d}.h5",
+        "path": source_dir
+        / f"bb_f{freq_start:04d}_{freq_end:04d}_chunk{chunk_index:05d}.h5",
         "freq_start": freq_start,
         "freq_end": freq_end,
         "time_start": time_start,
@@ -161,8 +175,11 @@ def create_source_dataset(descriptor, args):
     time_len = descriptor["time_end"] - descriptor["time_start"]
     h5_file = h5py.File(descriptor["path"], "w")
     dataset = h5_file.create_dataset(
-        "baseband", (args.num_elements, freq_len, time_len), np.uint8,
-        chunks=(args.num_elements, freq_len, min(time_len, 1024)), fillvalue=0,
+        "baseband",
+        (args.num_elements, freq_len, time_len),
+        np.uint8,
+        chunks=(args.num_elements, freq_len, min(time_len, 1024)),
+        fillvalue=0,
     )
     dataset.attrs["axes"] = ["antenna", "frequency", "time"]
     dataset.attrs["freq_start_idx"] = descriptor["freq_start"]
@@ -182,9 +199,13 @@ def write_stream_sources(stream, source_dir, first_fpga, total_samples, args):
             valid_to = values[9]
             time_index = values[8] - first_fpga
             if time_index < 0 or time_index + valid_to > total_samples:
-                fail(f"{stream['path']}, frame {index}: frame is outside calculated time range")
+                fail(
+                    f"{stream['path']}, frame {index}: frame is outside calculated time range"
+                )
             data = np.frombuffer(raw_file.read(stream["data_bytes"]), dtype=np.uint8)
-            data = data.reshape(args.spectra_per_frame, args.local_num_freq, args.num_elements)
+            data = data.reshape(
+                args.spectra_per_frame, args.local_num_freq, args.num_elements
+            )
             input_time = 0
             while input_time < valid_to:
                 global_time = time_index + input_time
@@ -204,8 +225,9 @@ def write_stream_sources(stream, source_dir, first_fpga, total_samples, args):
                     local_f0 = freq_start - stream_f0
                     local_f1 = freq_end - stream_f0
                     local_t0 = global_time - descriptors[key]["time_start"]
-                    dataset[:, :, local_t0:local_t0 + copy_len] = np.transpose(
-                        data[input_time:input_time + copy_len, local_f0:local_f1, :], (2, 1, 0)
+                    dataset[:, :, local_t0 : local_t0 + copy_len] = np.transpose(
+                        data[input_time : input_time + copy_len, local_f0:local_f1, :],
+                        (2, 1, 0),
                     )
                 input_time += copy_len
     for h5_file, _ in open_sources.values():
@@ -213,8 +235,16 @@ def write_stream_sources(stream, source_dir, first_fpga, total_samples, args):
     return list(descriptors.values())
 
 
-def write_vds(output_path, source_descriptors, streams, event_id, time0_fpga, first_fpga,
-              total_samples, args):
+def write_vds(
+    output_path,
+    source_descriptors,
+    streams,
+    event_id,
+    time0_fpga,
+    first_fpga,
+    total_samples,
+    args,
+):
     layout = h5py.VirtualLayout(
         shape=(args.num_elements, args.total_num_freq, total_samples), dtype=np.uint8
     )
@@ -222,16 +252,24 @@ def write_vds(output_path, source_descriptors, streams, event_id, time0_fpga, fi
     for descriptor in source_descriptors:
         relative_source = os.path.relpath(descriptor["path"], output_path.parent)
         source = h5py.VirtualSource(
-            relative_source, "baseband", shape=(
+            relative_source,
+            "baseband",
+            shape=(
                 args.num_elements,
                 descriptor["freq_end"] - descriptor["freq_start"],
                 descriptor["time_end"] - descriptor["time_start"],
-            )
+            ),
         )
-        layout[:, descriptor["freq_start"]:descriptor["freq_end"],
-               descriptor["time_start"]:descriptor["time_end"]] = source
+        layout[
+            :,
+            descriptor["freq_start"] : descriptor["freq_end"],
+            descriptor["time_start"] : descriptor["time_end"],
+        ] = source
     for stream in streams:
-        records.extend(metadata_record(values, values[8] - first_fpga) for values in stream["frames"])
+        records.extend(
+            metadata_record(values, values[8] - first_fpga)
+            for values in stream["frames"]
+        )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(output_path, "w") as h5_file:
@@ -266,16 +304,29 @@ def write_vds(output_path, source_descriptors, streams, event_id, time0_fpga, fi
         dataset.attrs["description"] = "CHARTS baseband virtual dataset"
         metadata = np.array(records, dtype=FRAME_METADATA_DTYPE)
         h5_file.create_dataset("frame_metadata", data=metadata)
-        h5_file.create_dataset("stream_freq_ids", data=np.array([s["freq_id"] for s in streams], dtype="u8"))
+        h5_file.create_dataset(
+            "stream_freq_ids",
+            data=np.array([s["freq_id"] for s in streams], dtype="u8"),
+        )
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("raw_dir", type=Path, help="Directory containing BasebandWriter raw files")
-    parser.add_argument("--output", type=Path,
-                        help="Output VDS .h5 path (overrides the dated default directory)")
-    parser.add_argument("--outdir-base", "-o", type=Path, default=Path("/hdd"),
-                        help="Base directory for the dated output directory (default: /hdd)")
+    parser.add_argument(
+        "raw_dir", type=Path, help="Directory containing BasebandWriter raw files"
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="Output VDS .h5 path (overrides the dated default directory)",
+    )
+    parser.add_argument(
+        "--outdir-base",
+        "-o",
+        type=Path,
+        default=Path("/hdd"),
+        help="Base directory for the dated output directory (default: /hdd)",
+    )
     parser.add_argument("--spectra-per-frame", type=int, default=15360)
     parser.add_argument("--num-elements", type=int, default=64)
     parser.add_argument("--local-num-freq", type=int, default=336)
@@ -290,7 +341,15 @@ def main():
 
     if not args.raw_dir.is_dir():
         parser.error(f"not a directory: {args.raw_dir}")
-    if min(args.spectra_per_frame, args.num_elements, args.local_num_freq, args.total_num_freq) <= 0:
+    if (
+        min(
+            args.spectra_per_frame,
+            args.num_elements,
+            args.local_num_freq,
+            args.total_num_freq,
+        )
+        <= 0
+    ):
         parser.error("frame and dimension values must be positive")
 
     try:
@@ -304,32 +363,52 @@ def main():
             timestamp = dt.datetime.fromtimestamp(
                 start_time_us / 1_000_000, tz=dt.timezone.utc
             ).strftime("%y%m%dT%H%M%SZ")
-            args.output = args.outdir_base / f"{timestamp}_CHARTS_hdf5" / "baseband_virtual.h5"
+            args.output = (
+                args.outdir_base / f"{timestamp}_CHARTS_hdf5" / "baseband_virtual.h5"
+            )
         if args.output.exists() and args.output.is_dir():
-            parser.error("--output must be an .h5 file; use --outdir-base for a dated output directory")
+            parser.error(
+                "--output must be an .h5 file; use --outdir-base for a dated output directory"
+            )
         if args.output.exists() and not args.overwrite and not args.verify_only:
             parser.error(f"output exists: {args.output}; use --overwrite to replace it")
 
         for stream in streams:
-            print(f"  {stream['path'].name}: freq {stream['freq_id']}:{stream['freq_id'] + args.local_num_freq}, "
-                  f"{len(stream['frames'])} frames")
+            print(
+                f"  {stream['path'].name}: freq {stream['freq_id']}:{stream['freq_id'] + args.local_num_freq}, "
+                f"{len(stream['frames'])} frames"
+            )
         if args.verify_only:
             print(f"Output VDS: {args.output}")
             return
 
-        source_dir = args.output.with_suffix("").with_name(args.output.stem + ".sources")
+        source_dir = args.output.with_suffix("").with_name(
+            args.output.stem + ".sources"
+        )
         if source_dir.exists() and not args.overwrite:
-            fail(f"source directory exists: {source_dir}; use --overwrite to replace it")
+            fail(
+                f"source directory exists: {source_dir}; use --overwrite to replace it"
+            )
         if source_dir.exists():
             for source in source_dir.glob("*.h5"):
                 source.unlink()
         source_descriptors = []
         for stream in streams:
             source_descriptors.extend(
-                write_stream_sources(stream, source_dir, first_fpga, total_samples, args)
+                write_stream_sources(
+                    stream, source_dir, first_fpga, total_samples, args
+                )
             )
-        write_vds(args.output, source_descriptors, streams, event_id, time0_fpga, first_fpga,
-                  total_samples, args)
+        write_vds(
+            args.output,
+            source_descriptors,
+            streams,
+            event_id,
+            time0_fpga,
+            first_fpga,
+            total_samples,
+            args,
+        )
         print(f"Created VDS: {args.output}")
         print(f"Keep backing source files: {source_dir}")
     except RuntimeError as error:

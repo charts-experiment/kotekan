@@ -24,7 +24,8 @@
  * @conf num_frames_per_file Int. No of frames to write into a single file.
  * @conf exit_after_n_files  Int. Stop writing after this many files, Default 0 = unlimited files.
  * @conf skip_frames         Int. Number of initial frames to skip before recording. Default 0.
- * @conf skip_zero_frames    Bool. If true, skip writing frames that consist entirely of zeros. Default true.
+ * @conf skip_zero_frames    Bool. If true, skip writing frames that consist entirely of zeros.
+ *Default true.
  * @conf prefix_hostname    Bool. Prefix the filename with the hostname. Default true.
  * @conf allow_ndarray      Bool. Write an NDArray buffer's raw bytes instead of failing.
  *                          Default false. The frame descriptor is NOT written, so the

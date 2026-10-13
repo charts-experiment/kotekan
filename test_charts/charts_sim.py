@@ -83,7 +83,9 @@ from sim.visualizer import (
 def run_pipeline(cfg: SimulationConfig) -> int:
     """Executes the complete end-to-end CHARTS simulation pipeline."""
     print("=" * 80)
-    print(f" CHARTS SIMULATION PIPELINE: PRESET={cfg.preset.upper()} PROFILE={cfg.profile.upper()}")
+    print(
+        f" CHARTS SIMULATION PIPELINE: PRESET={cfg.preset.upper()} PROFILE={cfg.profile.upper()}"
+    )
     print("=" * 80)
     print(f" Window Name       : {cfg.window_name}")
     print(f" Start Time (UTC)  : {cfg.start_time or f'{cfg.utc_hour:.1f}h UTC'}")
@@ -136,7 +138,9 @@ def run_pipeline(cfg: SimulationConfig) -> int:
 
     # Step 3: Direct Beam Tracker Replay (cudaDirectBeamTracker)
     if not getattr(cfg, "skip_tracker", False):
-        print(f"\n[Step 3/5] Running Kotekan Direct Beam Tracker ({cfg.max_beams} Beams)...")
+        print(
+            f"\n[Step 3/5] Running Kotekan Direct Beam Tracker ({cfg.max_beams} Beams)..."
+        )
         tracker_dir = window_dir / "tracker"
         tracker_yaml = window_dir / "kotekan_tracker.yaml"
         beam_targets = parse_beam_targets(
@@ -180,9 +184,13 @@ def run_pipeline(cfg: SimulationConfig) -> int:
         corr_dumps = sorted(corr_dir.glob("corr_*.bin"))
         if corr_dumps:
             mid_dump = corr_dumps[len(corr_dumps) // 2]
-            vis_cube = load_astron_correlator_dump(mid_dump, num_elements=cfg.antennas, num_channels=cfg.num_freq)
+            vis_cube = load_astron_correlator_dump(
+                mid_dump, num_elements=cfg.antennas, num_channels=cfg.num_freq
+            )
             diag = inspect_correlator_matrix(vis_cube)
-            print(f"  * Correlator Hermitian error : {diag['hermitian_error']:.2e} (Valid: {diag['hermitian_valid']})")
+            print(
+                f"  * Correlator Hermitian error : {diag['hermitian_error']:.2e} (Valid: {diag['hermitian_valid']})"
+            )
             print(f"  * Mean Autocorrelation power : {diag['mean_autocorr']:.2f} LSB^2")
             print(f"  * Baseline cross-power SNR   : {diag['cross_snr']:.2f}")
 
@@ -233,7 +241,9 @@ def run_pipeline(cfg: SimulationConfig) -> int:
 
         if not getattr(cfg, "skip_tracker", False):
             tracker_dir = window_dir / "tracker"
-            tracker_dumps = sorted(tracker_dir.glob("*.bin")) if tracker_dir.exists() else []
+            tracker_dumps = (
+                sorted(tracker_dir.glob("*.bin")) if tracker_dir.exists() else []
+            )
             if tracker_dumps:
                 tr_out = plots_dir / f"tracker_waterfall_{cfg.window_name}.png"
                 plot_tracker_waterfall(
@@ -292,82 +302,290 @@ def main():
     subparsers = parser.add_subparsers(dest="command", help="Available subcommands")
 
     # 1. Pipeline subcommand
-    pipe_parser = subparsers.add_parser("pipeline", help="Run end-to-end simulation pipeline")
-    pipe_parser.add_argument("--preset", type=str, default="quick", choices=["quick", "1min", "5min"], help="Preset profile")
-    pipe_parser.add_argument("--profile", type=str, default="day", choices=["day", "night", "both"], help="Time/sky profile")
-    pipe_parser.add_argument("--start-time", type=str, default=None, help="Observation start time (ISO 8601, 'now', or 'HH:MM')")
-    pipe_parser.add_argument("--transit", "--transit-target", dest="transit_target", type=str, default=None, help="Anchor window at target confirmed transit (e.g. 'Vela', 'Sgr A*', 'Crab')")
-    pipe_parser.add_argument("--beam-targets", type=str, default=None, help="Targets: e.g. 'Crab;Vela' or 'auto'")
-    pipe_parser.add_argument("--duration-s", type=float, default=None, help="Custom duration (seconds)")
-    pipe_parser.add_argument("--antennas", type=int, default=None, help="Number of antennas (e.g. 64 or 256)")
-    pipe_parser.add_argument("--num-freq", type=int, default=None, help="Number of frequency channels")
-    pipe_parser.add_argument("--max-beams", type=int, default=None, help="Formed beam count")
-    pipe_parser.add_argument("--scratch-dir", type=str, default=None, help="Scratch directory for runtime dumps")
-    pipe_parser.add_argument("--output-dir", type=str, default=None, help="Permanent directory for output artifacts")
-    pipe_parser.add_argument("--save-reference", type=str, default=None, help="Save generated dataset to reference library under tag")
-    pipe_parser.add_argument("--kotekan-bin", type=str, default=None, help="Path to kotekan executable")
-    pipe_parser.add_argument("--workers", type=int, default=None, help="Parallel worker threads")
-    pipe_parser.add_argument("--no-tracker", "--skip-tracker", dest="skip_tracker", action="store_true", help="Run only baseband generation and correlator (skip beam tracker)")
-    pipe_parser.add_argument("--dry-run", action="store_true", help="Generate configs and simulate without running Kotekan binary")
+    pipe_parser = subparsers.add_parser(
+        "pipeline", help="Run end-to-end simulation pipeline"
+    )
+    pipe_parser.add_argument(
+        "--preset",
+        type=str,
+        default="quick",
+        choices=["quick", "1min", "5min"],
+        help="Preset profile",
+    )
+    pipe_parser.add_argument(
+        "--profile",
+        type=str,
+        default="day",
+        choices=["day", "night", "both"],
+        help="Time/sky profile",
+    )
+    pipe_parser.add_argument(
+        "--start-time",
+        type=str,
+        default=None,
+        help="Observation start time (ISO 8601, 'now', or 'HH:MM')",
+    )
+    pipe_parser.add_argument(
+        "--transit",
+        "--transit-target",
+        dest="transit_target",
+        type=str,
+        default=None,
+        help="Anchor window at target confirmed transit (e.g. 'Vela', 'Sgr A*', 'Crab')",
+    )
+    pipe_parser.add_argument(
+        "--beam-targets",
+        type=str,
+        default=None,
+        help="Targets: e.g. 'Crab;Vela' or 'auto'",
+    )
+    pipe_parser.add_argument(
+        "--duration-s", type=float, default=None, help="Custom duration (seconds)"
+    )
+    pipe_parser.add_argument(
+        "--antennas", type=int, default=None, help="Number of antennas (e.g. 64 or 256)"
+    )
+    pipe_parser.add_argument(
+        "--num-freq", type=int, default=None, help="Number of frequency channels"
+    )
+    pipe_parser.add_argument(
+        "--max-beams", type=int, default=None, help="Formed beam count"
+    )
+    pipe_parser.add_argument(
+        "--scratch-dir",
+        type=str,
+        default=None,
+        help="Scratch directory for runtime dumps",
+    )
+    pipe_parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Permanent directory for output artifacts",
+    )
+    pipe_parser.add_argument(
+        "--save-reference",
+        type=str,
+        default=None,
+        help="Save generated dataset to reference library under tag",
+    )
+    pipe_parser.add_argument(
+        "--kotekan-bin", type=str, default=None, help="Path to kotekan executable"
+    )
+    pipe_parser.add_argument(
+        "--workers", type=int, default=None, help="Parallel worker threads"
+    )
+    pipe_parser.add_argument(
+        "--no-tracker",
+        "--skip-tracker",
+        dest="skip_tracker",
+        action="store_true",
+        help="Run only baseband generation and correlator (skip beam tracker)",
+    )
+    pipe_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Generate configs and simulate without running Kotekan binary",
+    )
 
     # 2. Generate subcommand
-    gen_parser = subparsers.add_parser("generate", help="Generate baseband window dataset")
-    gen_parser.add_argument("--duration-s", type=float, default=10.0, help="Duration in seconds")
-    gen_parser.add_argument("--antennas", type=int, nargs="+", default=[64], help="Number of antennas (e.g. 32, 64, or '32 64 256')")
-    gen_parser.add_argument("--num-freq", type=int, default=336, help="Frequency channels")
-    gen_parser.add_argument("--profile", type=str, default="day", choices=["day", "night"], help="Day or Night profile")
-    gen_parser.add_argument("--start-time", type=str, default=None, help="Observation start time (ISO 8601, 'now', or 'HH:MM')")
-    gen_parser.add_argument("--transit", "--transit-target", dest="transit_target", type=str, default=None, help="Anchor window at target confirmed transit (e.g. 'Vela', 'Sgr A*', 'Crab')")
-    gen_parser.add_argument("--beam-targets", type=str, default="auto", help="Injected celestial sources (e.g. 'Crab;Vela' or 'auto')")
-    gen_parser.add_argument("--num-events", type=int, default=2, help="Number of injected transients")
-    gen_parser.add_argument("--save-reference", type=str, default=None, help="Save to reference library under tag")
-    gen_parser.add_argument("--scratch-dir", type=str, default="./scratch_charts_sim", help="Target output directory")
+    gen_parser = subparsers.add_parser(
+        "generate", help="Generate baseband window dataset"
+    )
+    gen_parser.add_argument(
+        "--duration-s", type=float, default=10.0, help="Duration in seconds"
+    )
+    gen_parser.add_argument(
+        "--antennas",
+        type=int,
+        nargs="+",
+        default=[64],
+        help="Number of antennas (e.g. 32, 64, or '32 64 256')",
+    )
+    gen_parser.add_argument(
+        "--num-freq", type=int, default=336, help="Frequency channels"
+    )
+    gen_parser.add_argument(
+        "--profile",
+        type=str,
+        default="day",
+        choices=["day", "night"],
+        help="Day or Night profile",
+    )
+    gen_parser.add_argument(
+        "--start-time",
+        type=str,
+        default=None,
+        help="Observation start time (ISO 8601, 'now', or 'HH:MM')",
+    )
+    gen_parser.add_argument(
+        "--transit",
+        "--transit-target",
+        dest="transit_target",
+        type=str,
+        default=None,
+        help="Anchor window at target confirmed transit (e.g. 'Vela', 'Sgr A*', 'Crab')",
+    )
+    gen_parser.add_argument(
+        "--beam-targets",
+        type=str,
+        default="auto",
+        help="Injected celestial sources (e.g. 'Crab;Vela' or 'auto')",
+    )
+    gen_parser.add_argument(
+        "--num-events", type=int, default=2, help="Number of injected transients"
+    )
+    gen_parser.add_argument(
+        "--save-reference",
+        type=str,
+        default=None,
+        help="Save to reference library under tag",
+    )
+    gen_parser.add_argument(
+        "--scratch-dir",
+        type=str,
+        default="./scratch_charts_sim",
+        help="Target output directory",
+    )
 
     # Catalog subcommand
-    subparsers.add_parser("catalog", help="List confirmed targets and transit ephemeris")
+    subparsers.add_parser(
+        "catalog", help="List confirmed targets and transit ephemeris"
+    )
 
     # 3. Reference Library subcommand
-    ref_parser = subparsers.add_parser("reference", help="Manage reference baseband library")
-    ref_parser.add_argument("action", choices=["list", "info"], help="Action: 'list' or 'info'")
-    ref_parser.add_argument("--tag", type=str, default=None, help="Reference window tag for 'info'")
+    ref_parser = subparsers.add_parser(
+        "reference", help="Manage reference baseband library"
+    )
+    ref_parser.add_argument(
+        "action", choices=["list", "info"], help="Action: 'list' or 'info'"
+    )
+    ref_parser.add_argument(
+        "--tag", type=str, default=None, help="Reference window tag for 'info'"
+    )
 
     # 4. Correlate subcommand
-    corr_parser = subparsers.add_parser("correlate", help="Replay baseband frames through Kotekan correlator")
-    corr_parser.add_argument("--window-dir", type=str, default=None, help="Directory containing baseband .bin frames")
-    corr_parser.add_argument("--reference", type=str, default=None, help="Reference window tag to correlate")
-    corr_parser.add_argument("--kotekan-bin", type=str, default=None, help="Path to kotekan executable")
-    corr_parser.add_argument("--dry-run", action="store_true", help="Print command without execution")
+    corr_parser = subparsers.add_parser(
+        "correlate", help="Replay baseband frames through Kotekan correlator"
+    )
+    corr_parser.add_argument(
+        "--window-dir",
+        type=str,
+        default=None,
+        help="Directory containing baseband .bin frames",
+    )
+    corr_parser.add_argument(
+        "--reference", type=str, default=None, help="Reference window tag to correlate"
+    )
+    corr_parser.add_argument(
+        "--kotekan-bin", type=str, default=None, help="Path to kotekan executable"
+    )
+    corr_parser.add_argument(
+        "--dry-run", action="store_true", help="Print command without execution"
+    )
 
     # 5. Track subcommand (cudaDirectBeamTracker)
-    track_parser = subparsers.add_parser("track", help="Replay baseband frames through Kotekan Direct Beam Tracker")
-    track_parser.add_argument("--window-dir", type=str, default=None, help="Directory containing baseband .bin frames")
-    track_parser.add_argument("--reference", type=str, default=None, help="Reference window tag to track")
-    track_parser.add_argument("--beam-targets", type=str, default="auto", help="Beam targets: 'Crab;Vela', 'auto', or explicit RA,Dec")
-    track_parser.add_argument("--max-beams", type=int, default=4, help="Number of beams")
-    track_parser.add_argument("--kotekan-bin", type=str, default=None, help="Path to kotekan executable")
-    track_parser.add_argument("--dry-run", action="store_true", help="Print command without execution")
+    track_parser = subparsers.add_parser(
+        "track", help="Replay baseband frames through Kotekan Direct Beam Tracker"
+    )
+    track_parser.add_argument(
+        "--window-dir",
+        type=str,
+        default=None,
+        help="Directory containing baseband .bin frames",
+    )
+    track_parser.add_argument(
+        "--reference", type=str, default=None, help="Reference window tag to track"
+    )
+    track_parser.add_argument(
+        "--beam-targets",
+        type=str,
+        default="auto",
+        help="Beam targets: 'Crab;Vela', 'auto', or explicit RA,Dec",
+    )
+    track_parser.add_argument(
+        "--max-beams", type=int, default=4, help="Number of beams"
+    )
+    track_parser.add_argument(
+        "--kotekan-bin", type=str, default=None, help="Path to kotekan executable"
+    )
+    track_parser.add_argument(
+        "--dry-run", action="store_true", help="Print command without execution"
+    )
 
     # 6. Benchmark subcommand (Direct Beam Tracker: Power, VRAM, Real Cadence)
-    bench_parser = subparsers.add_parser("benchmark", help="Benchmark Direct Beam Tracker under real cadence, VRAM & GPU power")
-    bench_parser.add_argument("--antennas", type=int, nargs="+", default=[32, 64, 128, 256], help="Antenna counts")
-    bench_parser.add_argument("--beams", type=int, nargs="+", default=[1, 4, 8], help="Beam counts")
-    bench_parser.add_argument("--num-freq", type=int, default=672, help="Number of frequency channels")
-    bench_parser.add_argument("--samples-per-frame", type=int, default=1536, choices=[1536, 3840, 15360], help="Samples per frame (1536=5.12ms, 3840=12.8ms, 15360=51.2ms)")
-    bench_parser.add_argument("--buffer-depth", type=int, default=2, help="Ring buffer depth")
-    bench_parser.add_argument("--target-gpu", type=str, default=None, choices=["rtx4090", "rtx5090", "h100", "rtx3060"], help="Target GPU hardware profile")
-    bench_parser.add_argument("--out-json", type=str, default=None, help="Save JSON report")
-    bench_parser.add_argument("--out-md", type=str, default=None, help="Save Markdown report")
+    bench_parser = subparsers.add_parser(
+        "benchmark",
+        help="Benchmark Direct Beam Tracker under real cadence, VRAM & GPU power",
+    )
+    bench_parser.add_argument(
+        "--antennas",
+        type=int,
+        nargs="+",
+        default=[32, 64, 128, 256],
+        help="Antenna counts",
+    )
+    bench_parser.add_argument(
+        "--beams", type=int, nargs="+", default=[1, 4, 8], help="Beam counts"
+    )
+    bench_parser.add_argument(
+        "--num-freq", type=int, default=672, help="Number of frequency channels"
+    )
+    bench_parser.add_argument(
+        "--samples-per-frame",
+        type=int,
+        default=1536,
+        choices=[1536, 3840, 15360],
+        help="Samples per frame (1536=5.12ms, 3840=12.8ms, 15360=51.2ms)",
+    )
+    bench_parser.add_argument(
+        "--buffer-depth", type=int, default=2, help="Ring buffer depth"
+    )
+    bench_parser.add_argument(
+        "--target-gpu",
+        type=str,
+        default=None,
+        choices=["rtx4090", "rtx5090", "h100", "rtx3060"],
+        help="Target GPU hardware profile",
+    )
+    bench_parser.add_argument(
+        "--out-json", type=str, default=None, help="Save JSON report"
+    )
+    bench_parser.add_argument(
+        "--out-md", type=str, default=None, help="Save Markdown report"
+    )
 
     # 7. Inspect subcommand
-    insp_parser = subparsers.add_parser("inspect", help="Inspect correlator or beam tracker binary outputs")
-    insp_parser.add_argument("--file", type=str, required=True, help="Path to .bin dump file")
-    insp_parser.add_argument("--type", type=str, default="corr", choices=["corr", "tracker"], help="Dump file type")
+    insp_parser = subparsers.add_parser(
+        "inspect", help="Inspect correlator or beam tracker binary outputs"
+    )
+    insp_parser.add_argument(
+        "--file", type=str, required=True, help="Path to .bin dump file"
+    )
+    insp_parser.add_argument(
+        "--type",
+        type=str,
+        default="corr",
+        choices=["corr", "tracker"],
+        help="Dump file type",
+    )
 
     # 8. Visualize subcommand
-    viz_parser = subparsers.add_parser("visualize", help="Generate visualizations from correlator or tracker dumps")
-    viz_parser.add_argument("--window-dir", type=str, required=True, help="Window directory")
-    viz_parser.add_argument("--type", type=str, default="waterfall", choices=["casm", "waterfall", "tracker", "all"])
-    viz_parser.add_argument("--out-file", type=str, default=None, help="Output image file path")
+    viz_parser = subparsers.add_parser(
+        "visualize", help="Generate visualizations from correlator or tracker dumps"
+    )
+    viz_parser.add_argument(
+        "--window-dir", type=str, required=True, help="Window directory"
+    )
+    viz_parser.add_argument(
+        "--type",
+        type=str,
+        default="waterfall",
+        choices=["casm", "waterfall", "tracker", "all"],
+    )
+    viz_parser.add_argument(
+        "--out-file", type=str, default=None, help="Output image file path"
+    )
 
     args = parser.parse_args()
 
@@ -394,7 +612,9 @@ def main():
                 cfg.start_time = args.start_time
                 dt = resolve_window_start(args.start_time, duration_s=cfg.duration_s)
                 cfg.initial_lst_hours = datetime_to_lst_hours(dt)
-            if args.beam_targets and not (args.transit_target and not args.beam_targets):
+            if args.beam_targets and not (
+                args.transit_target and not args.beam_targets
+            ):
                 cfg.beam_targets = args.beam_targets
             if args.duration_s:
                 cfg.duration_s = args.duration_s
@@ -420,7 +640,12 @@ def main():
     elif args.command == "generate":
         ant_list = args.antennas if isinstance(args.antennas, list) else [args.antennas]
         for ant in ant_list:
-            cfg = get_preset_config(preset="quick", profile=args.profile, antennas=ant, num_freq=args.num_freq)
+            cfg = get_preset_config(
+                preset="quick",
+                profile=args.profile,
+                antennas=ant,
+                num_freq=args.num_freq,
+            )
             cfg.duration_s = args.duration_s
             cfg.num_events = args.num_events
             cfg.scratch_dir = Path(args.scratch_dir)
@@ -435,16 +660,24 @@ def main():
                 cfg.start_time = args.start_time
                 dt = resolve_window_start(args.start_time, duration_s=cfg.duration_s)
                 cfg.initial_lst_hours = datetime_to_lst_hours(dt)
-            if args.beam_targets and not (args.transit_target and args.beam_targets == "auto"):
+            if args.beam_targets and not (
+                args.transit_target and args.beam_targets == "auto"
+            ):
                 cfg.beam_targets = args.beam_targets
 
             ref_tag = None
             if args.save_reference:
-                ref_tag = f"{args.save_reference}_{ant}ant" if len(ant_list) > 1 else args.save_reference
+                ref_tag = (
+                    f"{args.save_reference}_{ant}ant"
+                    if len(ant_list) > 1
+                    else args.save_reference
+                )
                 cfg.save_reference = ref_tag
 
             res = generate_simulation_window(cfg)
-            print(f"\n[DONE] Generated {res['num_written']} frames for {ant} antennas in {res['target_dir']}")
+            print(
+                f"\n[DONE] Generated {res['num_written']} frames for {ant} antennas in {res['target_dir']}"
+            )
 
             if ref_tag:
                 save_as_reference_window(
@@ -461,9 +694,13 @@ def main():
     elif args.command == "catalog":
         summary = catalog_transit_summary()
         print("=" * 105)
-        print(" CHARTS CONFIRMED CELESTIAL TARGETS & TRANSIT EPHEMERIS (SIMBAD-VERIFIED)")
+        print(
+            " CHARTS CONFIRMED CELESTIAL TARGETS & TRANSIT EPHEMERIS (SIMBAD-VERIFIED)"
+        )
         print("=" * 105)
-        print(f" {'Target Label':<28} {'RA (deg)':>9} {'Dec (deg)':>10} {'Transit UTC':>20} {'Transit Loc':>13} {'Max Alt':>8} {'Vis (h)':>8}")
+        print(
+            f" {'Target Label':<28} {'RA (deg)':>9} {'Dec (deg)':>10} {'Transit UTC':>20} {'Transit Loc':>13} {'Max Alt':>8} {'Vis (h)':>8}"
+        )
         print("-" * 105)
         for t in summary:
             utc_str = t["transit_utc"].replace("T", " ")[:19]
@@ -481,11 +718,17 @@ def main():
             print("=" * 90)
             if not windows:
                 print(" No reference windows currently saved. Generate one with:")
-                print("   python test_charts/charts_sim.py generate --save-reference <tag>")
+                print(
+                    "   python test_charts/charts_sim.py generate --save-reference <tag>"
+                )
             else:
                 for w in windows:
-                    print(f" * Tag: {w['tag']:<24} | Ant: {w['antennas']:<3} | Chans: {w['num_freq']:<4} | Frames: {w['total_frames']:<5} | Size: {w['size_mb']:.1f} MB")
-                    print(f"   Start: {w['observation_start']} (LST={w['lst_hours']}h) | Sources: {', '.join(w['active_sources'])}")
+                    print(
+                        f" * Tag: {w['tag']:<24} | Ant: {w['antennas']:<3} | Chans: {w['num_freq']:<4} | Frames: {w['total_frames']:<5} | Size: {w['size_mb']:.1f} MB"
+                    )
+                    print(
+                        f"   Start: {w['observation_start']} (LST={w['lst_hours']}h) | Sources: {', '.join(w['active_sources'])}"
+                    )
                     print(f"   Path:  {w['path']}\n")
             print("=" * 90)
         elif args.action == "info":
@@ -545,7 +788,9 @@ def main():
             stage_type="direct",
         )
 
-        print(f"\n>>> Running Kotekan Direct Beam Tracker on {num_frames} frames in {wdir}...")
+        print(
+            f"\n>>> Running Kotekan Direct Beam Tracker on {num_frames} frames in {wdir}..."
+        )
         rc = execute_kotekan(
             config_path=tracker_yaml,
             kotekan_bin=Path(args.kotekan_bin) if args.kotekan_bin else None,

@@ -29,10 +29,10 @@ from .constants import C_LIGHT, CHARTS_LATITUDE_DEG, CHARTS_LONGITUDE_DEG
 from .fengine import measure_quantization_snr_loss
 from .sky import direction_cosines_track
 
-
 # ---------------------------------------------------------------------------
 # 1. Pure-NumPy Reference Implementations
 # ---------------------------------------------------------------------------
+
 
 def reference_visibilities(voltages: np.ndarray) -> np.ndarray:
     r"""Computes time-averaged baseline visibility matrices (cudaCorrelatorAstron parity).
@@ -54,7 +54,9 @@ def reference_visibilities(voltages: np.ndarray) -> np.ndarray:
     """
     v = np.asarray(voltages, dtype=np.complex64)
     if v.ndim != 3:
-        raise ValueError(f"Expected voltages with shape (n_samples, n_freq, n_ant), got {v.shape}")
+        raise ValueError(
+            f"Expected voltages with shape (n_samples, n_freq, n_ant), got {v.shape}"
+        )
 
     n_samples = v.shape[0]
     # Einsum: sum over time t for frequency f and antenna pair (i, j)
@@ -113,11 +115,17 @@ def reference_beamform(
     if t.size == 1 and n_samples > 1:
         t = np.full(n_samples, float(t[0]), dtype=np.float64)
 
-    l_track, m_track, _ = direction_cosines_track(ra_deg, dec_deg, t, lat_deg=lat_deg, lon_deg=lon_deg)
-    delays_s = (l_track[:, None] * pos_x[None, :] + m_track[:, None] * pos_y[None, :]) / C_LIGHT  # (n_samples, n_ant)
+    l_track, m_track, _ = direction_cosines_track(
+        ra_deg, dec_deg, t, lat_deg=lat_deg, lon_deg=lon_deg
+    )
+    delays_s = (
+        l_track[:, None] * pos_x[None, :] + m_track[:, None] * pos_y[None, :]
+    ) / C_LIGHT  # (n_samples, n_ant)
 
     # Conjugate steering phase: +2pi * f * delay
-    phases = (2.0 * math.pi) * (freqs_hz[None, :, None] * delays_s[:, None, :])  # (n_samples, n_freq, n_ant)
+    phases = (2.0 * math.pi) * (
+        freqs_hz[None, :, None] * delays_s[:, None, :]
+    )  # (n_samples, n_freq, n_ant)
 
     if active_antennas is not None:
         mask = np.zeros(n_ant, dtype=np.float32)
@@ -129,7 +137,9 @@ def reference_beamform(
         mask = np.ones(n_ant, dtype=np.float32)
         n_active = n_ant
 
-    weights = (np.exp(1j * phases) * (mask[None, None, :] / math.sqrt(n_active))).astype(np.complex64)
+    weights = (
+        np.exp(1j * phases) * (mask[None, None, :] / math.sqrt(n_active))
+    ).astype(np.complex64)
     formed = np.sum(v * weights, axis=-1)  # (n_samples, n_freq)
     return formed
 
@@ -137,6 +147,7 @@ def reference_beamform(
 # ---------------------------------------------------------------------------
 # 2. Equivalence Checkers & Ground-Truth Verifiers
 # ---------------------------------------------------------------------------
+
 
 def verify_visibility_phasing(
     voltages: np.ndarray,
@@ -186,7 +197,9 @@ def verify_visibility_phasing(
 
     t = np.atleast_1d(np.asarray(unix_times_s, dtype=np.float64))
     t_mean = float(np.mean(t))
-    l_arr, m_arr, _ = direction_cosines_track(ra_deg, dec_deg, np.array([t_mean]), lat_deg=lat_deg, lon_deg=lon_deg)
+    l_arr, m_arr, _ = direction_cosines_track(
+        ra_deg, dec_deg, np.array([t_mean]), lat_deg=lat_deg, lon_deg=lon_deg
+    )
     l0, m0 = float(l_arr[0]), float(m_arr[0])
 
     delays = (pos_x * l0 + pos_y * m0) / C_LIGHT
@@ -204,7 +217,7 @@ def verify_visibility_phasing(
 
     errors_arr = np.array(errors, dtype=np.float64)
     max_err = float(np.max(errors_arr)) if len(errors_arr) > 0 else 0.0
-    rms_err = float(np.sqrt(np.mean(errors_arr ** 2))) if len(errors_arr) > 0 else 0.0
+    rms_err = float(np.sqrt(np.mean(errors_arr**2))) if len(errors_arr) > 0 else 0.0
     passed = max_err <= max_phase_err_rad
 
     return {
@@ -260,8 +273,14 @@ def verify_pointing(
         Verification summary with peak coordinates, angular offset, and passed status.
     """
     cos_dec = max(0.1, math.cos(math.radians(true_dec)))
-    d_ra = np.linspace(-angular_search_radius_deg / cos_dec, angular_search_radius_deg / cos_dec, num_steps)
-    d_dec = np.linspace(-angular_search_radius_deg, angular_search_radius_deg, num_steps)
+    d_ra = np.linspace(
+        -angular_search_radius_deg / cos_dec,
+        angular_search_radius_deg / cos_dec,
+        num_steps,
+    )
+    d_dec = np.linspace(
+        -angular_search_radius_deg, angular_search_radius_deg, num_steps
+    )
 
     power_grid = np.zeros((num_steps, num_steps), dtype=np.float64)
 
@@ -270,8 +289,15 @@ def verify_pointing(
         for j, ddec in enumerate(d_dec):
             dec_probe = float(true_dec + ddec)
             beam = reference_beamform(
-                voltages, pos_x, pos_y, freqs_hz, ra_probe, dec_probe,
-                unix_times_s, lat_deg=lat_deg, lon_deg=lon_deg,
+                voltages,
+                pos_x,
+                pos_y,
+                freqs_hz,
+                ra_probe,
+                dec_probe,
+                unix_times_s,
+                lat_deg=lat_deg,
+                lon_deg=lon_deg,
             )
             power_grid[i, j] = float(np.sum(np.abs(beam) ** 2))
 
@@ -280,7 +306,9 @@ def verify_pointing(
     peak_dec = float(true_dec + d_dec[max_idx[1]])
 
     # Tangent plane angular separation in radians
-    sep_deg = math.sqrt(((peak_ra - true_ra) * cos_dec) ** 2 + (peak_dec - true_dec) ** 2)
+    sep_deg = math.sqrt(
+        ((peak_ra - true_ra) * cos_dec) ** 2 + (peak_dec - true_dec) ** 2
+    )
     offset_rad = math.radians(sep_deg)
     passed = offset_rad <= max_offset_rad
 

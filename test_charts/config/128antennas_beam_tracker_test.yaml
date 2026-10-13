@@ -1,3 +1,4 @@
+---
 type: config
 log_level: info
 
@@ -14,84 +15,84 @@ buffer_depth: 2
 sizeof_complex_float: 8
 
 main_pool:
-  kotekan_metadata_pool: chordMetadata
-  num_metadata_objects: 50
+    kotekan_metadata_pool: chordMetadata
+    num_metadata_objects: 50
 
 # Input buffer (matches rfsocHandlerShuffle layout [time][freq][antenna])
 network_capture_buf:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: samples_per_data_set * num_local_freq * num_elements
-  numa_node: 0
-  metadata_pool: main_pool
-  zero_new_frames: true
-  mlock_frames: false
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set * num_local_freq * num_elements
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
 
 # Output complex voltages buffer [time][freq][max_beams] of float2
 host_formed_beams_buffer:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float
-  numa_node: 0
-  metadata_pool: main_pool
-  zero_new_frames: true
-  mlock_frames: false
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
 
 # Data Generator simulating continuous RFSoC stream
 gen_data:
-  kotekan_stage: testDataGen
-  type: random_signed
-  seed: 42
-  reuse_random: true
-  wait: false
-  num_frames: 4
-  end_interrupt: false
-  out_buf: network_capture_buf
+    kotekan_stage: testDataGen
+    type: random_signed
+    seed: 42
+    reuse_random: true
+    wait: false
+    num_frames: 4
+    end_interrupt: false
+    out_buf: network_capture_buf
 
 # GPU Execution Stage
 gpu:
-  profiling: false
-  commands: &command_list
-    - name: cudaInputData
-      in_buf: host_voltage
-      gpu_mem: voltage
-    - name: cudaSyncInput
-    - name: cudaBeamTrackerCommand
-      gpu_mem_voltage: voltage
-      gpu_mem_formed_beams: formed_beams
-      num_elements: 128
-      num_local_freq: 336
-      samples_per_data_set: 15360
-      integration_spectra: 320
-      spacing_m: 0.6
-      max_beams: 4
-      initial_active_beams: 2
-      source_l0: 0.02
-      source_m0: 0.01
-      source_dl: 0.00001
-      source_dm: 0.000005
-    - name: cudaSyncOutput
-    - name: cudaOutputData
-      in_buf: host_voltage
-      gpu_mem: formed_beams
-      out_buf: host_formed_beams
-  gpu_0:
-    kotekan_stage: cudaProcess
-    gpu_id: 0
-    commands: *command_list
-    in_buffers:
-      host_voltage: network_capture_buf
-    out_buffers:
-      host_formed_beams: host_formed_beams_buffer
+    profiling: false
+    commands: &command_list
+        - name: cudaInputData
+          in_buf: host_voltage
+          gpu_mem: voltage
+        - name: cudaSyncInput
+        - name: cudaBeamTrackerCommand
+          gpu_mem_voltage: voltage
+          gpu_mem_formed_beams: formed_beams
+          num_elements: 128
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          integration_spectra: 320
+          spacing_m: 0.6
+          max_beams: 4
+          initial_active_beams: 2
+          source_l0: 0.02
+          source_m0: 0.01
+          source_dl: 0.00001
+          source_dm: 0.000005
+        - name: cudaSyncOutput
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: formed_beams
+          out_buf: host_formed_beams
+    gpu_0:
+        kotekan_stage: cudaProcess
+        gpu_id: 0
+        commands: *command_list
+        in_buffers:
+            host_voltage: network_capture_buf
+        out_buffers:
+            host_formed_beams: host_formed_beams_buffer
 
 # Write output complex voltages to disk for verification
 write_voltages_output:
-  kotekan_stage: rawFileWrite
-  in_buf: host_formed_beams_buffer
-  base_dir: /tmp/test_charts_tracker_128
-  file_name: multibeam_complex_voltages_128
-  file_ext: bin
-  num_frames_per_file: 1
-  exit_after_n_files: 2
-  prefix_hostname: false
+    kotekan_stage: rawFileWrite
+    in_buf: host_formed_beams_buffer
+    base_dir: /tmp/test_charts_tracker_128
+    file_name: multibeam_complex_voltages_128
+    file_ext: bin
+    num_frames_per_file: 1
+    exit_after_n_files: 2
+    prefix_hostname: false
 

@@ -14,7 +14,8 @@ import argparse
 import numpy as np
 import h5py
 import matplotlib
-matplotlib.use('Agg')
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 _test_charts_dir = os.path.dirname(os.path.abspath(__file__))
@@ -33,6 +34,7 @@ from constants import (
 # 4-bit Complex Data Handling
 # ============================================================================
 
+
 def unpack_4bit_complex_numpy(u8_array: np.ndarray) -> np.ndarray:
     """
     Unpacks int4x2_t (4-bit real in bits 0-3, 4-bit imag in bits 4-7) to complex64.
@@ -43,11 +45,15 @@ def unpack_4bit_complex_numpy(u8_array: np.ndarray) -> np.ndarray:
     imag[imag >= 8] -= 16
     return real.astype(np.float32) + 1j * imag.astype(np.float32)
 
+
 # ============================================================================
 # Antenna Health & Variance Analysis
 # ============================================================================
 
-def analyze_antenna_health(raw_data_ant_freq_time: np.ndarray, power_threshold: float = 0.05):
+
+def analyze_antenna_health(
+    raw_data_ant_freq_time: np.ndarray, power_threshold: float = 0.05
+):
     """
     Analyzes per-antenna power variance to distinguish connected antennas from unplugged ones.
     raw_data shape: (antenna, freq, time)
@@ -65,16 +71,18 @@ def analyze_antenna_health(raw_data_ant_freq_time: np.ndarray, power_threshold: 
 
     for a in range(n_ant):
         cdata = unpack_4bit_complex_numpy(sample_slice[a, :, :])
-        p = np.mean(np.real(cdata)**2 + np.imag(cdata)**2)
+        p = np.mean(np.real(cdata) ** 2 + np.imag(cdata) ** 2)
         powers[a] = p
         if p > power_threshold:
             mask[a] = 1
 
     return mask, powers
 
+
 # ============================================================================
 # Beamformer Engine (Vectorized Analytical Reference)
 # ============================================================================
+
 
 def beamform_reference_cpu(
     raw_ant_freq_time: np.ndarray,
@@ -82,7 +90,7 @@ def beamform_reference_cpu(
     freqs_hz: np.ndarray,
     l: float = 0.0,
     m: float = 0.0,
-    spacing_m: float = 0.6
+    spacing_m: float = 0.6,
 ) -> np.ndarray:
     """
     Synthesizes complex voltages E(time, freq) for a given sky direction (l, m).
@@ -118,23 +126,58 @@ def beamform_reference_cpu(
     # Coherent sum along antenna axis:
     # E(f, t) = sum_a (W[a, f] * V[a, f, t])
     # einsum: 'af, aft -> tf'
-    formed_voltages = np.einsum('af,aft->tf', weights, complex_inputs, optimize=True)
+    formed_voltages = np.einsum("af,aft->tf", weights, complex_inputs, optimize=True)
 
     return formed_voltages
+
 
 # ============================================================================
 # Main Diagnostic & Benchmark Routine
 # ============================================================================
 
+
 def main():
-    parser = argparse.ArgumentParser(description="CHARTS Real HDF5 Beam Tracker Benchmark")
-    parser.add_argument("h5_path", help="Path to HDF5 file (baseband_virtual.h5 or chunk file)")
-    parser.add_argument("--n-time", type=int, default=15360, help="Number of time samples for 1 dump (default: 15360 ~50ms)")
-    parser.add_argument("--n-freq-max", type=int, default=336, help="Max frequency channels to process (default: 336)")
-    parser.add_argument("--spacing-m", type=float, default=0.6, help="Antenna spacing in meters (default: 0.6)")
-    parser.add_argument("--target-ra-deg", type=float, default=83.633, help="Target RA in deg (default: 83.633 - Crab Pulsar)")
-    parser.add_argument("--target-dec-deg", type=float, default=22.014, help="Target Dec in deg (default: 22.014)")
-    parser.add_argument("--out-plot", default="charts_beam_tracker_real_data_benchmark.png", help="Path to save diagnostic plot")
+    parser = argparse.ArgumentParser(
+        description="CHARTS Real HDF5 Beam Tracker Benchmark"
+    )
+    parser.add_argument(
+        "h5_path", help="Path to HDF5 file (baseband_virtual.h5 or chunk file)"
+    )
+    parser.add_argument(
+        "--n-time",
+        type=int,
+        default=15360,
+        help="Number of time samples for 1 dump (default: 15360 ~50ms)",
+    )
+    parser.add_argument(
+        "--n-freq-max",
+        type=int,
+        default=336,
+        help="Max frequency channels to process (default: 336)",
+    )
+    parser.add_argument(
+        "--spacing-m",
+        type=float,
+        default=0.6,
+        help="Antenna spacing in meters (default: 0.6)",
+    )
+    parser.add_argument(
+        "--target-ra-deg",
+        type=float,
+        default=83.633,
+        help="Target RA in deg (default: 83.633 - Crab Pulsar)",
+    )
+    parser.add_argument(
+        "--target-dec-deg",
+        type=float,
+        default=22.014,
+        help="Target Dec in deg (default: 22.014)",
+    )
+    parser.add_argument(
+        "--out-plot",
+        default="charts_beam_tracker_real_data_benchmark.png",
+        help="Path to save diagnostic plot",
+    )
     args = parser.parse_args()
 
     print("======================================================================")
@@ -162,7 +205,9 @@ def main():
         n_freq_file = full_shape[1]
         n_time_file = full_shape[2]
 
-        freq_start_mhz = float(f.attrs.get("freq_start_MHz", DEFAULT_FREQUENCY_START_MHZ))
+        freq_start_mhz = float(
+            f.attrs.get("freq_start_MHz", DEFAULT_FREQUENCY_START_MHZ)
+        )
         delta_freq_mhz = float(f.attrs.get("delta_freq_MHz", CHARTS_CHANNEL_WIDTH_MHZ))
         delta_time_us = float(f.attrs.get("delta_time_us", FPGA_TIME_RESOLUTION_US))
 
@@ -170,8 +215,12 @@ def main():
         n_freq = min(args.n_freq_max, n_freq_file)
 
         print(f"\n--- Ingesting 1 Dump for Benchmarking ---")
-        print(f"  Time Samples     : {n_time:,} ({n_time * delta_time_us / 1000.0:.2f} ms of real sky data)")
-        print(f"  Frequency Range  : {freq_start_mhz:.1f} MHz to {freq_start_mhz + n_freq * delta_freq_mhz:.1f} MHz ({n_freq} channels)")
+        print(
+            f"  Time Samples     : {n_time:,} ({n_time * delta_time_us / 1000.0:.2f} ms of real sky data)"
+        )
+        print(
+            f"  Frequency Range  : {freq_start_mhz:.1f} MHz to {freq_start_mhz + n_freq * delta_freq_mhz:.1f} MHz ({n_freq} channels)"
+        )
         print(f"  Antenna Count    : {n_ant_file}")
 
         t0_read = time.perf_counter()
@@ -188,7 +237,9 @@ def main():
     connected_count = int(np.sum(mask))
     unplugged_count = n_ant_file - connected_count
 
-    print(f"  Connected / Active Antennas   : {connected_count} / {n_ant_file} ({connected_count/n_ant_file*100:.1f}%)")
+    print(
+        f"  Connected / Active Antennas   : {connected_count} / {n_ant_file} ({connected_count/n_ant_file*100:.1f}%)"
+    )
     print(f"  Unplugged / Silent Antennas   : {unplugged_count} / {n_ant_file}")
     print(f"  Mean Power of Active Antennas : {np.mean(powers[mask == 1]):.4f}")
     if unplugged_count > 0:
@@ -204,9 +255,13 @@ def main():
     print("\n--- Running Beam Tracker on Real Sky Dump ---")
     t0_bf = time.perf_counter()
     # Zenith beam (l=0, m=0)
-    formed_zenith = beamform_reference_cpu(raw_slice, mask, freqs_hz, l=0.0, m=0.0, spacing_m=args.spacing_m)
+    formed_zenith = beamform_reference_cpu(
+        raw_slice, mask, freqs_hz, l=0.0, m=0.0, spacing_m=args.spacing_m
+    )
     # Off-zenith tracked beam
-    formed_offset = beamform_reference_cpu(raw_slice, mask, freqs_hz, l=0.05, m=0.02, spacing_m=args.spacing_m)
+    formed_offset = beamform_reference_cpu(
+        raw_slice, mask, freqs_hz, l=0.05, m=0.02, spacing_m=args.spacing_m
+    )
     t1_bf = time.perf_counter()
 
     bf_time_ms = (t1_bf - t0_bf) * 1000.0
@@ -219,8 +274,8 @@ def main():
     print(f"  Real-Time Budget : {real_time_budget_ms:.2f} ms (Frame duration)")
 
     # 3. Analyze Output Complex Voltages & Power
-    zenith_power = np.abs(formed_zenith)**2  # (time, freq)
-    offset_power = np.abs(formed_offset)**2
+    zenith_power = np.abs(formed_zenith) ** 2  # (time, freq)
+    offset_power = np.abs(formed_offset) ** 2
 
     mean_zenith_p = np.mean(zenith_power)
     mean_offset_p = np.mean(offset_power)
@@ -228,11 +283,17 @@ def main():
     measured_array_gain = mean_zenith_p / max(1e-12, mean_single_ant_p)
 
     print(f"\n--- Output Complex Voltage Statistics ---")
-    print(f"  Formed Beam Real Voltages Range : [{np.min(np.real(formed_zenith)):.2f} .. {np.max(np.real(formed_zenith)):.2f}]")
-    print(f"  Formed Beam Imag Voltages Range : [{np.min(np.imag(formed_zenith)):.2f} .. {np.max(np.imag(formed_zenith)):.2f}]")
+    print(
+        f"  Formed Beam Real Voltages Range : [{np.min(np.real(formed_zenith)):.2f} .. {np.max(np.real(formed_zenith)):.2f}]"
+    )
+    print(
+        f"  Formed Beam Imag Voltages Range : [{np.min(np.imag(formed_zenith)):.2f} .. {np.max(np.imag(formed_zenith)):.2f}]"
+    )
     print(f"  Mean Formed Beam Power |E|²     : {mean_zenith_p:.4f}")
     print(f"  Incoherent Single-Antenna Power : {mean_single_ant_p:.4f}")
-    print(f"  Measured Array Coherent Gain    : {measured_array_gain:.2f}x (Theoretical Max: {connected_count}x for noise / {connected_count**2}x for coherent source)")
+    print(
+        f"  Measured Array Coherent Gain    : {measured_array_gain:.2f}x (Theoretical Max: {connected_count}x for noise / {connected_count**2}x for coherent source)"
+    )
 
     # 4. Generate Comprehensive Diagnostic Visualizations
     print(f"\n--- Generating Diagnostic Plots -> {args.out_plot} ---")
@@ -240,11 +301,13 @@ def main():
 
     # Subplot 1: Antenna Power Distribution (Health Mask)
     ax1 = fig.add_subplot(2, 2, 1)
-    colors = ['green' if mask[i] == 1 else 'red' for i in range(n_ant_file)]
-    ax1.bar(range(n_ant_file), powers, color=colors, alpha=0.7, edgecolor='black')
+    colors = ["green" if mask[i] == 1 else "red" for i in range(n_ant_file)]
+    ax1.bar(range(n_ant_file), powers, color=colors, alpha=0.7, edgecolor="black")
     ax1.set_xlabel("Antenna Index")
     ax1.set_ylabel("Mean Power (Variance)")
-    ax1.set_title(f"Antenna Power & Activity Status ({connected_count} Active, {unplugged_count} Unplugged)")
+    ax1.set_title(
+        f"Antenna Power & Activity Status ({connected_count} Active, {unplugged_count} Unplugged)"
+    )
     ax1.grid(alpha=0.3)
 
     # Subplot 2: Dynamic Spectrum (Waterfall of Formed Beam)
@@ -252,8 +315,10 @@ def main():
     # Downsample in time for waterfall display
     waterfall_step = max(1, n_time // 1000)
     waterfall_data = zenith_power[::waterfall_step, :].T  # (freq, time)
-    extent = [0, n_time * delta_time_us / 1000.0, freqs_hz[0]/1e6, freqs_hz[-1]/1e6]
-    im = ax2.imshow(waterfall_data, aspect='auto', origin='lower', cmap='inferno', extent=extent)
+    extent = [0, n_time * delta_time_us / 1000.0, freqs_hz[0] / 1e6, freqs_hz[-1] / 1e6]
+    im = ax2.imshow(
+        waterfall_data, aspect="auto", origin="lower", cmap="inferno", extent=extent
+    )
     ax2.set_xlabel("Time (ms)")
     ax2.set_ylabel("Frequency (MHz)")
     ax2.set_title(f"Formed Beam Dynamic Spectrum (Waterfall I(t, f))")
@@ -264,8 +329,21 @@ def main():
     spec_zenith = np.mean(zenith_power, axis=0)
     spec_offset = np.mean(offset_power, axis=0)
     freq_axis_mhz = freqs_hz / 1e6
-    ax3.plot(freq_axis_mhz, spec_zenith, label=f"Formed Beam (Zenith: l=0, m=0)", color='blue', lw=1.5)
-    ax3.plot(freq_axis_mhz, spec_offset, label=f"Formed Beam (Offset: l=0.05, m=0.02)", color='orange', alpha=0.8, lw=1.2)
+    ax3.plot(
+        freq_axis_mhz,
+        spec_zenith,
+        label=f"Formed Beam (Zenith: l=0, m=0)",
+        color="blue",
+        lw=1.5,
+    )
+    ax3.plot(
+        freq_axis_mhz,
+        spec_offset,
+        label=f"Formed Beam (Offset: l=0.05, m=0.02)",
+        color="orange",
+        alpha=0.8,
+        lw=1.2,
+    )
     ax3.set_xlabel("Frequency (MHz)")
     ax3.set_ylabel("Average Power |E|²")
     ax3.set_title("Formed Beam Power Spectrum")
@@ -278,11 +356,15 @@ def main():
     time_series_ms = np.arange(0, n_time, waterfall_step) * delta_time_us / 1000.0
     ts_zenith = np.mean(zenith_power[::waterfall_step, :], axis=1)
     ts_offset = np.mean(offset_power[::waterfall_step, :], axis=1)
-    ax4.plot(time_series_ms, ts_zenith, label="Zenith Beam", color='purple', lw=1.2)
-    ax4.plot(time_series_ms, ts_offset, label="Offset Beam", color='gray', alpha=0.6, lw=1.0)
+    ax4.plot(time_series_ms, ts_zenith, label="Zenith Beam", color="purple", lw=1.2)
+    ax4.plot(
+        time_series_ms, ts_offset, label="Offset Beam", color="gray", alpha=0.6, lw=1.0
+    )
     ax4.set_xlabel("Time (ms)")
     ax4.set_ylabel("Bandpass-Integrated Power")
-    ax4.set_title(f"Integrated Power Time Series (Frame Duration = {real_time_budget_ms:.2f} ms)")
+    ax4.set_title(
+        f"Integrated Power Time Series (Frame Duration = {real_time_budget_ms:.2f} ms)"
+    )
     ax4.legend()
     ax4.grid(alpha=0.3)
 
@@ -294,6 +376,7 @@ def main():
     print("\n======================================================================")
     print(" BENCHMARK & VERIFICATION ON REAL CHARTS DATA COMPLETE!")
     print("======================================================================")
+
 
 if __name__ == "__main__":
     main()

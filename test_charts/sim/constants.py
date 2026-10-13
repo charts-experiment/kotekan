@@ -98,11 +98,15 @@ FPGA_NUM_SAMP_FFT: int = int(_get_external("FPGA_NUM_SAMP_FFT", 8192))
 DEFAULT_NFFT: int = FPGA_NUM_SAMP_FFT
 NFFT: int = FPGA_NUM_SAMP_FFT
 
-CHARTS_CHANNEL_WIDTH_HZ: float = float(_get_external("CHARTS_CHANNEL_WIDTH_HZ", 300_000.0))
+CHARTS_CHANNEL_WIDTH_HZ: float = float(
+    _get_external("CHARTS_CHANNEL_WIDTH_HZ", 300_000.0)
+)
 CHARTS_CHANNEL_WIDTH_MHZ: float = float(_get_external("CHARTS_CHANNEL_WIDTH_MHZ", 0.3))
 CHANNEL_WIDTH_MHZ: float = CHARTS_CHANNEL_WIDTH_MHZ
 
-FPGA_TIME_RESOLUTION_US: float = float(_get_external("FPGA_TIME_RESOLUTION_US", 10.0 / 3.0))
+FPGA_TIME_RESOLUTION_US: float = float(
+    _get_external("FPGA_TIME_RESOLUTION_US", 10.0 / 3.0)
+)
 TIME_PER_SPECTRUM_US: float = FPGA_TIME_RESOLUTION_US
 TIME_PER_SPECTRUM_S: float = FPGA_TIME_RESOLUTION_US * 1e-6
 SAMPLE_RATE_HZ: float = CHARTS_CHANNEL_WIDTH_HZ
@@ -123,8 +127,12 @@ CHARTS_N_FREQ: int = int(_get_external("CHARTS_N_FREQ", 672))
 LOCAL_FREQUENCY_CHANNELS: int = int(_get_external("LOCAL_FREQUENCY_CHANNELS", 336))
 FREQUENCY_SHARD_COUNT: int = int(_get_external("FREQUENCY_SHARD_COUNT", 2))
 
-DEFAULT_FREQUENCY_START_MHZ: float = float(_get_external("DEFAULT_FREQUENCY_START_MHZ", 300.0))
-DEFAULT_FREQUENCY_START_HZ: float = float(_get_external("DEFAULT_FREQUENCY_START_HZ", 300_000_000.0))
+DEFAULT_FREQUENCY_START_MHZ: float = float(
+    _get_external("DEFAULT_FREQUENCY_START_MHZ", 300.0)
+)
+DEFAULT_FREQUENCY_START_HZ: float = float(
+    _get_external("DEFAULT_FREQUENCY_START_HZ", 300_000_000.0)
+)
 
 
 # ---------------------------------------------------------------------------

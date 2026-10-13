@@ -232,28 +232,45 @@ def run_stress_test(
     print(f"  -> Time Samples per Frame (T)  : {n_time} spectra")
     print(f"  -> Integration Window (N_int)  : {integration_spectra} spectra")
     print(f"  -> Active Beams / Max Beams    : {active_beams} / {max_beams}")
-    print(f"  -> Repetition Count (Loop)     : {repeats:,} repeated integration windows")
-    print(f"  -> Frame Input Size            : {frame_bytes / 1024:.2f} KB ({frame_bytes:,} bytes)")
-    print(f"  -> Total Data Processed Ingest : {total_input_bytes / (1024**2):.2f} MB ({total_input_bytes:,} bytes)")
-    print(f"  -> Real Sky Duration per Frame : {sky_time_per_frame_ms:.4f} ms ({sky_time_per_frame_s:.6f} s)")
-    print(f"  -> Total Real Sky Stream Time  : {total_sky_time_s:.3f} seconds ({total_sky_time_s / 60.0:.2f} minutes)")
+    print(
+        f"  -> Repetition Count (Loop)     : {repeats:,} repeated integration windows"
+    )
+    print(
+        f"  -> Frame Input Size            : {frame_bytes / 1024:.2f} KB ({frame_bytes:,} bytes)"
+    )
+    print(
+        f"  -> Total Data Processed Ingest : {total_input_bytes / (1024**2):.2f} MB ({total_input_bytes:,} bytes)"
+    )
+    print(
+        f"  -> Real Sky Duration per Frame : {sky_time_per_frame_ms:.4f} ms ({sky_time_per_frame_s:.6f} s)"
+    )
+    print(
+        f"  -> Total Real Sky Stream Time  : {total_sky_time_s:.3f} seconds ({total_sky_time_s / 60.0:.2f} minutes)"
+    )
 
     # 1. Generate Input Window
     generate_stress_window_binary(input_file, n_ant=n_ant, n_freq=n_freq, n_time=n_time)
     generate_stress_test_config(
-        config_file, work_dir,
-        n_ant=n_ant, n_freq=n_freq, n_time=n_time,
+        config_file,
+        work_dir,
+        n_ant=n_ant,
+        n_freq=n_freq,
+        n_time=n_time,
         integration_spectra=integration_spectra,
-        max_beams=max_beams, active_beams=active_beams,
-        repeats=repeats, rest_port=rest_port
+        max_beams=max_beams,
+        active_beams=active_beams,
+        repeats=repeats,
+        rest_port=rest_port,
     )
 
     # 2. Launch Kotekan
     print(f"\n[2/4] Launching Kotekan Pipeline with Continuous Loop Streaming...")
     cmd = [
         str(_kotekan_bin),
-        "-c", str(config_file),
-        "-b", f"127.0.0.1:{rest_port}",
+        "-c",
+        str(config_file),
+        "-b",
+        f"127.0.0.1:{rest_port}",
     ]
 
     rest_ops_done = []
@@ -315,23 +332,51 @@ def run_stress_test(
     # RTF < 1.0: Real-time capable (processes faster than sky cadence)
     # RTF > 1.0: GPU bottlenecked (processes slower than sky cadence)
     rtf = ms_per_frame / sky_time_per_frame_ms
-    status_str = "[REAL-TIME CAPABLE]" if rtf <= 1.0 else "[GPU BOTTLENECKED (Expected on this device)]"
+    status_str = (
+        "[REAL-TIME CAPABLE]"
+        if rtf <= 1.0
+        else "[GPU BOTTLENECKED (Expected on this device)]"
+    )
 
     print(f"\n[3/4] High-Throughput Stress Test Profiling Results:")
     print("=" * 80)
-    print(f" | Metric                           | Measured Value         | Real-Time Target         |")
-    print(" +----------------------------------+------------------------+--------------------------+")
-    print(f" | Repeated Integration Frames      | {repeats:12,d} frames   | Continuous Stream        |")
-    print(f" | Total Processing Wall Time       | {elapsed_s:12.3f} s        | {total_sky_time_s:10.3f} s (Sky Time)  |")
-    print(f" | Processing Frame Rate (FPS)      | {throughput_fps:12.1f} fps      | {1000.0/sky_time_per_frame_ms:10.1f} fps (Sky Rate)  |")
-    print(f" | Ingestion Throughput (MB/s)      | {throughput_input_mbps:12.2f} MB/s     | {(frame_bytes/(1024**2))/(sky_time_per_frame_s):10.2f} MB/s           |")
-    print(f" | Ingestion Throughput (GB/s)      | {throughput_input_gbps:12.3f} GB/s     | {(frame_bytes/(1024**3))/(sky_time_per_frame_s):10.3f} GB/s           |")
-    print(f" | Complex Spectra Processed Rate   | {spectra_rate_msps:12.2f} MSamp/s   | {(n_freq * 300000.0)/1e6:10.2f} MSamp/s        |")
-    print(f" | Processing Latency per Frame     | {ms_per_frame:12.4f} ms       | {sky_time_per_frame_ms:10.4f} ms (Cadence)   |")
-    print(f" | Processing Time per Spectrum     | {us_per_spectra:12.4f} us       | {FPGA_TIME_RESOLUTION_US:10.4f} us (Cadence)   |")
-    print(f" | Real-Time Factor (T_gpu / T_sky) | {rtf:12.3f} x        | <= 1.000 x               |")
+    print(
+        f" | Metric                           | Measured Value         | Real-Time Target         |"
+    )
+    print(
+        " +----------------------------------+------------------------+--------------------------+"
+    )
+    print(
+        f" | Repeated Integration Frames      | {repeats:12,d} frames   | Continuous Stream        |"
+    )
+    print(
+        f" | Total Processing Wall Time       | {elapsed_s:12.3f} s        | {total_sky_time_s:10.3f} s (Sky Time)  |"
+    )
+    print(
+        f" | Processing Frame Rate (FPS)      | {throughput_fps:12.1f} fps      | {1000.0/sky_time_per_frame_ms:10.1f} fps (Sky Rate)  |"
+    )
+    print(
+        f" | Ingestion Throughput (MB/s)      | {throughput_input_mbps:12.2f} MB/s     | {(frame_bytes/(1024**2))/(sky_time_per_frame_s):10.2f} MB/s           |"
+    )
+    print(
+        f" | Ingestion Throughput (GB/s)      | {throughput_input_gbps:12.3f} GB/s     | {(frame_bytes/(1024**3))/(sky_time_per_frame_s):10.3f} GB/s           |"
+    )
+    print(
+        f" | Complex Spectra Processed Rate   | {spectra_rate_msps:12.2f} MSamp/s   | {(n_freq * 300000.0)/1e6:10.2f} MSamp/s        |"
+    )
+    print(
+        f" | Processing Latency per Frame     | {ms_per_frame:12.4f} ms       | {sky_time_per_frame_ms:10.4f} ms (Cadence)   |"
+    )
+    print(
+        f" | Processing Time per Spectrum     | {us_per_spectra:12.4f} us       | {FPGA_TIME_RESOLUTION_US:10.4f} us (Cadence)   |"
+    )
+    print(
+        f" | Real-Time Factor (T_gpu / T_sky) | {rtf:12.3f} x        | <= 1.000 x               |"
+    )
     print(f" | Real-Time Budget Status          | {status_str:40s} |")
-    print(f" | Concurrent REST Steering Ops     | {rest_count:12,d} calls    | Zero Lock-Ups / Crashes  |")
+    print(
+        f" | Concurrent REST Steering Ops     | {rest_count:12,d} calls    | Zero Lock-Ups / Crashes  |"
+    )
     print("=" * 80)
 
     # 4. Cleanup
@@ -363,13 +408,36 @@ def run_stress_test(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CHARTS Kotekan Beam Tracker Loop Stress Test")
-    parser.add_argument("--repeats", type=int, default=1000, help="Number of integration frame repeats (default: 1000)")
-    parser.add_argument("--n-ant", type=int, default=64, help="Number of antenna elements (default: 64)")
-    parser.add_argument("--n-freq", type=int, default=16, help="Number of frequency channels (default: 16)")
-    parser.add_argument("--n-time", type=int, default=320, help="Time samples per integration frame (default: 320)")
-    parser.add_argument("--beams", type=int, default=2, help="Number of active beams (default: 2)")
-    parser.add_argument("--no-rest", action="store_true", help="Disable concurrent REST steering test")
+    parser = argparse.ArgumentParser(
+        description="CHARTS Kotekan Beam Tracker Loop Stress Test"
+    )
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=1000,
+        help="Number of integration frame repeats (default: 1000)",
+    )
+    parser.add_argument(
+        "--n-ant", type=int, default=64, help="Number of antenna elements (default: 64)"
+    )
+    parser.add_argument(
+        "--n-freq",
+        type=int,
+        default=16,
+        help="Number of frequency channels (default: 16)",
+    )
+    parser.add_argument(
+        "--n-time",
+        type=int,
+        default=320,
+        help="Time samples per integration frame (default: 320)",
+    )
+    parser.add_argument(
+        "--beams", type=int, default=2, help="Number of active beams (default: 2)"
+    )
+    parser.add_argument(
+        "--no-rest", action="store_true", help="Disable concurrent REST steering test"
+    )
     args = parser.parse_args()
 
     run_stress_test(

@@ -132,7 +132,6 @@ ASTRONOMICAL_CATALOG: Dict[str, Dict[str, Any]] = {
         "nominal_amp": 3.2,
         "description": "Bright extended SNR, transits 9.56 deg S of zenith",
     },
-
     # 2. Southern Pulsars (Dispersion & Timing)
     "psr_j0437": {
         "name": "PSR J0437-4715",
@@ -161,7 +160,6 @@ ASTRONOMICAL_CATALOG: Dict[str, Dict[str, Any]] = {
         "dm": 48.9,
         "description": "Relativistic double pulsar, transits 2.76 deg N of zenith",
     },
-
     # 3. Transient & Artificial Sources
     "zenith": {
         "name": "Caren Zenith Transit Field",
@@ -237,10 +235,18 @@ def parse_scenario_name(scenario: str) -> Tuple[str, bool, bool]:
     saturate = "saturat" in s
     if "_no_noise" in s:
         use_noise = False
-        target_key = s.replace("_no_noise", "").replace("_saturated", "").replace("saturated_", "")
+        target_key = (
+            s.replace("_no_noise", "")
+            .replace("_saturated", "")
+            .replace("saturated_", "")
+        )
     elif "_with_noise" in s:
         use_noise = True
-        target_key = s.replace("_with_noise", "").replace("_saturated", "").replace("saturated_", "")
+        target_key = (
+            s.replace("_with_noise", "")
+            .replace("_saturated", "")
+            .replace("saturated_", "")
+        )
     elif "saturated" in s:
         use_noise = True
         target_key = s.replace("_saturated", "").replace("saturated_", "")
@@ -274,8 +280,8 @@ def parse_scenario_name(scenario: str) -> Tuple[str, bool, bool]:
 def generate_scenario_baseband(
     scenario: str,
     num_antennas: int = 64,
-    num_freq: int = LOCAL_FREQUENCY_CHANNELS,      # 336
-    samples_per_frame: int = 1536,                 # 5.12 ms (1536 * 3.333 us)
+    num_freq: int = LOCAL_FREQUENCY_CHANNELS,  # 336
+    samples_per_frame: int = 1536,  # 5.12 ms (1536 * 3.333 us)
     num_frames: int = 1,
     freq_start_mhz: float = DEFAULT_FREQUENCY_START_MHZ,
     delta_freq_mhz: float = CHARTS_CHANNEL_WIDTH_MHZ,
@@ -302,7 +308,9 @@ def generate_scenario_baseband(
 
     # Per-antenna independent thermal noise variance (T_sys variations across receivers)
     if use_noise:
-        antenna_noise_sigmas = rng.uniform(0.40, 0.70, size=num_antennas).astype(np.float32)
+        antenna_noise_sigmas = rng.uniform(0.40, 0.70, size=num_antennas).astype(
+            np.float32
+        )
     else:
         antenna_noise_sigmas = np.zeros(num_antennas, dtype=np.float32)
 
@@ -324,17 +332,27 @@ def generate_scenario_baseband(
 
     for frame_idx in range(num_frames):
         global_t_offset = frame_idx * samples_per_frame
-        t_indices = np.arange(global_t_offset, global_t_offset + samples_per_frame, dtype=np.float32)
+        t_indices = np.arange(
+            global_t_offset, global_t_offset + samples_per_frame, dtype=np.float32
+        )
 
         # 1. Background thermal noise: independent per antenna
         if use_noise:
-            noise_r = rng.normal(0.0, 1.0, size=(samples_per_frame, num_freq, num_antennas)).astype(np.float32)
-            noise_i = rng.normal(0.0, 1.0, size=(samples_per_frame, num_freq, num_antennas)).astype(np.float32)
+            noise_r = rng.normal(
+                0.0, 1.0, size=(samples_per_frame, num_freq, num_antennas)
+            ).astype(np.float32)
+            noise_i = rng.normal(
+                0.0, 1.0, size=(samples_per_frame, num_freq, num_antennas)
+            ).astype(np.float32)
             v_real = noise_r * antenna_noise_sigmas[None, None, :]
             v_imag = noise_i * antenna_noise_sigmas[None, None, :]
         else:
-            v_real = np.zeros((samples_per_frame, num_freq, num_antennas), dtype=np.float32)
-            v_imag = np.zeros((samples_per_frame, num_freq, num_antennas), dtype=np.float32)
+            v_real = np.zeros(
+                (samples_per_frame, num_freq, num_antennas), dtype=np.float32
+            )
+            v_imag = np.zeros(
+                (samples_per_frame, num_freq, num_antennas), dtype=np.float32
+            )
 
         # 2. Celestial source wavefront
         # Dynamic direction cosines (for moving satellites/RFI, else static)
@@ -342,28 +360,46 @@ def generate_scenario_baseband(
         m_t = (m0 + drift_dm * t_indices).astype(np.float32)
 
         # Antenna geometric path delays: (samples_per_frame, num_antennas) in seconds
-        delays = (np.outer(l_t, pos_x.astype(np.float32)) + np.outer(m_t, pos_y.astype(np.float32))) * c_inv
+        delays = (
+            np.outer(l_t, pos_x.astype(np.float32))
+            + np.outer(m_t, pos_y.astype(np.float32))
+        ) * c_inv
 
         # Intrinsic phase across time and frequency
-        base_phases = two_pi_f32 * np.outer(t_indices * np.float32(0.005), freqs_hz.astype(np.float32) * np.float32(1e-8))
+        base_phases = two_pi_f32 * np.outer(
+            t_indices * np.float32(0.005),
+            freqs_hz.astype(np.float32) * np.float32(1e-8),
+        )
 
         # Geometric phase shifts: (samples_per_frame, num_freq, num_antennas)
-        geom_phases = two_pi_f32 * (delays[:, None, :] * freqs_hz.astype(np.float32)[None, :, None])
+        geom_phases = two_pi_f32 * (
+            delays[:, None, :] * freqs_hz.astype(np.float32)[None, :, None]
+        )
         total_phases = base_phases[:, :, None] - geom_phases
 
         # Dispersion delay and pulse envelope for FRB / Pulsar
         if is_frb:
             # Quadratic dispersion delay: Delta t = 4.1488e-3 * DM * (f^-2 - f_ref^-2)
             f_ref = freqs_hz[-1]
-            dm_delays_s = (K_DM * 1e-6) * dm * (1.0 / (freqs_hz / 1e9)**2 - 1.0 / (f_ref / 1e9)**2)
+            dm_delays_s = (
+                (K_DM * 1e-6)
+                * dm
+                * (1.0 / (freqs_hz / 1e9) ** 2 - 1.0 / (f_ref / 1e9) ** 2)
+            )
             t_physical_s = (t_indices * dt_s).astype(np.float32)
             pulse_center = np.float32((samples_per_frame * dt_s) * 0.4)
             pulse_width_s = np.float32(0.001)  # 1 ms width
-            t_diff = t_physical_s[:, None] - (pulse_center + dm_delays_s[None, :].astype(np.float32))
-            envelope = np.exp(-0.5 * (t_diff / pulse_width_s)**2).astype(np.float32)
+            t_diff = t_physical_s[:, None] - (
+                pulse_center + dm_delays_s[None, :].astype(np.float32)
+            )
+            envelope = np.exp(-0.5 * (t_diff / pulse_width_s) ** 2).astype(np.float32)
 
-            v_real += np.float32(source_amp) * envelope[:, :, None] * np.cos(total_phases)
-            v_imag += np.float32(source_amp) * envelope[:, :, None] * np.sin(total_phases)
+            v_real += (
+                np.float32(source_amp) * envelope[:, :, None] * np.cos(total_phases)
+            )
+            v_imag += (
+                np.float32(source_amp) * envelope[:, :, None] * np.sin(total_phases)
+            )
         else:
             v_real += np.float32(source_amp) * np.cos(total_phases)
             v_imag += np.float32(source_amp) * np.sin(total_phases)
@@ -420,7 +456,9 @@ def generate_scenario_baseband(
     return packed_frames, freqs_hz, meta
 
 
-def save_baseband_to_hdf5(filepath: Path, packed_frames: np.ndarray, freqs_hz: np.ndarray, meta: dict):
+def save_baseband_to_hdf5(
+    filepath: Path, packed_frames: np.ndarray, freqs_hz: np.ndarray, meta: dict
+):
     """Saves packed voltage data to HDF5 matching CHORD/CHARTS metadata specifications."""
     filepath.parent.mkdir(parents=True, exist_ok=True)
     num_frames, n_time, n_freq, n_ant = packed_frames.shape
@@ -520,9 +558,13 @@ def run_all_scenarios(
     print("=" * 78)
     print(" CHARTS 64-Antenna Baseband Dump Generator")
     print(f" Output Directory   : {output_dir}")
-    print(f" Antennas           : {num_antennas} (8x8 grid, dx=dy={DEFAULT_SPACING_M}m)")
+    print(
+        f" Antennas           : {num_antennas} (8x8 grid, dx=dy={DEFAULT_SPACING_M}m)"
+    )
     print(f" Frequency Channels : {num_freq} (300.0 - 400.5 MHz)")
-    print(f" Samples Per Frame  : {samples_per_frame} ({samples_per_frame * FPGA_TIME_RESOLUTION_US / 1000.0:.2f} ms)")
+    print(
+        f" Samples Per Frame  : {samples_per_frame} ({samples_per_frame * FPGA_TIME_RESOLUTION_US / 1000.0:.2f} ms)"
+    )
     print(f" Frames Per Scenario: {num_frames}")
     print(f" Total Scenarios    : {len(scenario_list)}")
     print("=" * 78)
@@ -554,18 +596,22 @@ def run_all_scenarios(
         h5_size_mb = h5_path.stat().st_size / (1024 * 1024)
         bin_size_mb = bin_path.stat().st_size / (1024 * 1024)
 
-        summary.append({
-            "scenario": sc,
-            "target": meta["target_name"],
-            "category": meta["category"],
-            "noise": "Yes (random per-ant)" if meta["use_noise"] else "No",
-            "saturated": f"Ants {meta['saturated_antennas']}" if meta["saturate"] else "None",
-            "h5_file": str(h5_path),
-            "h5_size_mb": f"{h5_size_mb:.2f} MB",
-            "bin_file": str(bin_path),
-            "bin_size_mb": f"{bin_size_mb:.2f} MB",
-            "sim_time_ms": f"{meta['generation_time_ms']:.1f} ms",
-        })
+        summary.append(
+            {
+                "scenario": sc,
+                "target": meta["target_name"],
+                "category": meta["category"],
+                "noise": "Yes (random per-ant)" if meta["use_noise"] else "No",
+                "saturated": (
+                    f"Ants {meta['saturated_antennas']}" if meta["saturate"] else "None"
+                ),
+                "h5_file": str(h5_path),
+                "h5_size_mb": f"{h5_size_mb:.2f} MB",
+                "bin_file": str(bin_path),
+                "bin_size_mb": f"{bin_size_mb:.2f} MB",
+                "sim_time_ms": f"{meta['generation_time_ms']:.1f} ms",
+            }
+        )
 
     print("\n" + "=" * 78)
     print(" ALL REQUESTED SCENARIOS GENERATED SUCCESSFULLY!")
@@ -578,7 +624,9 @@ def run_all_scenarios(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CHARTS 64-Antenna Baseband Dump Generator")
+    parser = argparse.ArgumentParser(
+        description="CHARTS 64-Antenna Baseband Dump Generator"
+    )
     parser.add_argument(
         "--scenario",
         type=str,
@@ -587,7 +635,15 @@ def main():
     )
     parser.add_argument(
         "--category",
-        choices=["all", "calibrator", "solar", "pulsar", "transient", "artificial", "zenith"],
+        choices=[
+            "all",
+            "calibrator",
+            "solar",
+            "pulsar",
+            "transient",
+            "artificial",
+            "zenith",
+        ],
         default="all",
         help="Filter scenarios by astronomical category",
     )
@@ -597,10 +653,24 @@ def main():
         default="/project/def-vanderli/ferpb",
         help="Base output directory (default: /project/def-vanderli/ferpb)",
     )
-    parser.add_argument("--num-frames", type=int, default=1, help="Number of 5.12 ms frames (default: 1)")
-    parser.add_argument("--samples-per-frame", type=int, default=1536, help="Samples per frame (default: 1536 = 5.12 ms)")
-    parser.add_argument("--antennas", type=int, default=64, help="Number of antennas (default: 64)")
-    parser.add_argument("--num-freq", type=int, default=336, help="Frequency channels (default: 336)")
+    parser.add_argument(
+        "--num-frames",
+        type=int,
+        default=1,
+        help="Number of 5.12 ms frames (default: 1)",
+    )
+    parser.add_argument(
+        "--samples-per-frame",
+        type=int,
+        default=1536,
+        help="Samples per frame (default: 1536 = 5.12 ms)",
+    )
+    parser.add_argument(
+        "--antennas", type=int, default=64, help="Number of antennas (default: 64)"
+    )
+    parser.add_argument(
+        "--num-freq", type=int, default=336, help="Frequency channels (default: 336)"
+    )
     args = parser.parse_args()
 
     out_dir = Path(args.output_dir)
@@ -647,8 +717,12 @@ def main():
         bin_path = out_baseband / f"{args.scenario}_64ant_5ms_0000000.bin"
         save_baseband_to_hdf5(h5_path, packed_frames, freqs_hz, meta)
         save_baseband_to_raw_bin(bin_path, packed_frames)
-        print(f"[SUCCESS] Saved {h5_path} ({h5_path.stat().st_size / (1024*1024):.2f} MB)")
-        print(f"[SUCCESS] Saved {bin_path} ({bin_path.stat().st_size / (1024*1024):.2f} MB)")
+        print(
+            f"[SUCCESS] Saved {h5_path} ({h5_path.stat().st_size / (1024*1024):.2f} MB)"
+        )
+        print(
+            f"[SUCCESS] Saved {bin_path} ({bin_path.stat().st_size / (1024*1024):.2f} MB)"
+        )
 
 
 if __name__ == "__main__":

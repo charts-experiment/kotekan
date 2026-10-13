@@ -27,11 +27,11 @@ import numpy as np
 from .constants import DIGITIZER_NOMINAL_SIGMA_LSB
 
 # Physical constants
-K_BOLTZMANN = 1.380649e-23     # J / K
-C_LIGHT = 299_792_458.0        # m / s
-T_PHYS_DEFAULT = 290.0         # Standard physical temperature in Kelvin
-T_CMB = 2.725                  # Cosmic Microwave Background temperature in Kelvin
-T_ATM_400MHZ = 1.5             # Typical atmospheric zenith brightness temperature in Kelvin
+K_BOLTZMANN = 1.380649e-23  # J / K
+C_LIGHT = 299_792_458.0  # m / s
+T_PHYS_DEFAULT = 290.0  # Standard physical temperature in Kelvin
+T_CMB = 2.725  # Cosmic Microwave Background temperature in Kelvin
+T_ATM_400MHZ = 1.5  # Typical atmospheric zenith brightness temperature in Kelvin
 
 
 def db_to_lin_power(val_db: float) -> float:
@@ -53,6 +53,7 @@ def noise_figure_to_temp(nf_db: float, t_phys: float = T_PHYS_DEFAULT) -> float:
 @dataclass
 class AnalogChainParams:
     """Hardware parameters for CHARTS analog signal chain."""
+
     antenna_impedance_ohm: float = 100.0
     band_min_mhz: float = 300.0
     band_max_mhz: float = 500.0
@@ -93,32 +94,42 @@ class ChartsNoiseModel:
         self.alt_m = site_alt_m
 
         # Precompute receiver noise temperature via Friis cascade
-        self.t_ulna = noise_figure_to_temp(self.params.ulna_nf_db, self.params.t_ground_k)
+        self.t_ulna = noise_figure_to_temp(
+            self.params.ulna_nf_db, self.params.t_ground_k
+        )
         self.g_ulna_lin = db_to_lin_power(self.params.ulna_gain_db)
-        self.t_lna2 = noise_figure_to_temp(self.params.lna2_nf_db, self.params.t_ground_k)
+        self.t_lna2 = noise_figure_to_temp(
+            self.params.lna2_nf_db, self.params.t_ground_k
+        )
 
         # T_rx = T_1 + T_2 / G_1
         self.t_rx = self.t_ulna + (self.t_lna2 / self.g_ulna_lin)
 
         # Antenna directivity from HPBW (Gaussian beam approximation)
         hpbw_rad = math.radians(self.params.antenna_hpbw_deg)
-        self.omega_a_sr = 1.133 * (hpbw_rad ** 2)
+        self.omega_a_sr = 1.133 * (hpbw_rad**2)
         self.directivity = (4.0 * math.pi) / self.omega_a_sr
         self.directivity_dbi = lin_to_db_power(self.directivity)
 
         # Primary beam Gaussian sigma in degrees
-        self.sigma_pb_deg = self.params.antenna_hpbw_deg / (2.0 * math.sqrt(2.0 * math.log(2.0)))
+        self.sigma_pb_deg = self.params.antenna_hpbw_deg / (
+            2.0 * math.sqrt(2.0 * math.log(2.0))
+        )
 
     def receiver_temperature(self) -> float:
         """Returns the total receiver noise temperature in Kelvin."""
         return self.t_rx
 
-    def effective_area(self, freq_mhz: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
+    def effective_area(
+        self, freq_mhz: Union[float, np.ndarray]
+    ) -> Union[float, np.ndarray]:
         """Computes antenna effective aperture A_eff(nu) = D * lambda^2 / (4 * pi)."""
         wavelength_m = C_LIGHT / (np.asarray(freq_mhz) * 1e6)
-        return (self.directivity * (wavelength_m ** 2)) / (4.0 * math.pi)
+        return (self.directivity * (wavelength_m**2)) / (4.0 * math.pi)
 
-    def primary_beam_attenuation(self, theta_deg: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
+    def primary_beam_attenuation(
+        self, theta_deg: Union[float, np.ndarray]
+    ) -> Union[float, np.ndarray]:
         """Computes Gaussian primary beam attenuation for an angle theta (deg) off zenith."""
         th = np.asarray(theta_deg, dtype=np.float64)
         return np.exp(-0.5 * ((th / self.sigma_pb_deg) ** 2))
@@ -138,17 +149,30 @@ class ChartsNoiseModel:
         t_gal = self.galactic_temperature(freq_mhz, galactic_factor=galactic_factor)
         return T_CMB + t_gal + T_ATM_400MHZ
 
-    def ground_spillover_temperature(self, spillover_fraction: Optional[float] = None) -> float:
+    def ground_spillover_temperature(
+        self, spillover_fraction: Optional[float] = None
+    ) -> float:
         """Computes ground spillover noise pickup."""
-        frac = self.params.ground_spillover_fraction if spillover_fraction is None else spillover_fraction
+        frac = (
+            self.params.ground_spillover_fraction
+            if spillover_fraction is None
+            else spillover_fraction
+        )
         return self.params.t_ground_k * frac
 
-    def sun_position(self, utc_dt: datetime.datetime) -> Tuple[float, float, float, float, float]:
+    def sun_position(
+        self, utc_dt: datetime.datetime
+    ) -> Tuple[float, float, float, float, float]:
         """Computes topocentric solar coordinates for Observatorio Carén.
         Returns: (l, m, n, elevation_deg, azimuth_deg)
         """
         doy = utc_dt.timetuple().tm_yday
-        hour_frac = utc_dt.hour + utc_dt.minute / 60.0 + utc_dt.second / 3600.0 + utc_dt.microsecond / 3.6e9
+        hour_frac = (
+            utc_dt.hour
+            + utc_dt.minute / 60.0
+            + utc_dt.second / 3600.0
+            + utc_dt.microsecond / 3.6e9
+        )
 
         gamma = 2.0 * math.pi * (doy - 1) / 365.0
         decl_deg = (
@@ -177,8 +201,12 @@ class ChartsNoiseModel:
         lat_rad = math.radians(self.lat_deg)
 
         l = -math.cos(dec_rad) * math.sin(ha_rad)
-        m = math.sin(dec_rad) * math.cos(lat_rad) - math.cos(dec_rad) * math.sin(lat_rad) * math.cos(ha_rad)
-        n = math.sin(dec_rad) * math.sin(lat_rad) + math.cos(dec_rad) * math.cos(lat_rad) * math.cos(ha_rad)
+        m = math.sin(dec_rad) * math.cos(lat_rad) - math.cos(dec_rad) * math.sin(
+            lat_rad
+        ) * math.cos(ha_rad)
+        n = math.sin(dec_rad) * math.sin(lat_rad) + math.cos(dec_rad) * math.cos(
+            lat_rad
+        ) * math.cos(ha_rad)
 
         elevation_deg = math.degrees(math.asin(max(-1.0, min(1.0, n))))
         azimuth_rad = math.atan2(l, m)
@@ -192,7 +220,9 @@ class ChartsNoiseModel:
         """Computes Sun radio flux density in Jansky across 300-500 MHz."""
         f = np.asarray(freq_mhz, dtype=np.float64)
         base_flux_400 = 1.5e5  # Jy
-        scale = {"quiet": 1.0, "moderate": 2.5, "active": 6.0}.get(activity.lower(), 1.0)
+        scale = {"quiet": 1.0, "moderate": 2.5, "active": 6.0}.get(
+            activity.lower(), 1.0
+        )
         return base_flux_400 * scale * ((f / 400.0) ** -1.0)
 
     def sun_antenna_temperature(
@@ -204,8 +234,16 @@ class ChartsNoiseModel:
         """Computes Sun antenna temperature after primary beam attenuation."""
         l, m, n, elev_deg, _ = self.sun_position(utc_dt)
         if elev_deg <= 0.0:
-            return (np.zeros_like(freq_mhz, dtype=np.float64) if isinstance(freq_mhz, np.ndarray) else 0.0,
-                    elev_deg, l, m)
+            return (
+                (
+                    np.zeros_like(freq_mhz, dtype=np.float64)
+                    if isinstance(freq_mhz, np.ndarray)
+                    else 0.0
+                ),
+                elev_deg,
+                l,
+                m,
+            )
 
         theta_sun_deg = 90.0 - elev_deg
         pb_gain = self.primary_beam_attenuation(theta_sun_deg)
@@ -256,7 +294,9 @@ class ChartsNoiseModel:
             "sun_m": m_sun,
         }
 
-    def temp_to_adc_sigma(self, temp_k: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
+    def temp_to_adc_sigma(
+        self, temp_k: Union[float, np.ndarray]
+    ) -> Union[float, np.ndarray]:
         """Converts temperature (K) to 4-bit ADC voltage standard deviation (LSB)."""
         t = np.asarray(temp_k, dtype=np.float64)
         t_safe = np.maximum(t, 0.0)

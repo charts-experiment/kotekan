@@ -55,7 +55,9 @@ def create_scenario_yaml_config(
 ):
     """Writes unified Kotekan YAML config: chartsFEngineSim -> write_baseband + cudaCorrelatorAstron -> write_correlator."""
     yaml_path.parent.mkdir(parents=True, exist_ok=True)
-    num_blocks = (num_elements // 2) * (num_elements // 2 + 1) // 2  # 528 for 64 elements
+    num_blocks = (
+        (num_elements // 2) * (num_elements // 2 + 1) // 2
+    )  # 528 for 64 elements
     target_key, use_noise, saturate = parse_scenario_name(scenario)
 
     content = f"""######################################################################
@@ -235,9 +237,13 @@ def run_pipeline(
     )
 
     # 2. Run Kotekan Correlator for Each Scenario
-    print("\n--- PHASE 2: Correlating Baseband Streams via Kotekan AstronCorrelator ---")
+    print(
+        "\n--- PHASE 2: Correlating Baseband Streams via Kotekan AstronCorrelator ---"
+    )
     env = dict(os.environ)
-    env["LD_LIBRARY_PATH"] = f"{_kotekan_root / 'build' / 'external' / 'n2k'}:{env.get('LD_LIBRARY_PATH', '')}"
+    env["LD_LIBRARY_PATH"] = (
+        f"{_kotekan_root / 'build' / 'external' / 'n2k'}:{env.get('LD_LIBRARY_PATH', '')}"
+    )
     if "CUDA_HOME" not in env:
         for var in ["CUDA_ROOT", "EBROOTCUDA", "CUDA_PATH"]:
             if var in env:
@@ -245,6 +251,7 @@ def run_pipeline(
                 break
         if "CUDA_HOME" not in env:
             import shutil
+
             nvcc_bin = shutil.which("nvcc")
             if nvcc_bin:
                 env["CUDA_HOME"] = str(Path(nvcc_bin).resolve().parent.parent)
@@ -279,11 +286,15 @@ def run_pipeline(
         print(f"\n>>> Running Kotekan AstronCorrelator for [{sc}] ...")
         cmd = [str(kotekan_bin), "--config", str(yaml_config)]
         t0 = time.perf_counter()
-        res = subprocess.run(cmd, cwd=str(_kotekan_root), env=env, capture_output=True, text=True)
+        res = subprocess.run(
+            cmd, cwd=str(_kotekan_root), env=env, capture_output=True, text=True
+        )
         t1 = time.perf_counter()
 
         if res.returncode != 0:
-            print(f"[ERROR] Kotekan execution failed for {sc} (exit code {res.returncode})!")
+            print(
+                f"[ERROR] Kotekan execution failed for {sc} (exit code {res.returncode})!"
+            )
             print("STDERR:")
             print(res.stderr[-2000:] if len(res.stderr) > 2000 else res.stderr)
             print("STDOUT:")
@@ -297,7 +308,9 @@ def run_pipeline(
             sys.exit(1)
 
         corr_size_mb = expected_corr_file.stat().st_size / (1024 * 1024)
-        print(f"    Saved correlation dump: {expected_corr_file.name} ({corr_size_mb:.2f} MB)")
+        print(
+            f"    Saved correlation dump: {expected_corr_file.name} ({corr_size_mb:.2f} MB)"
+        )
 
     # 3. Inspect and Plot Correlation Matrices
     print("\n--- PHASE 3: Inspecting Visibilities & Generating Diagnostic Plots ---")
@@ -320,7 +333,9 @@ def run_pipeline(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Full CHARTS 64-Antenna Baseband & Correlator Pipeline")
+    parser = argparse.ArgumentParser(
+        description="Full CHARTS 64-Antenna Baseband & Correlator Pipeline"
+    )
     parser.add_argument(
         "--scenario",
         type=str,
@@ -329,7 +344,15 @@ def main():
     )
     parser.add_argument(
         "--category",
-        choices=["all", "calibrator", "solar", "pulsar", "transient", "artificial", "zenith"],
+        choices=[
+            "all",
+            "calibrator",
+            "solar",
+            "pulsar",
+            "transient",
+            "artificial",
+            "zenith",
+        ],
         default="all",
         help="Filter scenarios by astronomical category",
     )
@@ -345,8 +368,18 @@ def main():
         default=str(_kotekan_root / "build" / "kotekan" / "kotekan"),
         help="Path to compiled kotekan binary",
     )
-    parser.add_argument("--num-frames", type=int, default=1, help="Number of 5.12 ms frames per scenario")
-    parser.add_argument("--samples-per-frame", type=int, default=1536, help="Samples per frame (5.12 ms)")
+    parser.add_argument(
+        "--num-frames",
+        type=int,
+        default=1,
+        help="Number of 5.12 ms frames per scenario",
+    )
+    parser.add_argument(
+        "--samples-per-frame",
+        type=int,
+        default=1536,
+        help="Samples per frame (5.12 ms)",
+    )
     parser.add_argument("--antennas", type=int, default=64, help="Number of antennas")
     parser.add_argument("--num-freq", type=int, default=336, help="Frequency channels")
     args = parser.parse_args()

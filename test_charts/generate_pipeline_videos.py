@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
@@ -81,7 +82,9 @@ def _worker_load_tracker(args):
     meta_size = int(np.frombuffer(raw[:4].tobytes(), dtype="<u4", count=1)[0])
     expected_floats = samples * num_freq * max_beams * 2
     expected_bytes = expected_floats * 4
-    floats = np.frombuffer(raw[4 + meta_size : 4 + meta_size + expected_bytes], dtype="<f4")
+    floats = np.frombuffer(
+        raw[4 + meta_size : 4 + meta_size + expected_bytes], dtype="<f4"
+    )
     shaped = floats.reshape(samples, num_freq, max_beams, 2)
     power = shaped[..., 0] ** 2 + shaped[..., 1] ** 2
     mean_pwr = np.mean(power, axis=0)  # (freq, beams)
@@ -109,7 +112,7 @@ def load_baseband_frame(
     if raw.size < 4:
         raise ValueError(f"File too small: {bin_path}")
     meta_size = int(np.frombuffer(raw[:4].tobytes(), dtype="<u4", count=1)[0])
-    payload = raw[4 + meta_size:]
+    payload = raw[4 + meta_size :]
 
     expected_bytes = samples_per_frame * num_freq * num_antennas
     if payload.size < expected_bytes:
@@ -153,8 +156,11 @@ def load_correlator_frame(
     Returns: (num_channels, num_elements, num_elements) complex128
     """
     from inspect_correlator_dump import load_astron_correlator_dump
+
     return load_astron_correlator_dump(
-        bin_path, num_elements=num_elements, num_channels=num_channels,
+        bin_path,
+        num_elements=num_elements,
+        num_channels=num_channels,
         polarizations=polarizations,
     )
 
@@ -177,7 +183,7 @@ def load_beam_tracker_frame(
     if raw.size < 4:
         raise ValueError(f"File too small: {bin_path}")
     meta_size = int(np.frombuffer(raw[:4].tobytes(), dtype="<u4", count=1)[0])
-    payload = raw[4 + meta_size:]
+    payload = raw[4 + meta_size :]
 
     expected_floats = samples_per_data_set * num_freq * max_beams * 2
     expected_bytes = expected_floats * 4
@@ -216,7 +222,9 @@ def generate_baseband_spectrogram_video(
     """
     bin_files = sorted(window_dir.glob(f"{base_name}_*.bin"))
     if not bin_files:
-        print(f"[WARNING] No baseband files found matching {base_name}_*.bin in {window_dir}")
+        print(
+            f"[WARNING] No baseband files found matching {base_name}_*.bin in {window_dir}"
+        )
         return
 
     total_available = len(bin_files)
@@ -238,10 +246,14 @@ def generate_baseband_spectrogram_video(
         f"sampled across {total_available} files spanning the entire window"
     )
 
-    freq_mhz = DEFAULT_FREQUENCY_START_MHZ + np.arange(num_freq) * CHARTS_CHANNEL_WIDTH_MHZ
+    freq_mhz = (
+        DEFAULT_FREQUENCY_START_MHZ + np.arange(num_freq) * CHARTS_CHANNEL_WIDTH_MHZ
+    )
 
     # Parallel pre-extraction of all spectra across workers
-    print(f"  Pre-extracting {total_video_frames} baseband spectra in parallel using {workers} workers...")
+    print(
+        f"  Pre-extracting {total_video_frames} baseband spectra in parallel using {workers} workers..."
+    )
     tasks = [(f, num_antennas, num_freq, samples_per_frame) for f in sampled_files]
     if workers > 1:
         with mp.Pool(processes=min(workers, len(tasks) or 1)) as pool:
@@ -262,25 +274,47 @@ def generate_baseband_spectrogram_video(
 
     # Setup figure with GridSpec: Top row = Array Mean, Bottom rows = 8x8 antenna grid
     fig = plt.figure(figsize=(20, 13), facecolor="#0a0a1a")
-    fig.suptitle("CHARTS Baseband Frequency Power Spectrum — Array Mean & 8×8 Antenna Grid", fontsize=15, color="white", y=0.98)
+    fig.suptitle(
+        "CHARTS Baseband Frequency Power Spectrum — Array Mean & 8×8 Antenna Grid",
+        fontsize=15,
+        color="white",
+        y=0.98,
+    )
 
     gs = fig.add_gridspec(
-        nrows=9, ncols=8,
+        nrows=9,
+        ncols=8,
         height_ratios=[2.4, 1, 1, 1, 1, 1, 1, 1, 1],
-        hspace=0.35, wspace=0.18,
-        top=0.94, bottom=0.05, left=0.05, right=0.96,
+        hspace=0.35,
+        wspace=0.18,
+        top=0.94,
+        bottom=0.05,
+        left=0.05,
+        right=0.96,
     )
 
     # Top: Array Average Spectrum
     ax_mean = fig.add_subplot(gs[0, :])
     ax_mean.set_facecolor("#111122")
-    mean_line, = ax_mean.plot(freq_mhz, first_mean, color="#00FFCC", linewidth=1.6, label="Array Mean Spectrum")
+    (mean_line,) = ax_mean.plot(
+        freq_mhz,
+        first_mean,
+        color="#00FFCC",
+        linewidth=1.6,
+        label="Array Mean Spectrum",
+    )
     peak_idx = int(np.argmax(first_mean))
-    peak_dot = ax_mean.scatter([freq_mhz[peak_idx]], [first_mean[peak_idx]], color="#FFD700", s=65, zorder=5)
+    peak_dot = ax_mean.scatter(
+        [freq_mhz[peak_idx]], [first_mean[peak_idx]], color="#FFD700", s=65, zorder=5
+    )
     peak_text = ax_mean.text(
-        0.02, 0.82,
+        0.02,
+        0.82,
         f"Array Peak: {freq_mhz[peak_idx]:.1f} MHz ({first_mean[peak_idx]:.1f} dB)",
-        transform=ax_mean.transAxes, color="#FFD700", fontsize=11, fontweight="bold",
+        transform=ax_mean.transAxes,
+        color="#FFD700",
+        fontsize=11,
+        fontweight="bold",
     )
     ax_mean.set_xlim(freq_mhz[0], freq_mhz[-1])
     ax_mean.set_ylim(ymin, ymax)
@@ -290,7 +324,13 @@ def generate_baseband_spectrogram_video(
     ax_mean.grid(True, color="#21262D", linestyle="--", alpha=0.7)
     for sp in ax_mean.spines.values():
         sp.set_color("#30363D")
-    ax_mean.legend(loc="upper right", facecolor="#161B22", edgecolor="#30363D", labelcolor="#C9D1D9", fontsize=9)
+    ax_mean.legend(
+        loc="upper right",
+        facecolor="#161B22",
+        edgecolor="#30363D",
+        labelcolor="#C9D1D9",
+        fontsize=9,
+    )
 
     # Bottom: 8×8 Antenna Line Graph Grid
     ant_lines = []
@@ -299,12 +339,20 @@ def generate_baseband_spectrogram_video(
         col = ant & 7
         ax = fig.add_subplot(gs[row + 1, col])
         ax.set_facecolor("#111122")
-        line, = ax.plot(freq_mhz, first_spec[ant], color="#38ef7d", linewidth=0.75)
+        (line,) = ax.plot(freq_mhz, first_spec[ant], color="#38ef7d", linewidth=0.75)
         ant_lines.append(line)
         ax.set_xlim(freq_mhz[0], freq_mhz[-1])
         ax.set_ylim(ymin, ymax)
-        ax.text(0.06, 0.78, f"A{ant}", transform=ax.transAxes, fontsize=6.5,
-                color="white", fontweight="bold", alpha=0.85)
+        ax.text(
+            0.06,
+            0.78,
+            f"A{ant}",
+            transform=ax.transAxes,
+            fontsize=6.5,
+            color="white",
+            fontweight="bold",
+            alpha=0.85,
+        )
         ax.grid(True, color="#21262D", linestyle=":", alpha=0.5)
         for sp in ax.spines.values():
             sp.set_color("#30363D")
@@ -327,7 +375,9 @@ def generate_baseband_spectrogram_video(
 
         mean_line.set_ydata(cur_mean)
         p_idx = int(np.argmax(cur_mean))
-        peak_text.set_text(f"Array Peak: {freq_mhz[p_idx]:.1f} MHz ({cur_mean[p_idx]:.1f} dB)")
+        peak_text.set_text(
+            f"Array Peak: {freq_mhz[p_idx]:.1f} MHz ({cur_mean[p_idx]:.1f} dB)"
+        )
         peak_dot.set_offsets([[freq_mhz[p_idx], cur_mean[p_idx]]])
 
         for a in range(num_antennas):
@@ -378,6 +428,7 @@ def find_interesting_correlator_channels(
     if events_file and events_file.exists():
         try:
             import json
+
             with open(events_file, "r") as f:
                 ev_data = json.load(f)
             for ev in ev_data:
@@ -391,11 +442,15 @@ def find_interesting_correlator_channels(
     # 2. Inspect first correlator dump to compute coherence ratio across all channels
     bin_files = sorted(corr_dir.glob(f"{corr_name}_*.bin"))
     if not bin_files:
-        ch_act = known_rfi_channels[0] if known_rfi_channels else min(147, num_channels - 1)
+        ch_act = (
+            known_rfi_channels[0] if known_rfi_channels else min(147, num_channels - 1)
+        )
         ch_qui = num_channels // 2
         return ch_act, ch_qui
 
-    first_vis = load_correlator_frame(bin_files[0], num_elements, num_channels)  # (channels, ant, ant)
+    first_vis = load_correlator_frame(
+        bin_files[0], num_elements, num_channels
+    )  # (channels, ant, ant)
     mag_sq = np.abs(first_vis) ** 2
     diag_sq = np.diagonal(mag_sq, axis1=1, axis2=2)  # (channels, ant)
     auto_pwr = np.sum(diag_sq, axis=1)
@@ -442,7 +497,9 @@ def generate_correlator_video(
     """
     bin_files = sorted(corr_dir.glob(f"{corr_name}_*.bin"))
     if not bin_files:
-        print(f"[WARNING] No correlator files found matching {corr_name}_*.bin in {corr_dir}")
+        print(
+            f"[WARNING] No correlator files found matching {corr_name}_*.bin in {corr_dir}"
+        )
         return
 
     total_available = len(bin_files)
@@ -465,10 +522,15 @@ def generate_correlator_video(
     elif freq_channel_idx is not None:
         channels_to_plot = [freq_channel_idx]
     else:
-        ch_act, ch_qui = find_interesting_correlator_channels(corr_dir, corr_name, num_elements, num_channels)
+        ch_act, ch_qui = find_interesting_correlator_channels(
+            corr_dir, corr_name, num_elements, num_channels
+        )
         channels_to_plot = [ch_act, ch_qui]
 
-    freqs_mhz = [DEFAULT_FREQUENCY_START_MHZ + ch * CHARTS_CHANNEL_WIDTH_MHZ for ch in channels_to_plot]
+    freqs_mhz = [
+        DEFAULT_FREQUENCY_START_MHZ + ch * CHARTS_CHANNEL_WIDTH_MHZ
+        for ch in channels_to_plot
+    ]
 
     # Load first frame for color scales
     first_vis = load_correlator_frame(sampled_files[0], num_elements, num_channels)
@@ -496,14 +558,23 @@ def generate_correlator_video(
         fig.suptitle(
             f"CHARTS Correlator Visibility Matrix — Dual Channel Comparison\n"
             f"Active: Ch {ch_A} ({freq_A:.1f} MHz)  vs  Quiet: Ch {ch_B} ({freq_B:.1f} MHz)",
-            fontsize=14, color="white", y=0.98,
+            fontsize=14,
+            color="white",
+            y=0.98,
         )
 
         # Row 0: Active Channel
         ax_mag_0 = axes[0, 0]
         ax_mag_0.set_facecolor("#111122")
-        im_mag_0 = ax_mag_0.imshow(mag_A, origin="lower", cmap="inferno", vmin=0.0, vmax=vmax_A)
-        ax_mag_0.set_title(f"Active Ch {ch_A} ({freq_A:.1f} MHz) — |V_ij| (Magnitude)", color="#FFD700", fontsize=11, fontweight="bold")
+        im_mag_0 = ax_mag_0.imshow(
+            mag_A, origin="lower", cmap="inferno", vmin=0.0, vmax=vmax_A
+        )
+        ax_mag_0.set_title(
+            f"Active Ch {ch_A} ({freq_A:.1f} MHz) — |V_ij| (Magnitude)",
+            color="#FFD700",
+            fontsize=11,
+            fontweight="bold",
+        )
         ax_mag_0.set_xlabel("Antenna j", color="#C9D1D9", fontsize=9)
         ax_mag_0.set_ylabel("Antenna i", color="#C9D1D9", fontsize=9)
         ax_mag_0.tick_params(colors="#8B949E")
@@ -512,8 +583,15 @@ def generate_correlator_video(
 
         ax_ph_0 = axes[0, 1]
         ax_ph_0.set_facecolor("#111122")
-        im_ph_0 = ax_ph_0.imshow(ph_A, origin="lower", cmap="twilight", vmin=-np.pi, vmax=np.pi)
-        ax_ph_0.set_title(f"Active Ch {ch_A} ({freq_A:.1f} MHz) — arg(V_ij) (Phase)", color="#FFD700", fontsize=11, fontweight="bold")
+        im_ph_0 = ax_ph_0.imshow(
+            ph_A, origin="lower", cmap="twilight", vmin=-np.pi, vmax=np.pi
+        )
+        ax_ph_0.set_title(
+            f"Active Ch {ch_A} ({freq_A:.1f} MHz) — arg(V_ij) (Phase)",
+            color="#FFD700",
+            fontsize=11,
+            fontweight="bold",
+        )
         ax_ph_0.set_xlabel("Antenna j", color="#C9D1D9", fontsize=9)
         ax_ph_0.set_ylabel("Antenna i", color="#C9D1D9", fontsize=9)
         ax_ph_0.tick_params(colors="#8B949E")
@@ -523,8 +601,15 @@ def generate_correlator_video(
         # Row 1: Quiet Channel
         ax_mag_1 = axes[1, 0]
         ax_mag_1.set_facecolor("#111122")
-        im_mag_1 = ax_mag_1.imshow(mag_B, origin="lower", cmap="inferno", vmin=0.0, vmax=vmax_B)
-        ax_mag_1.set_title(f"Quiet Ch {ch_B} ({freq_B:.1f} MHz) — |V_ij| (Magnitude)", color="#40C4FF", fontsize=11, fontweight="bold")
+        im_mag_1 = ax_mag_1.imshow(
+            mag_B, origin="lower", cmap="inferno", vmin=0.0, vmax=vmax_B
+        )
+        ax_mag_1.set_title(
+            f"Quiet Ch {ch_B} ({freq_B:.1f} MHz) — |V_ij| (Magnitude)",
+            color="#40C4FF",
+            fontsize=11,
+            fontweight="bold",
+        )
         ax_mag_1.set_xlabel("Antenna j", color="#C9D1D9", fontsize=9)
         ax_mag_1.set_ylabel("Antenna i", color="#C9D1D9", fontsize=9)
         ax_mag_1.tick_params(colors="#8B949E")
@@ -533,8 +618,15 @@ def generate_correlator_video(
 
         ax_ph_1 = axes[1, 1]
         ax_ph_1.set_facecolor("#111122")
-        im_ph_1 = ax_ph_1.imshow(ph_B, origin="lower", cmap="twilight", vmin=-np.pi, vmax=np.pi)
-        ax_ph_1.set_title(f"Quiet Ch {ch_B} ({freq_B:.1f} MHz) — arg(V_ij) (Phase)", color="#40C4FF", fontsize=11, fontweight="bold")
+        im_ph_1 = ax_ph_1.imshow(
+            ph_B, origin="lower", cmap="twilight", vmin=-np.pi, vmax=np.pi
+        )
+        ax_ph_1.set_title(
+            f"Quiet Ch {ch_B} ({freq_B:.1f} MHz) — arg(V_ij) (Phase)",
+            color="#40C4FF",
+            fontsize=11,
+            fontweight="bold",
+        )
         ax_ph_1.set_xlabel("Antenna j", color="#C9D1D9", fontsize=9)
         ax_ph_1.set_ylabel("Antenna i", color="#C9D1D9", fontsize=9)
         ax_ph_1.tick_params(colors="#8B949E")
@@ -545,7 +637,9 @@ def generate_correlator_video(
         fig.tight_layout(rect=[0, 0.04, 1, 0.94])
 
         def update(frame_idx):
-            vis = load_correlator_frame(sampled_files[frame_idx], num_elements, num_channels)
+            vis = load_correlator_frame(
+                sampled_files[frame_idx], num_elements, num_channels
+            )
             im_mag_0.set_data(np.abs(vis[ch_A]))
             im_ph_0.set_data(np.angle(vis[ch_A]))
             im_mag_1.set_data(np.abs(vis[ch_B]))
@@ -562,7 +656,9 @@ def generate_correlator_video(
             )
             return [im_mag_0, im_ph_0, im_mag_1, im_ph_1, time_text]
 
-        anim = animation.FuncAnimation(fig, update, frames=total_video_frames, blit=False)
+        anim = animation.FuncAnimation(
+            fig, update, frames=total_video_frames, blit=False
+        )
         writer = animation.FFMpegWriter(fps=fps, bitrate=2000)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         anim.save(str(output_path), writer=writer)
@@ -571,8 +667,13 @@ def generate_correlator_video(
 
         # Optional separate videos for each channel
         if separate_videos:
-            for ch_idx, fr_mhz, lbl in [(ch_A, freq_A, "active"), (ch_B, freq_B, "quiet")]:
-                sep_path = output_path.parent / f"{output_path.stem}_{lbl}_ch{ch_idx}.mp4"
+            for ch_idx, fr_mhz, lbl in [
+                (ch_A, freq_A, "active"),
+                (ch_B, freq_B, "quiet"),
+            ]:
+                sep_path = (
+                    output_path.parent / f"{output_path.stem}_{lbl}_ch{ch_idx}.mp4"
+                )
                 generate_single_channel_correlator_video(
                     bin_files=bin_files,
                     ch=ch_idx,
@@ -633,12 +734,15 @@ def generate_single_channel_correlator_video(
     fig, axes = plt.subplots(1, 2, figsize=(16, 7), facecolor="#0a0a1a")
     fig.suptitle(
         f"CHARTS Correlator Visibility Matrix — Channel {ch} ({freq_mhz:.1f} MHz)",
-        fontsize=14, color="white",
+        fontsize=14,
+        color="white",
     )
 
     ax_mag = axes[0]
     ax_mag.set_facecolor("#111122")
-    im_mag = ax_mag.imshow(first_mag, origin="lower", cmap="inferno", vmin=vmin, vmax=vmax)
+    im_mag = ax_mag.imshow(
+        first_mag, origin="lower", cmap="inferno", vmin=vmin, vmax=vmax
+    )
     ax_mag.set_title("|V_ij| (Magnitude)", color="white", fontsize=12)
     ax_mag.set_xlabel("Antenna j", color="white")
     ax_mag.set_ylabel("Antenna i", color="white")
@@ -648,7 +752,9 @@ def generate_single_channel_correlator_video(
     ax_ph = axes[1]
     ax_ph.set_facecolor("#111122")
     first_phase = np.angle(first_vis[ch])
-    im_ph = ax_ph.imshow(first_phase, origin="lower", cmap="twilight", vmin=-np.pi, vmax=np.pi)
+    im_ph = ax_ph.imshow(
+        first_phase, origin="lower", cmap="twilight", vmin=-np.pi, vmax=np.pi
+    )
     ax_ph.set_title("arg(V_ij) (Phase)", color="white", fontsize=12)
     ax_ph.set_xlabel("Antenna j", color="white")
     ax_ph.set_ylabel("Antenna i", color="white")
@@ -659,7 +765,9 @@ def generate_single_channel_correlator_video(
     fig.tight_layout(rect=[0, 0.05, 1, 0.93])
 
     def update(frame_idx):
-        vis = load_correlator_frame(sampled_files[frame_idx], num_elements, num_channels)
+        vis = load_correlator_frame(
+            sampled_files[frame_idx], num_elements, num_channels
+        )
         mag = np.abs(vis[ch])
         phase = np.angle(vis[ch])
         im_mag.set_data(mag)
@@ -708,7 +816,9 @@ def generate_beam_tracker_video(
     """
     bin_files = sorted(tracker_dir.glob(f"{tracker_name}_*.bin"))
     if not bin_files:
-        print(f"[WARNING] No tracker files found matching {tracker_name}_*.bin in {tracker_dir}")
+        print(
+            f"[WARNING] No tracker files found matching {tracker_name}_*.bin in {tracker_dir}"
+        )
         return
 
     total_available = len(bin_files)
@@ -730,10 +840,14 @@ def generate_beam_tracker_video(
         f"spanning the full window from {total_available} files, {max_beams} beams"
     )
 
-    freq_mhz = DEFAULT_FREQUENCY_START_MHZ + np.arange(num_freq) * CHARTS_CHANNEL_WIDTH_MHZ
+    freq_mhz = (
+        DEFAULT_FREQUENCY_START_MHZ + np.arange(num_freq) * CHARTS_CHANNEL_WIDTH_MHZ
+    )
 
     # Parallel pre-extraction across workers
-    print(f"  Pre-extracting {total_video_frames} beam tracker spectra in parallel using {workers} workers...")
+    print(
+        f"  Pre-extracting {total_video_frames} beam tracker spectra in parallel using {workers} workers..."
+    )
     tasks = [(f, samples_per_data_set, num_freq, max_beams) for f in sampled_files]
     if workers > 1:
         with mp.Pool(processes=min(workers, len(tasks) or 1)) as pool:
@@ -750,6 +864,7 @@ def generate_beam_tracker_video(
     if targets_json.exists():
         try:
             import json
+
             with open(targets_json, "r") as f:
                 tgt_list = json.load(f)
             for item in tgt_list:
@@ -785,9 +900,18 @@ def generate_beam_tracker_video(
     first_power = all_powers[0]  # (freq, beams) in dB
     first_integ = all_integs[0]  # (beams,) in dB
 
-    fig, axes = plt.subplots(2, 1, figsize=(16, 10), facecolor="#0a0a1a",
-                              gridspec_kw={"height_ratios": [3, 2]})
-    fig.suptitle("CHARTS Beam Tracker Output — Formed Beam Power Across Tracked Targets", fontsize=14, color="white")
+    fig, axes = plt.subplots(
+        2,
+        1,
+        figsize=(16, 10),
+        facecolor="#0a0a1a",
+        gridspec_kw={"height_ratios": [3, 2]},
+    )
+    fig.suptitle(
+        "CHARTS Beam Tracker Output — Formed Beam Power Across Tracked Targets",
+        fontsize=14,
+        color="white",
+    )
 
     # Top: Power vs Frequency per beam
     ax_spec = axes[0]
@@ -803,15 +927,26 @@ def generate_beam_tracker_video(
         else:
             label = f"B{b}: {tgt_name}"
 
-        line, = ax_spec.plot(
-            freq_mhz, first_power[:, b],
-            color=vibrant_colors[b], linewidth=1.4, label=label, alpha=0.9,
+        (line,) = ax_spec.plot(
+            freq_mhz,
+            first_power[:, b],
+            color=vibrant_colors[b],
+            linewidth=1.4,
+            label=label,
+            alpha=0.9,
         )
         lines.append(line)
 
     ax_spec.set_xlabel("Frequency (MHz)", color="#C9D1D9", fontsize=10)
     ax_spec.set_ylabel("Formed Power (dB)", color="#C9D1D9", fontsize=10)
-    ax_spec.legend(loc="upper right", fontsize=8, ncol=2, facecolor="#1a1a2e", labelcolor="white", edgecolor="#30363D")
+    ax_spec.legend(
+        loc="upper right",
+        fontsize=8,
+        ncol=2,
+        facecolor="#1a1a2e",
+        labelcolor="white",
+        edgecolor="#30363D",
+    )
     ax_spec.tick_params(colors="#8B949E")
     ax_spec.grid(True, alpha=0.25, color="gray", linestyle="--")
     for sp in ax_spec.spines.values():
@@ -821,8 +956,11 @@ def generate_beam_tracker_video(
     ax_bar = axes[1]
     ax_bar.set_facecolor("#111122")
     bars = ax_bar.bar(
-        range(max_beams), first_integ,
-        color=vibrant_colors[:max_beams], edgecolor="white", linewidth=0.6,
+        range(max_beams),
+        first_integ,
+        color=vibrant_colors[:max_beams],
+        edgecolor="white",
+        linewidth=0.6,
     )
     ax_bar.set_xlabel("Formed Beam Target", color="#C9D1D9", fontsize=10)
     ax_bar.set_ylabel("Integrated Power (dB)", color="#C9D1D9", fontsize=10)
@@ -876,30 +1014,60 @@ def main():
     subparsers = parser.add_subparsers(dest="command", help="Video type to generate")
 
     # --- baseband ---
-    p_bb = subparsers.add_parser("baseband", help="Baseband frequency power line spectrum video")
+    p_bb = subparsers.add_parser(
+        "baseband", help="Baseband frequency power line spectrum video"
+    )
     p_bb.add_argument("--window-dir", type=str, required=True)
     p_bb.add_argument("--base-name", type=str, required=True)
     p_bb.add_argument("--output", type=str, required=True)
     p_bb.add_argument("--antennas", type=int, default=64)
     p_bb.add_argument("--num-freq", type=int, default=672)
     p_bb.add_argument("--samples-per-frame", type=int, default=1536)
-    p_bb.add_argument("--duration-s", type=float, default=60.0, help="Video duration in seconds (default: 60.0 = 1 minute)")
+    p_bb.add_argument(
+        "--duration-s",
+        type=float,
+        default=60.0,
+        help="Video duration in seconds (default: 60.0 = 1 minute)",
+    )
     p_bb.add_argument("--fps", type=int, default=10)
-    p_bb.add_argument("--workers", type=int, default=16, help="Parallel workers for frame pre-extraction (default: 16)")
+    p_bb.add_argument(
+        "--workers",
+        type=int,
+        default=16,
+        help="Parallel workers for frame pre-extraction (default: 16)",
+    )
     p_bb.add_argument("--max-frames", type=int, default=None)
 
     # --- correlator ---
-    p_corr = subparsers.add_parser("correlator", help="Correlator matrix video (dual-channel active vs quiet)")
+    p_corr = subparsers.add_parser(
+        "correlator", help="Correlator matrix video (dual-channel active vs quiet)"
+    )
     p_corr.add_argument("--corr-dir", type=str, required=True)
     p_corr.add_argument("--corr-name", type=str, required=True)
     p_corr.add_argument("--output", type=str, required=True)
     p_corr.add_argument("--num-elements", type=int, default=64)
     p_corr.add_argument("--num-channels", type=int, default=672)
-    p_corr.add_argument("--duration-s", type=float, default=60.0, help="Video duration in seconds (default: 60.0 = 1 minute)")
+    p_corr.add_argument(
+        "--duration-s",
+        type=float,
+        default=60.0,
+        help="Video duration in seconds (default: 60.0 = 1 minute)",
+    )
     p_corr.add_argument("--fps", type=int, default=10)
-    p_corr.add_argument("--freq-channel", type=int, default=None, help="Single frequency channel index")
-    p_corr.add_argument("--freq-channels", type=str, default=None, help="Comma-separated frequency channels or 'auto'")
-    p_corr.add_argument("--separate-videos", action="store_true", help="Also generate separate MP4s for each channel")
+    p_corr.add_argument(
+        "--freq-channel", type=int, default=None, help="Single frequency channel index"
+    )
+    p_corr.add_argument(
+        "--freq-channels",
+        type=str,
+        default=None,
+        help="Comma-separated frequency channels or 'auto'",
+    )
+    p_corr.add_argument(
+        "--separate-videos",
+        action="store_true",
+        help="Also generate separate MP4s for each channel",
+    )
     p_corr.add_argument("--max-frames", type=int, default=None)
 
     # --- tracker ---
@@ -910,10 +1078,25 @@ def main():
     p_trk.add_argument("--samples-per-data-set", type=int, default=1536)
     p_trk.add_argument("--num-freq", type=int, default=672)
     p_trk.add_argument("--max-beams", type=int, default=8)
-    p_trk.add_argument("--duration-s", type=float, default=60.0, help="Video duration in seconds (default: 60.0 = 1 minute)")
+    p_trk.add_argument(
+        "--duration-s",
+        type=float,
+        default=60.0,
+        help="Video duration in seconds (default: 60.0 = 1 minute)",
+    )
     p_trk.add_argument("--fps", type=int, default=10)
-    p_trk.add_argument("--workers", type=int, default=16, help="Parallel workers for frame pre-extraction (default: 16)")
-    p_trk.add_argument("--beam-targets", type=str, default=None, help="Semicolon-separated target names/coordinates")
+    p_trk.add_argument(
+        "--workers",
+        type=int,
+        default=16,
+        help="Parallel workers for frame pre-extraction (default: 16)",
+    )
+    p_trk.add_argument(
+        "--beam-targets",
+        type=str,
+        default=None,
+        help="Semicolon-separated target names/coordinates",
+    )
     p_trk.add_argument("--max-frames", type=int, default=None)
 
     args = parser.parse_args()
@@ -937,7 +1120,11 @@ def main():
             if args.freq_channels.strip().lower() == "auto":
                 f_channels = None
             else:
-                f_channels = [int(x.strip()) for x in args.freq_channels.split(",") if x.strip().isdigit()]
+                f_channels = [
+                    int(x.strip())
+                    for x in args.freq_channels.split(",")
+                    if x.strip().isdigit()
+                ]
 
         generate_correlator_video(
             corr_dir=Path(args.corr_dir),

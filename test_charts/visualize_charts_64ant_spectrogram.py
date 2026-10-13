@@ -59,6 +59,7 @@ from typing import Dict, List, Optional, Tuple
 
 try:
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.patches as patches
     import matplotlib.pyplot as plt
@@ -81,6 +82,7 @@ if str(_test_charts_dir) not in sys.path:
 
 try:
     import h5py
+
     HAS_H5PY = True
 except ImportError:
     HAS_H5PY = False
@@ -108,10 +110,11 @@ DEFAULT_SATURATED_ANTENNAS = [7, 23, 42, 55]
 # Fast Baseband Decoders (HDF5 and RAW Binary)
 # =============================================================================
 
+
 def unpack_int4x2_power(packed_bytes: np.ndarray) -> np.ndarray:
     """
     Decodes packed 4-bit complex integers into power |V|^2 = real^2 + imag^2.
-    
+
     Args:
         packed_bytes: np.ndarray of dtype uint8 with shape (..., ).
                       Lower 4 bits = signed real [-8..+7],
@@ -131,17 +134,19 @@ def load_frame_from_hdf5(
 ) -> Tuple[np.ndarray, Dict[str, any]]:
     """
     Extracts 1 frame of baseband data for all 64 antennas from an HDF5 dump.
-    
+
     Returns:
         frame_packed: np.ndarray shape (64, num_freq, samples_per_frame) uint8
         meta: dict of metadata attributes
     """
     if not HAS_H5PY:
-        raise ImportError("h5py is required to read .h5 files. Install via: pip install h5py")
+        raise ImportError(
+            "h5py is required to read .h5 files. Install via: pip install h5py"
+        )
 
     with h5py.File(h5_path, "r") as f:
         meta = {k: f.attrs[k] for k in f.attrs.keys()}
-        
+
         # Determine dataset name
         if "baseband" in f:
             dset = f["baseband"]
@@ -163,7 +168,9 @@ def load_frame_from_hdf5(
             end_t = min(start_t + samples_per_frame, total_time)
             frame_packed = dset[:, 0, :, start_t:end_t]
         else:
-            raise KeyError(f"No valid baseband dataset found in {h5_path}. Keys: {list(f.keys())}")
+            raise KeyError(
+                f"No valid baseband dataset found in {h5_path}. Keys: {list(f.keys())}"
+            )
 
     # Fallback metadata defaults if missing
     meta.setdefault("num_antennas", n_ant)
@@ -187,7 +194,7 @@ def load_frame_from_raw_bin(
 ) -> Tuple[np.ndarray, Dict[str, any]]:
     """
     Extracts 1 frame of baseband data from a Kotekan rawFileRead / rawFileWrite binary file.
-    
+
     Returns:
         frame_packed: np.ndarray shape (64, num_freq, samples_per_frame) uint8
         meta: dict of metadata
@@ -254,21 +261,30 @@ def load_baseband_frame(
 ) -> Tuple[np.ndarray, Dict[str, any]]:
     """Loads 1 frame of baseband data from either .h5 or .bin file."""
     if file_path.suffix.lower() in [".h5", ".hdf5"]:
-        return load_frame_from_hdf5(file_path, frame_idx=frame_idx, samples_per_frame=samples_per_frame)
+        return load_frame_from_hdf5(
+            file_path, frame_idx=frame_idx, samples_per_frame=samples_per_frame
+        )
     elif file_path.suffix.lower() in [".bin", ".raw"]:
-        return load_frame_from_raw_bin(file_path, frame_idx=frame_idx, samples_per_frame=samples_per_frame)
+        return load_frame_from_raw_bin(
+            file_path, frame_idx=frame_idx, samples_per_frame=samples_per_frame
+        )
     else:
         if HAS_H5PY:
             try:
-                return load_frame_from_hdf5(file_path, frame_idx=frame_idx, samples_per_frame=samples_per_frame)
+                return load_frame_from_hdf5(
+                    file_path, frame_idx=frame_idx, samples_per_frame=samples_per_frame
+                )
             except Exception:
                 pass
-        return load_frame_from_raw_bin(file_path, frame_idx=frame_idx, samples_per_frame=samples_per_frame)
+        return load_frame_from_raw_bin(
+            file_path, frame_idx=frame_idx, samples_per_frame=samples_per_frame
+        )
 
 
 # =============================================================================
 # Time Window Slicing Helper
 # =============================================================================
+
 
 def slice_time_window(
     power_cube: np.ndarray,
@@ -279,7 +295,7 @@ def slice_time_window(
 ) -> Tuple[np.ndarray, float, float, int, int]:
     """
     Slices power_cube (64, num_freq, num_time) to the specified time window.
-    
+
     Returns:
         sliced_cube: np.ndarray shape (64, num_freq, window_samples)
         actual_t_start_ms: start time in ms
@@ -313,6 +329,7 @@ def slice_time_window(
 # 1. 8x8 Dynamic Spectrogram Visualizer (2D: Time vs Frequency)
 # =============================================================================
 
+
 def plot_8x8_antenna_spectrograms(
     power_cube: np.ndarray,
     meta: Dict[str, any],
@@ -331,7 +348,11 @@ def plot_8x8_antenna_spectrograms(
     corresponding to the physical layout of the CHARTS 64-antenna array.
     """
     sliced_cube, t_start_ms, t_end_ms, start_sample, end_sample = slice_time_window(
-        power_cube, meta, frame_idx=frame_idx, duration_ms=duration_ms, start_time_ms=start_time_ms
+        power_cube,
+        meta,
+        frame_idx=frame_idx,
+        duration_ms=duration_ms,
+        start_time_ms=start_time_ms,
     )
     n_ant, n_freq, n_time = sliced_cube.shape
     dt_us = float(meta.get("delta_time_us", FPGA_TIME_RESOLUTION_US))
@@ -342,9 +363,13 @@ def plot_8x8_antenna_spectrograms(
     # Optional downsample in time
     if downsample_factor > 1 and n_time >= downsample_factor:
         truncate_len = (n_time // downsample_factor) * downsample_factor
-        sliced_cube = sliced_cube[:, :, :truncate_len].reshape(
-            n_ant, n_freq, truncate_len // downsample_factor, downsample_factor
-        ).mean(axis=-1)
+        sliced_cube = (
+            sliced_cube[:, :, :truncate_len]
+            .reshape(
+                n_ant, n_freq, truncate_len // downsample_factor, downsample_factor
+            )
+            .mean(axis=-1)
+        )
         n_time = sliced_cube.shape[-1]
 
     # Convert to dB scale if requested
@@ -376,22 +401,30 @@ def plot_8x8_antenna_spectrograms(
 
     plt.style.use("dark_background")
     fig, axes = plt.subplots(
-        8, 8,
+        8,
+        8,
         figsize=(24, 20),
         sharex=True,
         sharey=True,
-        gridspec_kw={"wspace": 0.08, "hspace": 0.08, "left": 0.05, "right": 0.90, "top": 0.92, "bottom": 0.05},
+        gridspec_kw={
+            "wspace": 0.08,
+            "hspace": 0.08,
+            "left": 0.05,
+            "right": 0.90,
+            "top": 0.92,
+            "bottom": 0.05,
+        },
     )
 
     extent = [t_start_ms, t_end_ms, f_start_mhz, f_end_mhz]
 
     img_last = None
     for a in range(64):
-        col = a & 7   # 0 to 7 (West to East)
+        col = a & 7  # 0 to 7 (West to East)
         row = a >> 3  # 0 to 7 (South to North)
 
         plot_row = 7 - row  # Row 7 is North at top
-        plot_col = col      # Col 0 is West at left
+        plot_col = col  # Col 0 is West at left
 
         ax = axes[plot_row, plot_col]
         spec_data = disp_cube[a]
@@ -426,14 +459,21 @@ def plot_8x8_antenna_spectrograms(
             badge_color = "#38bdf8"
 
         ax.text(
-            0.04, 0.92,
+            0.04,
+            0.92,
             badge_text,
             transform=ax.transAxes,
             fontsize=8.5,
             fontweight="bold",
             color=badge_color,
             verticalalignment="top",
-            bbox=dict(boxstyle="round,pad=0.2", facecolor=badge_bg, edgecolor=badge_color, alpha=0.85, linewidth=0.8),
+            bbox=dict(
+                boxstyle="round,pad=0.2",
+                facecolor=badge_bg,
+                edgecolor=badge_color,
+                alpha=0.85,
+                linewidth=0.8,
+            ),
         )
 
         ax.tick_params(axis="both", which="both", labelsize=7.5, colors="#94a3b8")
@@ -451,14 +491,57 @@ def plot_8x8_antenna_spectrograms(
     # Master Colorbar on the right
     cbar_ax = fig.add_axes([0.915, 0.10, 0.015, 0.78])
     cbar = fig.colorbar(img_last, cax=cbar_ax)
-    cbar.set_label(f"Spectrogram Intensity ({unit_label})", fontsize=11, color="#f8fafc", labelpad=10)
+    cbar.set_label(
+        f"Spectrogram Intensity ({unit_label})",
+        fontsize=11,
+        color="#f8fafc",
+        labelpad=10,
+    )
     cbar.ax.tick_params(labelsize=9, colors="#94a3b8")
 
     # Cardinal direction orientation markers
-    fig.text(0.475, 0.942, "[^] NORTH (+Y, Row 7)", ha="center", va="center", fontsize=11, fontweight="bold", color="#38bdf8")
-    fig.text(0.475, 0.022, "[v] SOUTH (-Y, Row 0)", ha="center", va="center", fontsize=11, fontweight="bold", color="#38bdf8")
-    fig.text(0.012, 0.485, "[<] WEST (-X, Col 0)", ha="center", va="center", rotation=90, fontsize=11, fontweight="bold", color="#38bdf8")
-    fig.text(0.895, 0.485, "EAST (+X, Col 7) [>]", ha="center", va="center", rotation=-90, fontsize=11, fontweight="bold", color="#38bdf8")
+    fig.text(
+        0.475,
+        0.942,
+        "[^] NORTH (+Y, Row 7)",
+        ha="center",
+        va="center",
+        fontsize=11,
+        fontweight="bold",
+        color="#38bdf8",
+    )
+    fig.text(
+        0.475,
+        0.022,
+        "[v] SOUTH (-Y, Row 0)",
+        ha="center",
+        va="center",
+        fontsize=11,
+        fontweight="bold",
+        color="#38bdf8",
+    )
+    fig.text(
+        0.012,
+        0.485,
+        "[<] WEST (-X, Col 0)",
+        ha="center",
+        va="center",
+        rotation=90,
+        fontsize=11,
+        fontweight="bold",
+        color="#38bdf8",
+    )
+    fig.text(
+        0.895,
+        0.485,
+        "EAST (+X, Col 7) [>]",
+        ha="center",
+        va="center",
+        rotation=-90,
+        fontsize=11,
+        fontweight="bold",
+        color="#38bdf8",
+    )
 
     # Master Title and Header Info
     target_name = meta.get("target_name", meta.get("scenario", "Simulation"))
@@ -489,6 +572,7 @@ def plot_8x8_antenna_spectrograms(
 # 2. 8x8 Antenna Frequency Spectrum Shape Visualizer (1D: Power vs Freq)
 # =============================================================================
 
+
 def plot_8x8_antenna_spectra(
     power_cube: np.ndarray,
     meta: Dict[str, any],
@@ -506,7 +590,11 @@ def plot_8x8_antenna_spectra(
     Reveals bandpass shape, channel gain profiles, and noise levels across the array.
     """
     sliced_cube, t_start_ms, t_end_ms, start_sample, end_sample = slice_time_window(
-        power_cube, meta, frame_idx=frame_idx, duration_ms=duration_ms, start_time_ms=start_time_ms
+        power_cube,
+        meta,
+        frame_idx=frame_idx,
+        duration_ms=duration_ms,
+        start_time_ms=start_time_ms,
     )
     n_ant, n_freq, n_time = sliced_cube.shape
     dt_us = float(meta.get("delta_time_us", FPGA_TIME_RESOLUTION_US))
@@ -543,11 +631,19 @@ def plot_8x8_antenna_spectra(
 
     plt.style.use("dark_background")
     fig, axes = plt.subplots(
-        8, 8,
+        8,
+        8,
         figsize=(24, 20),
         sharex=True,
         sharey=True,
-        gridspec_kw={"wspace": 0.08, "hspace": 0.08, "left": 0.05, "right": 0.95, "top": 0.92, "bottom": 0.05},
+        gridspec_kw={
+            "wspace": 0.08,
+            "hspace": 0.08,
+            "left": 0.05,
+            "right": 0.95,
+            "top": 0.92,
+            "bottom": 0.05,
+        },
     )
 
     for a in range(64):
@@ -582,14 +678,21 @@ def plot_8x8_antenna_spectra(
             badge_color = "#38bdf8"
 
         ax.text(
-            0.04, 0.92,
+            0.04,
+            0.92,
             badge_text,
             transform=ax.transAxes,
             fontsize=8.5,
             fontweight="bold",
             color=badge_color,
             verticalalignment="top",
-            bbox=dict(boxstyle="round,pad=0.2", facecolor=badge_bg, edgecolor=badge_color, alpha=0.85, linewidth=0.8),
+            bbox=dict(
+                boxstyle="round,pad=0.2",
+                facecolor=badge_bg,
+                edgecolor=badge_color,
+                alpha=0.85,
+                linewidth=0.8,
+            ),
         )
 
         ax.tick_params(axis="both", which="both", labelsize=7.5, colors="#94a3b8")
@@ -601,13 +704,53 @@ def plot_8x8_antenna_spectra(
     for c in range(8):
         axes[7, c].set_xlabel("Freq [MHz]", fontsize=9, color="#e2e8f0", labelpad=3)
     for r in range(8):
-        axes[r, 0].set_ylabel(f"Spectrum ({unit_label})", fontsize=9, color="#e2e8f0", labelpad=3)
+        axes[r, 0].set_ylabel(
+            f"Spectrum ({unit_label})", fontsize=9, color="#e2e8f0", labelpad=3
+        )
 
     # Cardinal direction orientation markers
-    fig.text(0.50, 0.942, "[^] NORTH (+Y, Row 7)", ha="center", va="center", fontsize=11, fontweight="bold", color="#38bdf8")
-    fig.text(0.50, 0.022, "[v] SOUTH (-Y, Row 0)", ha="center", va="center", fontsize=11, fontweight="bold", color="#38bdf8")
-    fig.text(0.012, 0.485, "[<] WEST (-X, Col 0)", ha="center", va="center", rotation=90, fontsize=11, fontweight="bold", color="#38bdf8")
-    fig.text(0.975, 0.485, "EAST (+X, Col 7) [>]", ha="center", va="center", rotation=-90, fontsize=11, fontweight="bold", color="#38bdf8")
+    fig.text(
+        0.50,
+        0.942,
+        "[^] NORTH (+Y, Row 7)",
+        ha="center",
+        va="center",
+        fontsize=11,
+        fontweight="bold",
+        color="#38bdf8",
+    )
+    fig.text(
+        0.50,
+        0.022,
+        "[v] SOUTH (-Y, Row 0)",
+        ha="center",
+        va="center",
+        fontsize=11,
+        fontweight="bold",
+        color="#38bdf8",
+    )
+    fig.text(
+        0.012,
+        0.485,
+        "[<] WEST (-X, Col 0)",
+        ha="center",
+        va="center",
+        rotation=90,
+        fontsize=11,
+        fontweight="bold",
+        color="#38bdf8",
+    )
+    fig.text(
+        0.975,
+        0.485,
+        "EAST (+X, Col 7) [>]",
+        ha="center",
+        va="center",
+        rotation=-90,
+        fontsize=11,
+        fontweight="bold",
+        color="#38bdf8",
+    )
 
     target_name = meta.get("target_name", meta.get("scenario", "Simulation"))
     scenario = meta.get("scenario", "CHARTS-64")
@@ -637,6 +780,7 @@ def plot_8x8_antenna_spectra(
 # 3. Detailed Single-Antenna Zoom Mode
 # =============================================================================
 
+
 def plot_single_antenna_detail(
     power_cube: np.ndarray,
     antenna_idx: int,
@@ -654,7 +798,11 @@ def plot_single_antenna_detail(
       Panel 3: Frequency-averaged Time Lightcurve P(t).
     """
     sliced_cube, t_start_ms, t_end_ms, start_sample, end_sample = slice_time_window(
-        power_cube, meta, frame_idx=frame_idx, duration_ms=duration_ms, start_time_ms=start_time_ms
+        power_cube,
+        meta,
+        frame_idx=frame_idx,
+        duration_ms=duration_ms,
+        start_time_ms=start_time_ms,
     )
     n_ant, n_freq, n_time = sliced_cube.shape
     dt_us = float(meta.get("delta_time_us", FPGA_TIME_RESOLUTION_US))
@@ -672,12 +820,14 @@ def plot_single_antenna_detail(
     freqs_mhz = np.linspace(f_start_mhz, f_end_mhz, n_freq)
 
     # 1D projections
-    spectrum_db = ant_db.mean(axis=1)    # Average over time -> spectrum shape
+    spectrum_db = ant_db.mean(axis=1)  # Average over time -> spectrum shape
     lightcurve_db = ant_db.mean(axis=0)  # Average over freq -> light curve
 
     plt.style.use("dark_background")
     fig = plt.figure(figsize=(14, 10))
-    gs = fig.add_gridspec(2, 2, width_ratios=[3, 1], height_ratios=[1, 3], hspace=0.15, wspace=0.15)
+    gs = fig.add_gridspec(
+        2, 2, width_ratios=[3, 1], height_ratios=[1, 3], hspace=0.15, wspace=0.15
+    )
 
     ax_lightcurve = fig.add_subplot(gs[0, 0])
     ax_spec2d = fig.add_subplot(gs[1, 0], sharex=ax_lightcurve)
@@ -707,14 +857,18 @@ def plot_single_antenna_detail(
     ax_lightcurve.set_ylabel("Power [dB]", fontsize=10, color="#f8fafc")
     ax_lightcurve.grid(True, linestyle="--", color="#334155", alpha=0.5)
     ax_lightcurve.tick_params(labelbottom=False, colors="#94a3b8", labelsize=9)
-    ax_lightcurve.set_title(f"Frequency-Averaged Lightcurve P(t)", fontsize=10, color="#38bdf8")
+    ax_lightcurve.set_title(
+        f"Frequency-Averaged Lightcurve P(t)", fontsize=10, color="#38bdf8"
+    )
 
     # Panel 3: Bandpass Spectrum (right)
     ax_bandpass.plot(spectrum_db, freqs_mhz, color="#a855f7", linewidth=1.2)
     ax_bandpass.set_xlabel("Power [dB]", fontsize=10, color="#f8fafc")
     ax_bandpass.grid(True, linestyle="--", color="#334155", alpha=0.5)
     ax_bandpass.tick_params(labelleft=False, colors="#94a3b8", labelsize=9)
-    ax_bandpass.set_title(f"Time-Averaged Spectrum Shape P(f)", fontsize=10, color="#a855f7")
+    ax_bandpass.set_title(
+        f"Time-Averaged Spectrum Shape P(f)", fontsize=10, color="#a855f7"
+    )
 
     # Panel 4: Metadata and Statistics
     is_sat = antenna_idx in meta.get("saturated_antennas", DEFAULT_SATURATED_ANTENNAS)
@@ -734,14 +888,20 @@ def plot_single_antenna_detail(
         f"Frame: #{frame_idx}"
     )
     ax_stat.text(
-        0.05, 0.90,
+        0.05,
+        0.90,
         stats_text,
         transform=ax_stat.transAxes,
         fontsize=10,
         family="monospace",
         color="#e2e8f0",
         verticalalignment="top",
-        bbox=dict(boxstyle="round,pad=0.5", facecolor="#1e293b", edgecolor=status_color, linewidth=1.5),
+        bbox=dict(
+            boxstyle="round,pad=0.5",
+            facecolor="#1e293b",
+            edgecolor=status_color,
+            linewidth=1.5,
+        ),
     )
 
     fig.suptitle(
@@ -763,6 +923,7 @@ def plot_single_antenna_detail(
 # =============================================================================
 # CLI Main Routine
 # =============================================================================
+
 
 def find_candidate_file(baseband_dir: Path, scenario: str) -> Optional[Path]:
     """Finds matching .h5 or .bin file for a scenario in baseband_dir."""
@@ -790,7 +951,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--input", "-i",
+        "--input",
+        "-i",
         type=Path,
         default=None,
         help="Path to .h5 or .bin baseband file.",
@@ -802,13 +964,15 @@ def main():
         help="Directory containing baseband dumps (default: ./dumps_charts_64ant/baseband).",
     )
     parser.add_argument(
-        "--scenario", "-s",
+        "--scenario",
+        "-s",
         type=str,
         default="vela_with_noise",
         help="Scenario name to find in --baseband-dir if --input is omitted (default: vela_with_noise).",
     )
     parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         type=Path,
         default=None,
         help="Output PNG file path (default: auto-named in --plots-dir).",
@@ -820,7 +984,8 @@ def main():
         help="Directory to store generated plots (default: ./dumps_charts_64ant/plots).",
     )
     parser.add_argument(
-        "--duration-ms", "-d",
+        "--duration-ms",
+        "-d",
         type=float,
         default=0.5,
         help="Duration of the time window to analyze in ms (default: 0.5 ms). Use 0 for full frame.",
@@ -839,7 +1004,8 @@ def main():
         help="Plot type to generate: 'spectrogram' (2D time vs freq), 'spectrum' (1D P(f) bandpass shape), or 'all' (both). Default: all.",
     )
     parser.add_argument(
-        "--frame", "-f",
+        "--frame",
+        "-f",
         type=int,
         default=0,
         help="Frame index to visualize (default: 0).",
@@ -880,7 +1046,8 @@ def main():
         help="Optional maximum value for colorbar scale.",
     )
     parser.add_argument(
-        "--antenna", "-a",
+        "--antenna",
+        "-a",
         type=int,
         default=None,
         help="Antenna index (0-63) to generate an additional single-antenna zoom diagnostic plot.",
@@ -899,13 +1066,19 @@ def main():
             print(f"[ERROR] Baseband directory does not exist: {args.baseband_dir}")
             sys.exit(1)
 
-        files_to_process = sorted(list(args.baseband_dir.glob("*.h5")) + list(args.baseband_dir.glob("*.bin")))
+        files_to_process = sorted(
+            list(args.baseband_dir.glob("*.h5")) + list(args.baseband_dir.glob("*.bin"))
+        )
         if not files_to_process:
             print(f"[WARN] No .h5 or .bin files found in {args.baseband_dir}")
             sys.exit(0)
 
-        print(f"=== Found {len(files_to_process)} baseband dumps in {args.baseband_dir} ===")
-        print(f"=== Time window: {args.duration_ms:.2f} ms (offset: {args.start_time_ms:.2f} ms), plot type: {args.plot_type} ===")
+        print(
+            f"=== Found {len(files_to_process)} baseband dumps in {args.baseband_dir} ==="
+        )
+        print(
+            f"=== Time window: {args.duration_ms:.2f} ms (offset: {args.start_time_ms:.2f} ms), plot type: {args.plot_type} ==="
+        )
         args.plots_dir.mkdir(parents=True, exist_ok=True)
 
         for filepath in files_to_process:
@@ -914,7 +1087,9 @@ def main():
             try:
                 t0 = time.perf_counter()
                 frame_packed, meta = load_baseband_frame(
-                    filepath, frame_idx=args.frame, samples_per_frame=args.samples_per_frame
+                    filepath,
+                    frame_idx=args.frame,
+                    samples_per_frame=args.samples_per_frame,
                 )
                 power_cube = unpack_int4x2_power(frame_packed)
 
@@ -959,7 +1134,9 @@ def main():
     if target_file is None:
         target_file = find_candidate_file(args.baseband_dir, args.scenario)
         if target_file is None:
-            print(f"[ERROR] Could not find baseband file for scenario '{args.scenario}' in {args.baseband_dir}")
+            print(
+                f"[ERROR] Could not find baseband file for scenario '{args.scenario}' in {args.baseband_dir}"
+            )
             print("Please specify an explicit path using --input <path.h5 | path.bin>")
             sys.exit(1)
 
@@ -1025,7 +1202,9 @@ def main():
     # 3. Single-antenna zoom mode if requested
     if args.antenna is not None:
         if not (0 <= args.antenna < power_cube.shape[0]):
-            print(f"[WARN] Antenna index {args.antenna} is out of bounds (0-63). Skipping zoom plot.")
+            print(
+                f"[WARN] Antenna index {args.antenna} is out of bounds (0-63). Skipping zoom plot."
+            )
         else:
             zoom_png = args.plots_dir / f"spectrogram_ant{args.antenna:02d}_{stem}.png"
             plot_single_antenna_detail(

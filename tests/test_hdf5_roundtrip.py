@@ -20,6 +20,7 @@ violation aborts the writer, that the same data round-trips fine as per-frame
 files (which have none of those constraints), and that hdf5FileRead rejects a
 single file that violates the same rules on disk.
 """
+
 import glob
 import os
 import shutil
@@ -420,7 +421,10 @@ def test_perframe_allows_non_time_axis0(tmpdir_factory):
 
 def test_singlefile_rejects_dim_scaling_tds_mismatch(tmpdir_factory):
     """dim_scaling[0] must equal time_downsampling_fpga in single-file mode."""
-    case = _variant(CASES["int8_random"], gen=dict(meta_time_downsample_factor=16),)
+    case = _variant(
+        CASES["int8_random"],
+        gen=dict(meta_time_downsample_factor=16),
+    )
     tmpdir = tmpdir_factory.mktemp("hdf5_singlefile_scaling")
     r = _siphon(tmpdir, case, True, expect_failure=True)
     assert r.return_code != 0

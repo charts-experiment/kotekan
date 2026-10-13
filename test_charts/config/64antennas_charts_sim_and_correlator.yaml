@@ -1,3 +1,4 @@
+---
 ######################################################################
 # UNIFIED CHARTS 64-ANTENNA ALL-IN-KOTEKAN PIPELINE
 # Zero-desynchronization, 100% native Kotekan pipeline:
@@ -29,28 +30,28 @@ sizeof_int: 4
 buffer_depth: 4
 
 main_pool:
-  kotekan_metadata_pool: chordMetadata
-  num_metadata_objects: 30
+    kotekan_metadata_pool: chordMetadata
+    num_metadata_objects: 30
 
 # Buffer 1: Complex Voltage Baseband Stream [time][freq][antenna] (int4x2_t)
 network_capture_buf:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: samples_per_data_set * num_local_freq * num_elements # 33,030,144 bytes
-  numa_node: 0
-  metadata_pool: main_pool
-  zero_new_frames: true
-  mlock_frames: false
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set * num_local_freq * num_elements # 33,030,144 bytes
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
 
 # Buffer 2: Output Visibilities / Correlation Matrix
 host_correlation_buffer:
-  kotekan_buffer: standard
-  num_frames: buffer_depth
-  frame_size: num_local_freq * num_blocks * (block_size * block_size) * 2 * num_data_sets * sizeof_int # 5,677,056 bytes
-  numa_node: 0
-  metadata_pool: main_pool
-  zero_new_frames: true
-  mlock_frames: false
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: num_local_freq * num_blocks * (block_size * block_size) * 2 * num_data_sets * sizeof_int # 5,677,056 bytes
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
 
 ##########################
 # Kotekan Pipeline Stages
@@ -58,87 +59,87 @@ host_correlation_buffer:
 
 # Stage 1: Native In-Process F-Engine Simulator
 fengine_sim:
-  kotekan_stage: chartsFEngineSim
-  out_buf: network_capture_buf
-  scenario: "vela"
-  use_noise: true
-  saturate: false
-  num_elements: 64
-  num_local_freq: 336
-  samples_per_data_set: 1536
-  num_frames: 1
-  freq_start_mhz: 300.0
-  delta_freq_mhz: 0.3
-  delta_time_us: 3.333333333333
-  spacing_m: 0.6
-  site_lat_deg: -33.4211146
-  seed: 42
+    kotekan_stage: chartsFEngineSim
+    out_buf: network_capture_buf
+    scenario: "vela"
+    use_noise: true
+    saturate: false
+    num_elements: 64
+    num_local_freq: 336
+    samples_per_data_set: 1536
+    num_frames: 1
+    freq_start_mhz: 300.0
+    delta_freq_mhz: 0.3
+    delta_time_us: 3.333333333333
+    spacing_m: 0.6
+    site_lat_deg: -33.4211146
+    seed: 42
 
 # Stage 2: Write Baseband Dump to Relative Path
 write_baseband:
-  kotekan_stage: rawFileWrite
-  in_buf: network_capture_buf
-  base_dir: ./dumps/baseband
-  file_name: baseband_64ant_5ms
-  file_ext: bin
-  num_frames_per_file: 1
-  exit_after_n_files: 1
-  prefix_hostname: false
-  skip_zero_frames: false
+    kotekan_stage: rawFileWrite
+    in_buf: network_capture_buf
+    base_dir: ./dumps/baseband
+    file_name: baseband_64ant_5ms
+    file_ext: bin
+    num_frames_per_file: 1
+    exit_after_n_files: 1
+    prefix_hostname: false
+    skip_zero_frames: false
 
 # Stage 3: GPU Tensor Core Correlator (John Romein)
 gpu:
-  profiling: true
-  kernel_path: "lib/cuda/kernels"
-  commands: &command_list
-    - name: cudaInputData
-      in_buf: host_voltage
-      gpu_mem: voltage
-    - name: cudaSyncInput
-    - name: cudaShuffleAstron
-      gpu_mem_voltage: voltage
-      gpu_mem_ordered_voltage: ordered_voltage
-      num_elements: 64
-      num_local_freq: 336
-      samples_per_data_set: 1536
-      num_data_sets: 1
-      block_size: 2
-      num_blocks: 528
-      buffer_depth: 3
-    - name: cudaCorrelatorAstron
-      gpu_mem_voltage: ordered_voltage
-      gpu_mem_correlation_matrix: correlation_matrix
-      num_elements: 64
-      num_local_freq: 336
-      samples_per_data_set: 1536
-      num_data_sets: 1
-      block_size: 2
-      num_blocks: 528
-      elements_per_thread_block: 32
-      buffer_depth: 3
-    - name: cudaSyncOutput
-    - name: cudaOutputData
-      in_buf: host_voltage
-      gpu_mem: correlation_matrix
-      out_buf: host_correlation
-  gpu_0:
-    kotekan_stage: cudaProcess
-    gpu_id: 0
-    buffer_depth: 3
-    commands: *command_list
-    in_buffers:
-      host_voltage: network_capture_buf
-    out_buffers:
-      host_correlation: host_correlation_buffer
+    profiling: true
+    kernel_path: "lib/cuda/kernels"
+    commands: &command_list
+        - name: cudaInputData
+          in_buf: host_voltage
+          gpu_mem: voltage
+        - name: cudaSyncInput
+        - name: cudaShuffleAstron
+          gpu_mem_voltage: voltage
+          gpu_mem_ordered_voltage: ordered_voltage
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 1536
+          num_data_sets: 1
+          block_size: 2
+          num_blocks: 528
+          buffer_depth: 3
+        - name: cudaCorrelatorAstron
+          gpu_mem_voltage: ordered_voltage
+          gpu_mem_correlation_matrix: correlation_matrix
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 1536
+          num_data_sets: 1
+          block_size: 2
+          num_blocks: 528
+          elements_per_thread_block: 32
+          buffer_depth: 3
+        - name: cudaSyncOutput
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: correlation_matrix
+          out_buf: host_correlation
+    gpu_0:
+        kotekan_stage: cudaProcess
+        gpu_id: 0
+        buffer_depth: 3
+        commands: *command_list
+        in_buffers:
+            host_voltage: network_capture_buf
+        out_buffers:
+            host_correlation: host_correlation_buffer
 
 # Stage 4: Write Correlator Dump to Relative Path
 write_correlator:
-  kotekan_stage: rawFileWrite
-  in_buf: host_correlation_buffer
-  base_dir: ./dumps/correlator
-  file_name: corr_64ant_5ms
-  file_ext: bin
-  num_frames_per_file: 1
-  exit_after_n_files: 1
-  prefix_hostname: false
-  skip_zero_frames: false
+    kotekan_stage: rawFileWrite
+    in_buf: host_correlation_buffer
+    base_dir: ./dumps/correlator
+    file_name: corr_64ant_5ms
+    file_ext: bin
+    num_frames_per_file: 1
+    exit_after_n_files: 1
+    prefix_hostname: false
+    skip_zero_frames: false

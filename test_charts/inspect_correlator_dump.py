@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -52,9 +53,13 @@ def load_astron_correlator_dump(
             f"File {bin_path} payload size {payload_size} bytes is less than expected {expected_bytes} bytes."
         )
 
-    raw_ints = np.frombuffer(raw, dtype="<i4", count=expected_ints, offset=payload_offset)
+    raw_ints = np.frombuffer(
+        raw, dtype="<i4", count=expected_ints, offset=payload_offset
+    )
     # Shape: (channels, baselines, pol_y, pol_x, 2)
-    packed = raw_ints.reshape(num_channels, num_baselines, polarizations, polarizations, 2)
+    packed = raw_ints.reshape(
+        num_channels, num_baselines, polarizations, polarizations, 2
+    )
     c_data = packed[..., 0].astype(np.float64) + 1j * packed[..., 1].astype(np.float64)
 
     # Reconstruct full (channels, num_elements, num_elements) Hermitian matrix
@@ -109,7 +114,9 @@ def inspect_and_plot(
     print("=" * 60)
     print(" Correlator Matrix Inspection Summary")
     print("=" * 60)
-    print(f"  Dimensions               : {num_elements}x{num_elements} elements, {num_channels} channels")
+    print(
+        f"  Dimensions               : {num_elements}x{num_elements} elements, {num_channels} channels"
+    )
     print(f"  Selected Frequency Bin   : Channel {freq_channel_idx}/{num_channels}")
     print(f"  Hermitian Symmetry Error : {herm_rel_err:.2e} (should be ~0.0)")
     print(f"  Mean Auto-Power (V_ii)   : {mean_auto_power:.2f}")
@@ -124,22 +131,50 @@ def inspect_and_plot(
 
     # Panel 1: Visibility Amplitude Matrix |V_ij|
     im0 = axes[0].imshow(v_amp, cmap="inferno", aspect="equal", origin="upper")
-    axes[0].set_title(f"Visibility Amplitude |V_ij| (Ch {freq_channel_idx})", fontsize=12, fontweight="bold")
+    axes[0].set_title(
+        f"Visibility Amplitude |V_ij| (Ch {freq_channel_idx})",
+        fontsize=12,
+        fontweight="bold",
+    )
     axes[0].set_xlabel("Antenna j Index", fontsize=10)
     axes[0].set_ylabel("Antenna i Index", fontsize=10)
     fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04, label="Power")
 
     # Panel 2: Visibility Phase Matrix arg(V_ij)
-    im1 = axes[1].imshow(v_phase, cmap="twilight", aspect="equal", origin="upper", vmin=-np.pi, vmax=np.pi)
-    axes[1].set_title(f"Visibility Phase arg(V_ij) [rad] (Ch {freq_channel_idx})", fontsize=12, fontweight="bold")
+    im1 = axes[1].imshow(
+        v_phase,
+        cmap="twilight",
+        aspect="equal",
+        origin="upper",
+        vmin=-np.pi,
+        vmax=np.pi,
+    )
+    axes[1].set_title(
+        f"Visibility Phase arg(V_ij) [rad] (Ch {freq_channel_idx})",
+        fontsize=12,
+        fontweight="bold",
+    )
     axes[1].set_xlabel("Antenna j Index", fontsize=10)
     axes[1].set_ylabel("Antenna i Index", fontsize=10)
     fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04, label="Radians")
 
     # Panel 3: Per-Antenna Auto-Power Profile V_ii
-    axes[2].bar(np.arange(num_elements), auto_powers, color="steelblue", edgecolor="black", alpha=0.8)
-    axes[2].axhline(mean_auto_power, color="red", linestyle="--", label=f"Mean: {mean_auto_power:.1f}")
-    axes[2].set_title("Per-Antenna Auto-Correlations (V_ii)", fontsize=12, fontweight="bold")
+    axes[2].bar(
+        np.arange(num_elements),
+        auto_powers,
+        color="steelblue",
+        edgecolor="black",
+        alpha=0.8,
+    )
+    axes[2].axhline(
+        mean_auto_power,
+        color="red",
+        linestyle="--",
+        label=f"Mean: {mean_auto_power:.1f}",
+    )
+    axes[2].set_title(
+        "Per-Antenna Auto-Correlations (V_ii)", fontsize=12, fontweight="bold"
+    )
     axes[2].set_xlabel("Antenna Index", fontsize=10)
     axes[2].set_ylabel("Auto Power", fontsize=10)
     axes[2].grid(True, linestyle=":", alpha=0.6)
@@ -155,12 +190,27 @@ def inspect_and_plot(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Inspect CHARTS 64-Antenna Correlator Dumps")
-    parser.add_argument("bin_file", type=str, help="Path to correlator output .bin file")
-    parser.add_argument("--plot-out", type=str, default="", help="Path to save diagnostic PNG plot")
-    parser.add_argument("--antennas", type=int, default=64, help="Number of antennas (default: 64)")
-    parser.add_argument("--channels", type=int, default=336, help="Number of channels (default: 336)")
-    parser.add_argument("--chan-idx", type=int, default=168, help="Channel index to display (default: 168)")
+    parser = argparse.ArgumentParser(
+        description="Inspect CHARTS 64-Antenna Correlator Dumps"
+    )
+    parser.add_argument(
+        "bin_file", type=str, help="Path to correlator output .bin file"
+    )
+    parser.add_argument(
+        "--plot-out", type=str, default="", help="Path to save diagnostic PNG plot"
+    )
+    parser.add_argument(
+        "--antennas", type=int, default=64, help="Number of antennas (default: 64)"
+    )
+    parser.add_argument(
+        "--channels", type=int, default=336, help="Number of channels (default: 336)"
+    )
+    parser.add_argument(
+        "--chan-idx",
+        type=int,
+        default=168,
+        help="Channel index to display (default: 168)",
+    )
     args = parser.parse_args()
 
     bin_path = Path(args.bin_file)

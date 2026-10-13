@@ -105,6 +105,7 @@ class TestChartsSimulationSuite(unittest.TestCase):
 
         # Daytime vs Nighttime Sun elevation at Observatorio Carén
         import datetime
+
         dt_day = datetime.datetime(2026, 3, 20, 15, 0, 0, tzinfo=datetime.timezone.utc)
         dt_night = datetime.datetime(2026, 3, 20, 3, 0, 0, tzinfo=datetime.timezone.utc)
 
@@ -112,7 +113,7 @@ class TestChartsSimulationSuite(unittest.TestCase):
         night_sys = model.system_temperature(400.0, utc_dt=dt_night, include_sun=True)
 
         self.assertGreater(day_sys["sun_elevation_deg"], 0.0)  # Sun UP
-        self.assertLess(night_sys["sun_elevation_deg"], 0.0)   # Sun DOWN
+        self.assertLess(night_sys["sun_elevation_deg"], 0.0)  # Sun DOWN
         self.assertGreater(day_sys["t_sun_pb"], 0.0)
         self.assertEqual(night_sys["t_sun_pb"], 0.0)
 
@@ -226,10 +227,15 @@ class TestChartsSimulationSuite(unittest.TestCase):
     def test_direct_tracker_cadence_and_power_benchmark(self):
         """Test Direct Beam Tracker benchmark under physical 5.12 ms cadence."""
         # 1. Byte-accurate VRAM layout calculation
-        vram_info = calculate_direct_tracker_vram(n_ant=64, n_freq=672, n_time=1536, max_beams=4, buffer_depth=2)
+        vram_info = calculate_direct_tracker_vram(
+            n_ant=64, n_freq=672, n_time=1536, max_beams=4, buffer_depth=2
+        )
         self.assertGreater(vram_info["total_vram_mb"], 400.0)
         self.assertLess(vram_info["total_vram_mb"], 1000.0)
-        self.assertEqual(vram_info["input_frame_mb"], round(1536 * 672 * 64 * 1 / (1024.0 * 1024.0), 3))
+        self.assertEqual(
+            vram_info["input_frame_mb"],
+            round(1536 * 672 * 64 * 1 / (1024.0 * 1024.0), 3),
+        )
 
         # 2. Benchmark run with cadence, power, and VRAM output
         res = run_direct_tracker_benchmark(
@@ -245,16 +251,23 @@ class TestChartsSimulationSuite(unittest.TestCase):
         self.assertEqual(len(records), 4)
 
         for r in records:
-            self.assertGreater(r["headroom_factor"], 1.0)  # Must be faster than real-time
+            self.assertGreater(
+                r["headroom_factor"], 1.0
+            )  # Must be faster than real-time
             self.assertLess(r["budget_utilization_pct"], 100.0)  # Must fit in budget
-            self.assertGreater(r["active_kernel_power_w"], 100.0)  # Active power during burst
-            self.assertLess(r["real_cadence_power_w"], 100.0)  # Continuous avg power under real cadence
+            self.assertGreater(
+                r["active_kernel_power_w"], 100.0
+            )  # Active power during burst
+            self.assertLess(
+                r["real_cadence_power_w"], 100.0
+            )  # Continuous avg power under real cadence
             self.assertGreater(r["energy_per_frame_mj"], 0.0)
             self.assertGreater(r["vram_allocated_gb"], 0.0)
 
     def test_astro_dynamic_ephemeris_and_catalog(self):
         """Test astronomical coordinates, dynamic LST, and visible source ranking."""
         import datetime
+
         dt = parse_observation_time("2026-10-15T04:20:00Z")
         self.assertEqual(dt.year, 2026)
         self.assertEqual(dt.month, 10)
@@ -315,7 +328,9 @@ class TestChartsSimulationSuite(unittest.TestCase):
         self.assertEqual(discovered[0]["tag"], "test_window_tag")
 
         # Load reference window
-        retrieved_dir, retrieved_man = get_reference_window("test_window_tag", reference_dir=ref_dir)
+        retrieved_dir, retrieved_man = get_reference_window(
+            "test_window_tag", reference_dir=ref_dir
+        )
         self.assertEqual(retrieved_man.tag, "test_window_tag")
         self.assertEqual(retrieved_man.total_frames, 5)
 

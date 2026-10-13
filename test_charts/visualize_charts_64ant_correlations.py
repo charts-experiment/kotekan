@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
@@ -58,7 +59,9 @@ from generate_charts_64ant_dumps import (
 from inspect_correlator_dump import load_astron_correlator_dump
 
 
-def plot_charts_64_antenna_grid(ax: plt.Axes, saturated_antennas: List[int] = DEFAULT_SATURATED_ANTENNAS):
+def plot_charts_64_antenna_grid(
+    ax: plt.Axes, saturated_antennas: List[int] = DEFAULT_SATURATED_ANTENNAS
+):
     """Plots the physical 8x8 CHARTS antenna layout with feed coordinates and saturation markers."""
     pos_x, pos_y = get_charts_64_antenna_positions(64, DEFAULT_SPACING_M)
 
@@ -124,7 +127,13 @@ def plot_charts_64_antenna_grid(ax: plt.Axes, saturated_antennas: List[int] = DE
     ax.set_xlim(-0.5, 7 * DEFAULT_SPACING_M + 0.5)
     ax.set_ylim(-0.5, 7 * DEFAULT_SPACING_M + 0.5)
     ax.set_aspect("equal")
-    ax.legend(loc="upper right", fontsize=8, facecolor="#1e293b", edgecolor="#475569", labelcolor="#f8fafc")
+    ax.legend(
+        loc="upper right",
+        fontsize=8,
+        facecolor="#1e293b",
+        edgecolor="#475569",
+        labelcolor="#f8fafc",
+    )
 
 
 def plot_uv_coverage(ax: plt.Axes, wavelength_m: float = 0.857):
@@ -192,11 +201,17 @@ def compute_or_load_correlation_matrix(
         ]
         for cf in candidate_files:
             if cf.exists():
-                cube = load_astron_correlator_dump(cf, num_elements=num_elements, num_channels=num_freq)
+                cube = load_astron_correlator_dump(
+                    cf, num_elements=num_elements, num_channels=num_freq
+                )
                 return cube[freq_idx]
 
     # Analytical physical model
-    target_key = scenario.replace("_with_noise", "").replace("_no_noise", "").replace("_saturated", "")
+    target_key = (
+        scenario.replace("_with_noise", "")
+        .replace("_no_noise", "")
+        .replace("_saturated", "")
+    )
     target = ASTRONOMICAL_CATALOG.get(target_key, ASTRONOMICAL_CATALOG["vela"])
 
     pos_x, pos_y = get_charts_64_antenna_positions(num_elements, DEFAULT_SPACING_M)
@@ -225,8 +240,14 @@ def compute_or_load_correlation_matrix(
         # Thermal noise on diagonal
         np.fill_diagonal(v_matrix, np.diag(v_matrix) + (sigmas**2) * 1536.0 * 0.1)
         # Small background fluctuation
-        noise_cross = (rng.normal(0, 0.05, size=(num_elements, num_elements)) +
-                       1j * rng.normal(0, 0.05, size=(num_elements, num_elements))) * np.outer(sigmas, sigmas) * 10.0
+        noise_cross = (
+            (
+                rng.normal(0, 0.05, size=(num_elements, num_elements))
+                + 1j * rng.normal(0, 0.05, size=(num_elements, num_elements))
+            )
+            * np.outer(sigmas, sigmas)
+            * 10.0
+        )
         noise_cross = 0.5 * (noise_cross + noise_cross.conj().T)
         v_matrix += noise_cross
 
@@ -261,7 +282,9 @@ def generate_master_visualization(
 
     # Overall figure: 2 rows of array/uv + 8 correlation heatmaps (3 rows x 4 cols layout)
     fig = plt.figure(figsize=(24, 16), facecolor="#020617")
-    gs = fig.add_gridspec(3, 4, hspace=0.32, wspace=0.28, left=0.05, right=0.96, top=0.92, bottom=0.06)
+    gs = fig.add_gridspec(
+        3, 4, hspace=0.32, wspace=0.28, left=0.05, right=0.96, top=0.92, bottom=0.06
+    )
 
     # 1. Top Row Left: Physical 64-Antenna Grid Layout
     ax_array = fig.add_subplot(gs[0, 0:2])
@@ -283,7 +306,16 @@ def generate_master_visualization(
         fig.add_subplot(gs[2, 3]),
     ]
 
-    colormaps = ["inferno", "magma", "plasma", "viridis", "inferno", "cividis", "hot", "turbo"]
+    colormaps = [
+        "inferno",
+        "magma",
+        "plasma",
+        "viridis",
+        "inferno",
+        "cividis",
+        "hot",
+        "turbo",
+    ]
 
     for idx, (sc, title) in enumerate(showcase_scenarios):
         ax = axes_corr[idx]
@@ -293,9 +325,17 @@ def generate_master_visualization(
         # Normalize for clear visual contrast
         norm_v = v_amp / (np.max(v_amp) + 1e-12)
 
-        im = ax.imshow(norm_v, cmap=colormaps[idx % len(colormaps)], aspect="equal", origin="upper")
+        im = ax.imshow(
+            norm_v, cmap=colormaps[idx % len(colormaps)], aspect="equal", origin="upper"
+        )
 
-        ax.set_title(f"{title}\n64x64 Visibility Matrix |V_ij|", fontsize=10, fontweight="bold", color="#f8fafc", pad=8)
+        ax.set_title(
+            f"{title}\n64x64 Visibility Matrix |V_ij|",
+            fontsize=10,
+            fontweight="bold",
+            color="#f8fafc",
+            pad=8,
+        )
         ax.set_xlabel("Antenna j", fontsize=8.5, color="#cbd5e1")
         ax.set_ylabel("Antenna i", fontsize=8.5, color="#cbd5e1")
         ax.tick_params(colors="#94a3b8", labelsize=8)
@@ -303,8 +343,12 @@ def generate_master_visualization(
         # Highlight saturated antennas if applicable
         if "saturated" in sc:
             for bad_ant in DEFAULT_SATURATED_ANTENNAS:
-                ax.axhline(bad_ant, color="#ef4444", linestyle=":", alpha=0.7, linewidth=1.0)
-                ax.axvline(bad_ant, color="#ef4444", linestyle=":", alpha=0.7, linewidth=1.0)
+                ax.axhline(
+                    bad_ant, color="#ef4444", linestyle=":", alpha=0.7, linewidth=1.0
+                )
+                ax.axvline(
+                    bad_ant, color="#ef4444", linestyle=":", alpha=0.7, linewidth=1.0
+                )
 
         cb = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         cb.ax.tick_params(colors="#94a3b8", labelsize=7)
@@ -322,11 +366,15 @@ def generate_master_visualization(
 
     plt.savefig(output_png, dpi=300, facecolor=fig.get_facecolor(), edgecolor="none")
     plt.close()
-    print(f"[SUCCESS] Master PNG visualization successfully generated: {output_png} (DPI=300)")
+    print(
+        f"[SUCCESS] Master PNG visualization successfully generated: {output_png} (DPI=300)"
+    )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CHARTS 64-Antenna Visualization Dashboard")
+    parser = argparse.ArgumentParser(
+        description="CHARTS 64-Antenna Visualization Dashboard"
+    )
     parser.add_argument(
         "--output",
         type=str,

@@ -52,6 +52,7 @@ def get_reference_library_dir() -> Path:
 @dataclass
 class ReferenceWindowManifest:
     """Structured, reproducible manifest for a reference baseband observation window."""
+
     tag: str
     description: str
     created_at_utc: str
@@ -125,11 +126,13 @@ def create_reference_manifest(
     for bf in bin_files:
         size = bf.stat().st_size
         total_size += size
-        frame_entries.append({
-            "name": bf.name,
-            "size_bytes": size,
-            "sha256_prefix": compute_file_sha256(bf),
-        })
+        frame_entries.append(
+            {
+                "name": bf.name,
+                "size_bytes": size,
+                "sha256_prefix": compute_file_sha256(bf),
+            }
+        )
 
     frame_count = len(bin_files)
     frame_period_ms = (samples_per_frame * FPGA_TIME_RESOLUTION_US) / 1000.0
@@ -153,7 +156,13 @@ def create_reference_manifest(
     git_rev = None
     try:
         import subprocess
-        proc = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, cwd=window_dir)
+
+        proc = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=window_dir,
+        )
         if proc.returncode == 0:
             git_rev = proc.stdout.strip()
     except Exception:
@@ -237,7 +246,9 @@ def save_as_reference_window(
     return dest_dir
 
 
-def list_reference_windows(reference_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
+def list_reference_windows(
+    reference_dir: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
     """Discovers and lists all registered reference windows."""
     target_lib = reference_dir or get_reference_library_dir()
     if not target_lib.is_dir():
@@ -250,22 +261,28 @@ def list_reference_windows(reference_dir: Optional[Path] = None) -> List[Dict[st
             if manifest_file.is_file():
                 try:
                     man = ReferenceWindowManifest.load(manifest_file)
-                    summaries.append({
-                        "tag": man.tag,
-                        "description": man.description,
-                        "observation_start": man.observation_start_utc,
-                        "lst_hours": round(man.observation_start_lst_hours, 2),
-                        "duration_s": round(man.duration_s, 2),
-                        "total_frames": man.total_frames,
-                        "antennas": man.antennas,
-                        "num_freq": man.num_freq,
-                        "size_mb": man.total_size_mb,
-                        "active_sources": [s.get("name", "Unknown") for s in man.active_sources[:3]],
-                        "events_count": len(man.injected_events),
-                        "path": str(item),
-                    })
+                    summaries.append(
+                        {
+                            "tag": man.tag,
+                            "description": man.description,
+                            "observation_start": man.observation_start_utc,
+                            "lst_hours": round(man.observation_start_lst_hours, 2),
+                            "duration_s": round(man.duration_s, 2),
+                            "total_frames": man.total_frames,
+                            "antennas": man.antennas,
+                            "num_freq": man.num_freq,
+                            "size_mb": man.total_size_mb,
+                            "active_sources": [
+                                s.get("name", "Unknown") for s in man.active_sources[:3]
+                            ],
+                            "events_count": len(man.injected_events),
+                            "path": str(item),
+                        }
+                    )
                 except Exception as e:
-                    logger.warning(f"Error parsing reference manifest at {manifest_file}: {e}")
+                    logger.warning(
+                        f"Error parsing reference manifest at {manifest_file}: {e}"
+                    )
 
     return summaries
 

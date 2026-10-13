@@ -82,7 +82,9 @@ class TestWriterIndependence(unittest.TestCase):
         c_inv = 1.0 / C_LIGHT
 
         pos_x, pos_y = get_antenna_positions(num_ant)
-        freqs_hz = (DEFAULT_FREQUENCY_START_MHZ + np.arange(num_freq) * CHARTS_CHANNEL_WIDTH_MHZ) * 1e6
+        freqs_hz = (
+            DEFAULT_FREQUENCY_START_MHZ + np.arange(num_freq) * CHARTS_CHANNEL_WIDTH_MHZ
+        ) * 1e6
 
         # Injected off-zenith point source direction cosines (l0, m0)
         l0 = 0.08
@@ -98,10 +100,12 @@ class TestWriterIndependence(unittest.TestCase):
         # Synthesize baseband voltages: (samples_per_frame, num_freq, num_ant)
         # Carrier base phase rotates through ~20 full cycles across the frame (5 kHz carrier)
         # ensuring the 4-bit quantizer uniformly samples phases around the unit circle
-        carrier_phase = two_pi * (t_abs_s * 5000.0)                         # (samples,)
-        geom_phases = two_pi * (freqs_hz[:, None] * delays_s[None, :])     # (freq, ant)
+        carrier_phase = two_pi * (t_abs_s * 5000.0)  # (samples,)
+        geom_phases = two_pi * (freqs_hz[:, None] * delays_s[None, :])  # (freq, ant)
 
-        tot_phases = carrier_phase[:, None, None] - geom_phases[None, :, :]  # (samples, freq, ant)
+        tot_phases = (
+            carrier_phase[:, None, None] - geom_phases[None, :, :]
+        )  # (samples, freq, ant)
         clean_voltages = (source_amp * np.exp(1j * tot_phases)).astype(np.complex64)
 
         # 1. Serialize using RawBinWriter
@@ -168,14 +172,16 @@ class TestWriterIndependence(unittest.TestCase):
                     measured_phase = np.angle(measured_vis)
 
                     # Phase difference modulo 2pi
-                    phase_diff = np.angle(np.exp(1j * (measured_phase - expected_phase)))
+                    phase_diff = np.angle(
+                        np.exp(1j * (measured_phase - expected_phase))
+                    )
 
                     # With int4 quantization ([-7, 7]) and 1536 time samples,
                     # phase error is < 0.05 radians (~2.8 degrees)
                     self.assertLess(
                         abs(phase_diff),
                         0.05,
-                        f"Baseline ({i}, {j}) at {f_hz*1e-6:.1f} MHz phase error {abs(phase_diff):.4f} rad exceeds 0.05 rad"
+                        f"Baseline ({i}, {j}) at {f_hz*1e-6:.1f} MHz phase error {abs(phase_diff):.4f} rad exceeds 0.05 rad",
                     )
 
     def test_02_end_to_end_generator_with_writer_independence(self):
@@ -208,7 +214,9 @@ class TestWriterIndependence(unittest.TestCase):
             shape=(cfg.samples_per_frame, cfg.num_freq, cfg.antennas),
             unpack=True,
         )
-        self.assertEqual(first_frame.shape, (cfg.samples_per_frame, cfg.num_freq, cfg.antennas))
+        self.assertEqual(
+            first_frame.shape, (cfg.samples_per_frame, cfg.num_freq, cfg.antennas)
+        )
         self.assertEqual(first_frame.dtype, np.complex64)
 
 

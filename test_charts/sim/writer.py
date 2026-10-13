@@ -49,6 +49,7 @@ WindowManifest = ReferenceWindowManifest
 # Metadata Container
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class WindowMetadata:
     """Complete metadata description of a baseband observation window.
@@ -56,6 +57,7 @@ class WindowMetadata:
     Follows the CHIME/CHARTS archive schema for telescope geometry,
     analog receiver parameters, solar state, and scheduled transient events.
     """
+
     window_name: str
     target_dir: Path
     utc_start: str
@@ -89,11 +91,21 @@ class WindowMetadata:
         """Convert metadata to dictionary representation."""
         res = asdict(self)
         res["target_dir"] = str(self.target_dir)
-        for key in ["frequencies_mhz", "antenna_pos_x_m", "antenna_pos_y_m",
-                    "antenna_sigma_base", "bandpass_shape", "physical_frame_indices",
-                    "output_file_indices", "timestamps_s", "mean_powers_lsb2",
-                    "max_powers_lsb2", "clip_fractions", "lightcurve_time_s",
-                    "lightcurve_power"]:
+        for key in [
+            "frequencies_mhz",
+            "antenna_pos_x_m",
+            "antenna_pos_y_m",
+            "antenna_sigma_base",
+            "bandpass_shape",
+            "physical_frame_indices",
+            "output_file_indices",
+            "timestamps_s",
+            "mean_powers_lsb2",
+            "max_powers_lsb2",
+            "clip_fractions",
+            "lightcurve_time_s",
+            "lightcurve_power",
+        ]:
             if res.get(key) is not None and isinstance(res[key], np.ndarray):
                 res[key] = res[key].tolist()
         return res
@@ -102,6 +114,7 @@ class WindowMetadata:
 # ---------------------------------------------------------------------------
 # int4x2 Quantization and Packing Functions
 # ---------------------------------------------------------------------------
+
 
 def pack_int4x2(voltages: np.ndarray) -> np.ndarray:
     r"""Pack complex voltages into 4-bit complex integers stored in uint8.
@@ -139,7 +152,9 @@ def pack_int4x2(voltages: np.ndarray) -> np.ndarray:
             v_real = voltages[..., 0]
             v_imag = voltages[..., 1]
         else:
-            raise ValueError(f"Cannot interpret array with shape {voltages.shape} and dtype {voltages.dtype} as complex")
+            raise ValueError(
+                f"Cannot interpret array with shape {voltages.shape} and dtype {voltages.dtype} as complex"
+            )
 
     r_quant = np.clip(np.round(v_real), -8, 7).astype(np.int8)
     i_quant = np.clip(np.round(v_imag), -8, 7).astype(np.int8)
@@ -187,6 +202,7 @@ def unpack_int4x2(packed: np.ndarray) -> np.ndarray:
 # 5D Fiducial Layout Transforms
 # ---------------------------------------------------------------------------
 
+
 def fiducial_5d_to_kotekan(arr_5d: np.ndarray) -> np.ndarray:
     """Convert fiducial 5D ordering to Kotekan 3D frame layout.
 
@@ -218,10 +234,14 @@ def fiducial_5d_to_kotekan(arr_5d: np.ndarray) -> np.ndarray:
         transposed = np.transpose(arr_5d, (0, 4, 3, 1, 2))
         return transposed.reshape(t_pkt, t_samp, freq, dish * pol)
     else:
-        raise ValueError(f"Expected 4D or 5D array for fiducial conversion, got {arr_5d.ndim}D")
+        raise ValueError(
+            f"Expected 4D or 5D array for fiducial conversion, got {arr_5d.ndim}D"
+        )
 
 
-def kotekan_to_fiducial_5d(arr_kotekan: np.ndarray, num_dishes: int, num_pol: int = 1) -> np.ndarray:
+def kotekan_to_fiducial_5d(
+    arr_kotekan: np.ndarray, num_dishes: int, num_pol: int = 1
+) -> np.ndarray:
     """Convert Kotekan 3D frame layout to fiducial 5D ordering.
 
     Kotekan Streaming Buffer Layout:
@@ -247,24 +267,31 @@ def kotekan_to_fiducial_5d(arr_kotekan: np.ndarray, num_dishes: int, num_pol: in
     if arr_kotekan.ndim == 3:
         t_samp, freq, num_elements = arr_kotekan.shape
         if num_elements != num_dishes * num_pol:
-            raise ValueError(f"num_elements ({num_elements}) != num_dishes ({num_dishes}) * num_pol ({num_pol})")
+            raise ValueError(
+                f"num_elements ({num_elements}) != num_dishes ({num_dishes}) * num_pol ({num_pol})"
+            )
         reshaped = arr_kotekan.reshape(t_samp, freq, num_dishes, num_pol)
         # Transpose to (dish, pol, freq, t_samp)
         return np.transpose(reshaped, (2, 3, 1, 0))
     elif arr_kotekan.ndim == 4:
         t_pkt, t_samp, freq, num_elements = arr_kotekan.shape
         if num_elements != num_dishes * num_pol:
-            raise ValueError(f"num_elements ({num_elements}) != num_dishes ({num_dishes}) * num_pol ({num_pol})")
+            raise ValueError(
+                f"num_elements ({num_elements}) != num_dishes ({num_dishes}) * num_pol ({num_pol})"
+            )
         reshaped = arr_kotekan.reshape(t_pkt, t_samp, freq, num_dishes, num_pol)
         # Transpose to (t_pkt, dish, pol, freq, t_samp)
         return np.transpose(reshaped, (0, 3, 4, 2, 1))
     else:
-        raise ValueError(f"Expected 3D or 4D array for kotekan layout, got {arr_kotekan.ndim}D")
+        raise ValueError(
+            f"Expected 3D or 4D array for kotekan layout, got {arr_kotekan.ndim}D"
+        )
 
 
 # ---------------------------------------------------------------------------
 # BasebandWriter Protocol
 # ---------------------------------------------------------------------------
+
 
 @runtime_checkable
 class BasebandWriter(Protocol):
@@ -322,6 +349,7 @@ class BasebandWriter(Protocol):
 # RawBinWriter Implementation
 # ---------------------------------------------------------------------------
 
+
 class RawBinWriter:
     """Kotekan rawFileWrite-compatible sequential .bin frame writer.
 
@@ -369,7 +397,10 @@ class RawBinWriter:
         expected_shape = (self.samples_per_frame, self.num_freq, self.num_elements)
         if packed.shape != expected_shape:
             # Reshape if total byte size matches
-            if packed.size == self.samples_per_frame * self.num_freq * self.num_elements:
+            if (
+                packed.size
+                == self.samples_per_frame * self.num_freq * self.num_elements
+            ):
                 packed = packed.reshape(expected_shape)
             else:
                 raise ValueError(
@@ -417,33 +448,70 @@ class RawBinWriter:
             for k, v in meta.extra_attrs.items():
                 h5.attrs[k] = v
 
-            h5.create_dataset("frequencies_mhz", data=np.asarray(meta.frequencies_mhz, dtype=np.float64))
-            h5.create_dataset("antenna_pos_x_m", data=np.asarray(meta.antenna_pos_x_m, dtype=np.float64))
-            h5.create_dataset("antenna_pos_y_m", data=np.asarray(meta.antenna_pos_y_m, dtype=np.float64))
+            h5.create_dataset(
+                "frequencies_mhz",
+                data=np.asarray(meta.frequencies_mhz, dtype=np.float64),
+            )
+            h5.create_dataset(
+                "antenna_pos_x_m",
+                data=np.asarray(meta.antenna_pos_x_m, dtype=np.float64),
+            )
+            h5.create_dataset(
+                "antenna_pos_y_m",
+                data=np.asarray(meta.antenna_pos_y_m, dtype=np.float64),
+            )
 
             if meta.antenna_sigma_base is not None:
-                h5.create_dataset("antenna_sigma_base", data=np.asarray(meta.antenna_sigma_base, dtype=np.float32))
+                h5.create_dataset(
+                    "antenna_sigma_base",
+                    data=np.asarray(meta.antenna_sigma_base, dtype=np.float32),
+                )
             if meta.bandpass_shape is not None:
-                h5.create_dataset("bandpass_shape", data=np.asarray(meta.bandpass_shape, dtype=np.float32))
+                h5.create_dataset(
+                    "bandpass_shape",
+                    data=np.asarray(meta.bandpass_shape, dtype=np.float32),
+                )
 
             frames_grp = h5.create_group("frames")
             if meta.physical_frame_indices is not None:
-                frames_grp.create_dataset("physical_frame_index", data=np.asarray(meta.physical_frame_indices, dtype=np.int32))
+                frames_grp.create_dataset(
+                    "physical_frame_index",
+                    data=np.asarray(meta.physical_frame_indices, dtype=np.int32),
+                )
             if meta.output_file_indices is not None:
-                frames_grp.create_dataset("output_file_index", data=np.asarray(meta.output_file_indices, dtype=np.int32))
+                frames_grp.create_dataset(
+                    "output_file_index",
+                    data=np.asarray(meta.output_file_indices, dtype=np.int32),
+                )
             if meta.timestamps_s is not None:
-                frames_grp.create_dataset("timestamp_s", data=np.asarray(meta.timestamps_s, dtype=np.float64))
+                frames_grp.create_dataset(
+                    "timestamp_s", data=np.asarray(meta.timestamps_s, dtype=np.float64)
+                )
             if meta.mean_powers_lsb2 is not None:
-                frames_grp.create_dataset("mean_power_lsb2", data=np.asarray(meta.mean_powers_lsb2, dtype=np.float32))
+                frames_grp.create_dataset(
+                    "mean_power_lsb2",
+                    data=np.asarray(meta.mean_powers_lsb2, dtype=np.float32),
+                )
             if meta.max_powers_lsb2 is not None:
-                frames_grp.create_dataset("max_power_lsb2", data=np.asarray(meta.max_powers_lsb2, dtype=np.float32))
+                frames_grp.create_dataset(
+                    "max_power_lsb2",
+                    data=np.asarray(meta.max_powers_lsb2, dtype=np.float32),
+                )
             if meta.clip_fractions is not None:
-                frames_grp.create_dataset("clip_fraction", data=np.asarray(meta.clip_fractions, dtype=np.float32))
+                frames_grp.create_dataset(
+                    "clip_fraction",
+                    data=np.asarray(meta.clip_fractions, dtype=np.float32),
+                )
 
             if meta.lightcurve_time_s is not None and meta.lightcurve_power is not None:
                 lc_grp = h5.create_group("lightcurve")
-                lc_grp.create_dataset("time_s", data=np.asarray(meta.lightcurve_time_s, dtype=np.float64))
-                lc_grp.create_dataset("power_analytic", data=np.asarray(meta.lightcurve_power, dtype=np.float64))
+                lc_grp.create_dataset(
+                    "time_s", data=np.asarray(meta.lightcurve_time_s, dtype=np.float64)
+                )
+                lc_grp.create_dataset(
+                    "power_analytic",
+                    data=np.asarray(meta.lightcurve_power, dtype=np.float64),
+                )
 
         return meta_h5_path
 
@@ -456,18 +524,32 @@ class RawBinWriter:
         for bf in bin_files:
             size = bf.stat().st_size
             total_size += size
-            frame_entries.append({
-                "name": bf.name,
-                "size_bytes": size,
-                "sha256_prefix": compute_file_sha256(bf),
-            })
+            frame_entries.append(
+                {
+                    "name": bf.name,
+                    "size_bytes": size,
+                    "sha256_prefix": compute_file_sha256(bf),
+                }
+            )
 
         frame_count = len(bin_files)
         frame_period_ms = (self.samples_per_frame * FPGA_TIME_RESOLUTION_US) / 1000.0
 
-        obs_start_utc = self._metadata.utc_start if self._metadata else datetime.datetime.now(datetime.timezone.utc).isoformat()
-        duration_s = self._metadata.duration_s if self._metadata else (frame_count * frame_period_ms * 1e-3)
-        freq_start_mhz = float(self._metadata.frequencies_mhz[0]) if (self._metadata and len(self._metadata.frequencies_mhz) > 0) else DEFAULT_FREQUENCY_START_MHZ
+        obs_start_utc = (
+            self._metadata.utc_start
+            if self._metadata
+            else datetime.datetime.now(datetime.timezone.utc).isoformat()
+        )
+        duration_s = (
+            self._metadata.duration_s
+            if self._metadata
+            else (frame_count * frame_period_ms * 1e-3)
+        )
+        freq_start_mhz = (
+            float(self._metadata.frequencies_mhz[0])
+            if (self._metadata and len(self._metadata.frequencies_mhz) > 0)
+            else DEFAULT_FREQUENCY_START_MHZ
+        )
 
         manifest = ReferenceWindowManifest(
             tag=self.window_name,
@@ -499,6 +581,7 @@ class RawBinWriter:
 # HDF5Writer Implementation
 # ---------------------------------------------------------------------------
 
+
 class HDF5Writer:
     """Analysis-friendly HDF5 baseband container writer.
 
@@ -524,7 +607,9 @@ class HDF5Writer:
         self.num_polarizations = num_polarizations
 
         self.target_dir.mkdir(parents=True, exist_ok=True)
-        self.h5_path = Path(h5_path) if h5_path else (self.target_dir / f"{self.window_name}.h5")
+        self.h5_path = (
+            Path(h5_path) if h5_path else (self.target_dir / f"{self.window_name}.h5")
+        )
         self._written_count = 0
         self._metadata: Optional[WindowMetadata] = None
 
@@ -536,7 +621,10 @@ class HDF5Writer:
         packed = pack_int4x2(voltages)
         expected_shape = (self.samples_per_frame, self.num_freq, self.num_elements)
         if packed.shape != expected_shape:
-            if packed.size == self.samples_per_frame * self.num_freq * self.num_elements:
+            if (
+                packed.size
+                == self.samples_per_frame * self.num_freq * self.num_elements
+            ):
                 packed = packed.reshape(expected_shape)
             else:
                 raise ValueError(
@@ -549,13 +637,25 @@ class HDF5Writer:
                 dset = h5.create_dataset(
                     "baseband",
                     shape=(0, self.samples_per_frame, self.num_freq, self.num_elements),
-                    maxshape=(None, self.samples_per_frame, self.num_freq, self.num_elements),
+                    maxshape=(
+                        None,
+                        self.samples_per_frame,
+                        self.num_freq,
+                        self.num_elements,
+                    ),
                     dtype=np.uint8,
-                    chunks=(1, min(self.samples_per_frame, 256), min(self.num_freq, 64), self.num_elements),
+                    chunks=(
+                        1,
+                        min(self.samples_per_frame, 256),
+                        min(self.num_freq, 64),
+                        self.num_elements,
+                    ),
                 )
                 dset.attrs["dimension_labels"] = ["frame", "t_samp", "freq", "element"]
                 dset.attrs["encoding"] = "int4x2_packed"
-                dset.attrs["packing_formula"] = "Byte = (Re & 0x0F) | ((Im & 0x0F) << 4)"
+                dset.attrs["packing_formula"] = (
+                    "Byte = (Re & 0x0F) | ((Im & 0x0F) << 4)"
+                )
             else:
                 dset = h5["baseband"]
 
@@ -596,33 +696,70 @@ class HDF5Writer:
             for k, v in meta.extra_attrs.items():
                 h5.attrs[k] = v
 
-            h5.create_dataset("frequencies_mhz", data=np.asarray(meta.frequencies_mhz, dtype=np.float64))
-            h5.create_dataset("antenna_pos_x_m", data=np.asarray(meta.antenna_pos_x_m, dtype=np.float64))
-            h5.create_dataset("antenna_pos_y_m", data=np.asarray(meta.antenna_pos_y_m, dtype=np.float64))
+            h5.create_dataset(
+                "frequencies_mhz",
+                data=np.asarray(meta.frequencies_mhz, dtype=np.float64),
+            )
+            h5.create_dataset(
+                "antenna_pos_x_m",
+                data=np.asarray(meta.antenna_pos_x_m, dtype=np.float64),
+            )
+            h5.create_dataset(
+                "antenna_pos_y_m",
+                data=np.asarray(meta.antenna_pos_y_m, dtype=np.float64),
+            )
 
             if meta.antenna_sigma_base is not None:
-                h5.create_dataset("antenna_sigma_base", data=np.asarray(meta.antenna_sigma_base, dtype=np.float32))
+                h5.create_dataset(
+                    "antenna_sigma_base",
+                    data=np.asarray(meta.antenna_sigma_base, dtype=np.float32),
+                )
             if meta.bandpass_shape is not None:
-                h5.create_dataset("bandpass_shape", data=np.asarray(meta.bandpass_shape, dtype=np.float32))
+                h5.create_dataset(
+                    "bandpass_shape",
+                    data=np.asarray(meta.bandpass_shape, dtype=np.float32),
+                )
 
             frames_grp = h5.create_group("frames")
             if meta.physical_frame_indices is not None:
-                frames_grp.create_dataset("physical_frame_index", data=np.asarray(meta.physical_frame_indices, dtype=np.int32))
+                frames_grp.create_dataset(
+                    "physical_frame_index",
+                    data=np.asarray(meta.physical_frame_indices, dtype=np.int32),
+                )
             if meta.output_file_indices is not None:
-                frames_grp.create_dataset("output_file_index", data=np.asarray(meta.output_file_indices, dtype=np.int32))
+                frames_grp.create_dataset(
+                    "output_file_index",
+                    data=np.asarray(meta.output_file_indices, dtype=np.int32),
+                )
             if meta.timestamps_s is not None:
-                frames_grp.create_dataset("timestamp_s", data=np.asarray(meta.timestamps_s, dtype=np.float64))
+                frames_grp.create_dataset(
+                    "timestamp_s", data=np.asarray(meta.timestamps_s, dtype=np.float64)
+                )
             if meta.mean_powers_lsb2 is not None:
-                frames_grp.create_dataset("mean_power_lsb2", data=np.asarray(meta.mean_powers_lsb2, dtype=np.float32))
+                frames_grp.create_dataset(
+                    "mean_power_lsb2",
+                    data=np.asarray(meta.mean_powers_lsb2, dtype=np.float32),
+                )
             if meta.max_powers_lsb2 is not None:
-                frames_grp.create_dataset("max_power_lsb2", data=np.asarray(meta.max_powers_lsb2, dtype=np.float32))
+                frames_grp.create_dataset(
+                    "max_power_lsb2",
+                    data=np.asarray(meta.max_powers_lsb2, dtype=np.float32),
+                )
             if meta.clip_fractions is not None:
-                frames_grp.create_dataset("clip_fraction", data=np.asarray(meta.clip_fractions, dtype=np.float32))
+                frames_grp.create_dataset(
+                    "clip_fraction",
+                    data=np.asarray(meta.clip_fractions, dtype=np.float32),
+                )
 
             if meta.lightcurve_time_s is not None and meta.lightcurve_power is not None:
                 lc_grp = h5.create_group("lightcurve")
-                lc_grp.create_dataset("time_s", data=np.asarray(meta.lightcurve_time_s, dtype=np.float64))
-                lc_grp.create_dataset("power_analytic", data=np.asarray(meta.lightcurve_power, dtype=np.float64))
+                lc_grp.create_dataset(
+                    "time_s", data=np.asarray(meta.lightcurve_time_s, dtype=np.float64)
+                )
+                lc_grp.create_dataset(
+                    "power_analytic",
+                    data=np.asarray(meta.lightcurve_power, dtype=np.float64),
+                )
 
         return meta_h5_path
 
@@ -632,15 +769,29 @@ class HDF5Writer:
         size = self.h5_path.stat().st_size if self.h5_path.exists() else 0
         sha_pref = compute_file_sha256(self.h5_path) if self.h5_path.exists() else ""
 
-        frame_entries = [{
-            "name": self.h5_path.name,
-            "size_bytes": size,
-            "sha256_prefix": sha_pref,
-        }]
+        frame_entries = [
+            {
+                "name": self.h5_path.name,
+                "size_bytes": size,
+                "sha256_prefix": sha_pref,
+            }
+        ]
 
-        obs_start_utc = self._metadata.utc_start if self._metadata else datetime.datetime.now(datetime.timezone.utc).isoformat()
-        duration_s = self._metadata.duration_s if self._metadata else (self._written_count * frame_period_ms * 1e-3)
-        freq_start_mhz = float(self._metadata.frequencies_mhz[0]) if (self._metadata and len(self._metadata.frequencies_mhz) > 0) else DEFAULT_FREQUENCY_START_MHZ
+        obs_start_utc = (
+            self._metadata.utc_start
+            if self._metadata
+            else datetime.datetime.now(datetime.timezone.utc).isoformat()
+        )
+        duration_s = (
+            self._metadata.duration_s
+            if self._metadata
+            else (self._written_count * frame_period_ms * 1e-3)
+        )
+        freq_start_mhz = (
+            float(self._metadata.frequencies_mhz[0])
+            if (self._metadata and len(self._metadata.frequencies_mhz) > 0)
+            else DEFAULT_FREQUENCY_START_MHZ
+        )
 
         manifest = ReferenceWindowManifest(
             tag=self.window_name,
@@ -671,6 +822,7 @@ class HDF5Writer:
 # ---------------------------------------------------------------------------
 # Reading Utility Functions
 # ---------------------------------------------------------------------------
+
 
 def read_raw_bin_frame(
     file_path: Union[Path, str],
@@ -719,6 +871,7 @@ def read_raw_bin_frame(
 # Factory Helper
 # ---------------------------------------------------------------------------
 
+
 def create_writer(
     writer_type: str,
     target_dir: Union[Path, str],
@@ -754,4 +907,6 @@ def create_writer(
             **kwargs,
         )
     else:
-        raise ValueError(f"Unknown writer type: {writer_type}. Supported: 'raw_bin', 'hdf5'")
+        raise ValueError(
+            f"Unknown writer type: {writer_type}. Supported: 'raw_bin', 'hdf5'"
+        )

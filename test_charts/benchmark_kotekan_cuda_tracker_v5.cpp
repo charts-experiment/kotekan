@@ -1,18 +1,17 @@
-#include "cudaBeamTrackerV5.hpp"
 #include "DataType.hpp"
+#include "chartsConstants.hpp"
+#include "cudaBeamTrackerV5.hpp"
 
-#include <cuda_runtime.h>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cuda_runtime.h>
+#include <iomanip>
 #include <iostream>
 #include <vector>
-#include <iomanip>
-
-#include "chartsConstants.hpp"
 
 namespace {
 
@@ -22,8 +21,8 @@ constexpr double speed_of_light = kotekan::charts::constants::speed_of_light_m_p
 constexpr double two_pi = kotekan::charts::constants::two_pi;
 
 // Helper to create synthetic 4-bit packed data
-std::vector<kotekan::int4x2_t> generate_synthetic_data(
-    std::size_t n_time, std::size_t n_freq, std::size_t n_ant) {
+std::vector<kotekan::int4x2_t> generate_synthetic_data(std::size_t n_time, std::size_t n_freq,
+                                                       std::size_t n_ant) {
     std::vector<kotekan::int4x2_t> data(n_time * n_freq * n_ant);
     for (std::size_t t = 0; t < n_time; ++t) {
         for (std::size_t f = 0; f < n_freq; ++f) {
@@ -34,7 +33,8 @@ std::vector<kotekan::int4x2_t> generate_synthetic_data(
                 const int imag_val = static_cast<int>(std::round(3.5 * std::sin(phase)));
                 const int clamped_r = std::max(-8, std::min(7, real_val));
                 const int clamped_i = std::max(-8, std::min(7, imag_val));
-                const uint8_t byte_val = static_cast<uint8_t>((clamped_r & 0x0F) | ((clamped_i & 0x0F) << 4));
+                const uint8_t byte_val =
+                    static_cast<uint8_t>((clamped_r & 0x0F) | ((clamped_i & 0x0F) << 4));
                 data[(t * n_freq + f) * n_ant + a].val = byte_val;
             }
         }
@@ -43,29 +43,28 @@ std::vector<kotekan::int4x2_t> generate_synthetic_data(
 }
 
 // CPU Reference for numerical validation of complex voltages
-void cpu_reference_beam_tracker(
-    const std::vector<kotekan::int4x2_t>& packed,
-    float2* voltages,
-    std::size_t n_time,
-    std::size_t n_freq,
-    std::size_t n_ant,
-    const std::vector<double>& frequencies_hz,
-    const kotekan::BeamTrackerConfig& config) {
+void cpu_reference_beam_tracker(const std::vector<kotekan::int4x2_t>& packed, float2* voltages,
+                                std::size_t n_time, std::size_t n_freq, std::size_t n_ant,
+                                const std::vector<double>& frequencies_hz,
+                                const kotekan::BeamTrackerConfig& config) {
 
     for (std::size_t t = 0; t < n_time; ++t) {
         const std::size_t win = t / config.integration_spectra;
         const double center_sample =
             (static_cast<double>(win) + 0.5) * static_cast<double>(config.integration_spectra);
-        const float l = static_cast<float>(config.trajectory.direction_start.x
-                        + center_sample * config.trajectory.direction_rate_per_sample.dl);
-        const float m = static_cast<float>(config.trajectory.direction_start.y
-                        + center_sample * config.trajectory.direction_rate_per_sample.dm);
+        const float l =
+            static_cast<float>(config.trajectory.direction_start.x
+                               + center_sample * config.trajectory.direction_rate_per_sample.dl);
+        const float m =
+            static_cast<float>(config.trajectory.direction_start.y
+                               + center_sample * config.trajectory.direction_rate_per_sample.dm);
         const float trans_sq = l * l + m * m;
         const float n = (trans_sq <= 1.0f) ? std::sqrt(1.0f - trans_sq) : 0.0f;
         (void)n;
 
         for (std::size_t f = 0; f < n_freq; ++f) {
-            const double freq_hz = (f < frequencies_hz.size()) ? frequencies_hz[f] : (300.0e6 + f * 300.0e3);
+            const double freq_hz =
+                (f < frequencies_hz.size()) ? frequencies_hz[f] : (300.0e6 + f * 300.0e3);
             const double k = two_pi * freq_hz / speed_of_light;
 
             double sum_r = 0.0;
@@ -90,15 +89,18 @@ void cpu_reference_beam_tracker(
                 // Unpack int4
                 const uint8_t byte_val = packed[(t * n_freq + f) * n_ant + a].val;
                 int v_r = static_cast<int>(byte_val & 0x0F);
-                if (v_r >= 8) v_r -= 16;
+                if (v_r >= 8)
+                    v_r -= 16;
                 int v_i = static_cast<int>((byte_val >> 4) & 0x0F);
-                if (v_i >= 8) v_i -= 16;
+                if (v_i >= 8)
+                    v_i -= 16;
 
                 sum_r += w_r * static_cast<double>(v_r) - w_i * static_cast<double>(v_i);
                 sum_i += w_r * static_cast<double>(v_i) + w_i * static_cast<double>(v_r);
             }
 
-            voltages[t * n_freq + f] = make_float2(static_cast<float>(sum_r), static_cast<float>(sum_i));
+            voltages[t * n_freq + f] =
+                make_float2(static_cast<float>(sum_r), static_cast<float>(sum_i));
         }
     }
 }
@@ -108,10 +110,10 @@ bool check_tolerance_complex(const float2* ref, const float2* test, std::size_t 
     for (std::size_t i = 0; i < count; ++i) {
         const float diff_r = std::abs(ref[i].x - test[i].x);
         const float diff_i = std::abs(ref[i].y - test[i].y);
-        if ((diff_r > abs_tol && diff_r > rel_tol * std::abs(ref[i].x)) ||
-            (diff_i > abs_tol && diff_i > rel_tol * std::abs(ref[i].y))) {
-            std::fprintf(stderr, "Mismatch at [%zu]: ref=(%f, %f), test=(%f, %f)\n",
-                         i, ref[i].x, ref[i].y, test[i].x, test[i].y);
+        if ((diff_r > abs_tol && diff_r > rel_tol * std::abs(ref[i].x))
+            || (diff_i > abs_tol && diff_i > rel_tol * std::abs(ref[i].y))) {
+            std::fprintf(stderr, "Mismatch at [%zu]: ref=(%f, %f), test=(%f, %f)\n", i, ref[i].x,
+                         ref[i].y, test[i].x, test[i].y);
             return false;
         }
     }
@@ -121,8 +123,8 @@ bool check_tolerance_complex(const float2* ref, const float2* test, std::size_t 
 void benchmark_case(std::size_t n_ant, std::size_t n_time, std::size_t n_freq = 336,
                     std::size_t integration_spectra = 320, int repeat = 10) {
     std::cout << "=================================================================\n";
-    std::cout << "Benchmarking Kotekan V5 Complex Voltage Tracker: n_ant=" << n_ant 
-              << ", n_time=" << n_time << ", n_freq=" << n_freq 
+    std::cout << "Benchmarking Kotekan V5 Complex Voltage Tracker: n_ant=" << n_ant
+              << ", n_time=" << n_time << ", n_freq=" << n_freq
               << ", integration=" << integration_spectra << "\n";
     std::cout << "=================================================================\n";
 
@@ -179,8 +181,8 @@ void benchmark_case(std::size_t n_ant, std::size_t n_time, std::size_t n_freq = 
             stream_engine.process_batch(0, host_packed.data(), gpu_out.data());
         }
 
-        const bool stream_match = check_tolerance_complex(cpu_ref.data(), gpu_out.data(),
-                                                          std::min(n_time, std::size_t(640)) * n_freq);
+        const bool stream_match = check_tolerance_complex(
+            cpu_ref.data(), gpu_out.data(), std::min(n_time, std::size_t(640)) * n_freq);
         if (!stream_match) {
             std::cout << "  [FAIL] Stream engine numerical mismatch!\n";
         } else {
@@ -194,7 +196,8 @@ void benchmark_case(std::size_t n_ant, std::size_t n_time, std::size_t n_freq = 
             kernel_times.push_back(stream_engine.last_kernel_time_ms());
         }
         float sum_ms = 0.0f;
-        for (float t : kernel_times) sum_ms += t;
+        for (float t : kernel_times)
+            sum_ms += t;
         float avg_kernel_ms = sum_ms / repeat;
 
         // Measure Host-to-Host end-to-end latency
@@ -203,14 +206,15 @@ void benchmark_case(std::size_t n_ant, std::size_t n_time, std::size_t n_freq = 
             stream_engine.process_batch(0, host_packed.data(), gpu_out.data());
         }
         const auto end = Clock::now();
-        const double avg_e2e_ms = std::chrono::duration<double, std::milli>(end - start).count() / repeat;
+        const double avg_e2e_ms =
+            std::chrono::duration<double, std::milli>(end - start).count() / repeat;
 
         const double data_mb = static_cast<double>(v_bytes) / (1024.0 * 1024.0);
         const double throughput_gb_s = (data_mb / 1024.0) / (avg_kernel_ms / 1000.0);
 
         std::cout << std::fixed << std::setprecision(3);
-        std::cout << "  -> Stream (Standard): Kernel = " << avg_kernel_ms 
-                  << " ms | End-to-End = " << avg_e2e_ms 
+        std::cout << "  -> Stream (Standard): Kernel = " << avg_kernel_ms
+                  << " ms | End-to-End = " << avg_e2e_ms
                   << " ms | Compute Throughput = " << throughput_gb_s << " GB/s\n";
     }
 
@@ -230,13 +234,14 @@ void benchmark_case(std::size_t n_ant, std::size_t n_time, std::size_t n_freq = 
             kernel_times.push_back(graph_engine.last_kernel_time_ms());
         }
         float sum_ms = 0.0f;
-        for (float t : kernel_times) sum_ms += t;
+        for (float t : kernel_times)
+            sum_ms += t;
         float avg_kernel_ms = sum_ms / repeat;
 
         const double data_mb = static_cast<double>(v_bytes) / (1024.0 * 1024.0);
         const double throughput_gb_s = (data_mb / 1024.0) / (avg_kernel_ms / 1000.0);
 
-        std::cout << "  -> Stream (CUDA Graph): Kernel = " << avg_kernel_ms 
+        std::cout << "  -> Stream (CUDA Graph): Kernel = " << avg_kernel_ms
                   << " ms | Compute Throughput = " << throughput_gb_s << " GB/s\n";
     }
 
@@ -253,8 +258,8 @@ int main() {
 
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, 0);
-    std::cout << "Device 0: " << prop.name << " (Compute " << prop.major << "." << prop.minor 
-              << ", " << (prop.totalGlobalMem / (1024*1024)) << " MB VRAM)\n\n";
+    std::cout << "Device 0: " << prop.name << " (Compute " << prop.major << "." << prop.minor
+              << ", " << (prop.totalGlobalMem / (1024 * 1024)) << " MB VRAM)\n\n";
 
     // Run test matrix
     benchmark_case(32, 3200);

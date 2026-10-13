@@ -47,8 +47,10 @@ class TestXEngineVerification(unittest.TestCase):
         n_ant = 8
 
         # Random complex voltages
-        v = (rng.standard_normal((n_samples, n_freq, n_ant))
-             + 1j * rng.standard_normal((n_samples, n_freq, n_ant))).astype(np.complex64)
+        v = (
+            rng.standard_normal((n_samples, n_freq, n_ant))
+            + 1j * rng.standard_normal((n_samples, n_freq, n_ant))
+        ).astype(np.complex64)
 
         vis = reference_visibilities(v)
         self.assertEqual(vis.shape, (n_freq, n_ant, n_ant))
@@ -93,7 +95,13 @@ class TestXEngineVerification(unittest.TestCase):
         # Active antenna masking: only first 4 antennas active
         active_sub = [0, 1, 2, 3]
         formed_sub = reference_beamform(
-            v, pos_x, pos_y, freqs_hz, target.ra_deg, target.dec_deg, t_now,
+            v,
+            pos_x,
+            pos_y,
+            freqs_hz,
+            target.ra_deg,
+            target.dec_deg,
+            t_now,
             active_antennas=active_sub,
         )
         power_sub = np.abs(formed_sub) ** 2
@@ -112,7 +120,13 @@ class TestXEngineVerification(unittest.TestCase):
         v = np.exp(-1j * phases)[None, :, :]
 
         res = verify_visibility_phasing(
-            v, pos_x, pos_y, freqs_hz, target.ra_deg, target.dec_deg, t_now,
+            v,
+            pos_x,
+            pos_y,
+            freqs_hz,
+            target.ra_deg,
+            target.dec_deg,
+            t_now,
             max_phase_err_rad=0.01,
         )
         self.assertTrue(res["passed"])
@@ -132,7 +146,13 @@ class TestXEngineVerification(unittest.TestCase):
         v = np.exp(-1j * phases)[None, :, :]
 
         res = verify_pointing(
-            v, pos_x, pos_y, freqs_hz, target.ra_deg, target.dec_deg, t_now,
+            v,
+            pos_x,
+            pos_y,
+            freqs_hz,
+            target.ra_deg,
+            target.dec_deg,
+            t_now,
             angular_search_radius_deg=0.5,
             num_steps=21,
             max_offset_rad=1e-4,
@@ -160,10 +180,13 @@ class TestXEngineVerification(unittest.TestCase):
         t_axis = np.linspace(100.0, 200.0, 101)
         expected_transit = 150.0
         # Gaussian transit profile peaking at 150.0s
-        power_curve = np.exp(-((t_axis - expected_transit) / 10.0) ** 2)
+        power_curve = np.exp(-(((t_axis - expected_transit) / 10.0) ** 2))
 
         res_pass = verify_transit_lightcurve(
-            t_axis, power_curve, expected_transit_time_s=expected_transit, tolerance_s=1.0
+            t_axis,
+            power_curve,
+            expected_transit_time_s=expected_transit,
+            tolerance_s=1.0,
         )
         self.assertTrue(res_pass["passed"])
         self.assertEqual(res_pass["peak_time_s"], expected_transit)

@@ -39,7 +39,9 @@ import numpy as np
 CAREN_LAT_DEG = -33.4211146
 CAREN_LON_DEG = -70.8634710
 CAREN_ALT_M = 458.0
-CAREN_LOC = EarthLocation(lat=CAREN_LAT_DEG * u.deg, lon=CAREN_LON_DEG * u.deg, height=CAREN_ALT_M * u.m)
+CAREN_LOC = EarthLocation(
+    lat=CAREN_LAT_DEG * u.deg, lon=CAREN_LON_DEG * u.deg, height=CAREN_ALT_M * u.m
+)
 
 # Pipeline Sampling Constants
 SAMPLE_PERIOD_S = 3.333333333333e-6  # 300 kSPS PFB output
@@ -110,7 +112,9 @@ def calculate_target_trajectories(obstime: Time) -> List[Dict]:
     return results
 
 
-def generate_pipeline_yaml(targets: List[Dict], out_yaml_path: Path, output_dir: Path, n_files: int = 4):
+def generate_pipeline_yaml(
+    targets: List[Dict], out_yaml_path: Path, output_dir: Path, n_files: int = 4
+):
     """Generate specialized Kotekan YAML configuration for 3-beam celestial capture."""
     yaml_content = f"""# ==============================================================================
 # Auto-generated 3-Beam Celestial Target Recording Pipeline
@@ -273,11 +277,32 @@ raw_file_write_beams:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Record 3-beam celestial observation with CHARTS Kotekan Beam Tracker")
-    parser.add_argument("--duration", type=float, default=2.0, help="Observation duration in seconds (default: 2.0)")
-    parser.add_argument("--output-dir", type=str, default="/data/tracker/celestial_3beams_2s", help="Output directory")
-    parser.add_argument("--dry-run", action="store_true", help="Calculate targets and write YAML without running Kotekan")
-    parser.add_argument("--kotekan-bin", type=str, default="./build/kotekan/kotekan", help="Path to kotekan binary")
+    parser = argparse.ArgumentParser(
+        description="Record 3-beam celestial observation with CHARTS Kotekan Beam Tracker"
+    )
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=2.0,
+        help="Observation duration in seconds (default: 2.0)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="/data/tracker/celestial_3beams_2s",
+        help="Output directory",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Calculate targets and write YAML without running Kotekan",
+    )
+    parser.add_argument(
+        "--kotekan-bin",
+        type=str,
+        default="./build/kotekan/kotekan",
+        help="Path to kotekan binary",
+    )
     args = parser.parse_args()
 
     # Calculate frame count (each frame is 0.512s)
@@ -302,16 +327,26 @@ def main():
     print("=" * 80)
     print(f" Observation Epoch (UTC) : {now.iso}")
     print(f" Caren Sidereal Time (LST): {targets[0]['lst_hours']:.4f} hours")
-    print(f" Requested Duration       : {args.duration:.2f} s -> Exact: {exact_duration_s:.3f} s ({n_files} frames)")
-    print(f" Frequency Band           : {FREQ_START_MHZ:.1f} MHz to {FREQ_START_MHZ + NUM_LOCAL_FREQ * FREQ_STEP_MHZ:.1f} MHz (672 channels)")
-    print(f" Total Expected Data Size : {total_bytes / (1024**3):.2f} GB ({frame_bytes / (1024**3):.2f} GB per file)")
+    print(
+        f" Requested Duration       : {args.duration:.2f} s -> Exact: {exact_duration_s:.3f} s ({n_files} frames)"
+    )
+    print(
+        f" Frequency Band           : {FREQ_START_MHZ:.1f} MHz to {FREQ_START_MHZ + NUM_LOCAL_FREQ * FREQ_STEP_MHZ:.1f} MHz (672 channels)"
+    )
+    print(
+        f" Total Expected Data Size : {total_bytes / (1024**3):.2f} GB ({frame_bytes / (1024**3):.2f} GB per file)"
+    )
     print(f" Output Directory         : {out_dir}")
     print("-" * 80)
-    print(f" {'Beam':<5} {'Target Name':<24} {'RA (deg)':<10} {'Dec (deg)':<10} {'Alt (deg)':<10} {'Az (deg)':<10} {'Horizon'}")
+    print(
+        f" {'Beam':<5} {'Target Name':<24} {'RA (deg)':<10} {'Dec (deg)':<10} {'Alt (deg)':<10} {'Az (deg)':<10} {'Horizon'}"
+    )
     print("-" * 80)
     for t in targets:
         horizon_str = "[ABOVE]" if t["above_horizon"] else "[BELOW]"
-        print(f" {t['beam_id']:<5} {t['name']:<24} {t['ra_deg']:<10.3f} {t['dec_deg']:<10.3f} {t['alt_deg']:<10.2f} {t['az_deg']:<10.2f} {horizon_str}")
+        print(
+            f" {t['beam_id']:<5} {t['name']:<24} {t['ra_deg']:<10.3f} {t['dec_deg']:<10.3f} {t['alt_deg']:<10.2f} {t['az_deg']:<10.2f} {horizon_str}"
+        )
     print("-" * 80)
 
     # Write runtime YAML

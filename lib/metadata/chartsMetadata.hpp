@@ -4,24 +4,25 @@
 #include "DataType.hpp"
 #include "NDArray.hpp"
 #include "buffer.hpp"
+#include "chartsConstants.hpp"
+#include "kotekanLogging.hpp"
 #include "metadata.hpp"
+
 #include "json.hpp"
 #include "jsonMetadata.hpp"
-#include "kotekanLogging.hpp"
 
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
-#include <string>
 #include <string.h>
+#include <string>
 #include <vector>
 
-#include "chartsConstants.hpp"
-
 // Maximum number of frequencies in metadata array
-const int CHARTS_META_MAX_FREQ = static_cast<int>(kotekan::charts::constants::charts_full_band_channels); 
+const int CHARTS_META_MAX_FREQ =
+    static_cast<int>(kotekan::charts::constants::charts_full_band_channels);
 
 // Maximum number of dimensions for arrays
 const int CHARTS_META_MAX_DIM = 8;
@@ -62,7 +63,9 @@ public:
     public:
         almost_copyable_mutex() : std::mutex() {}
         almost_copyable_mutex(const almost_copyable_mutex&) : std::mutex() {}
-        almost_copyable_mutex operator=(const almost_copyable_mutex&) { return *this; }
+        almost_copyable_mutex operator=(const almost_copyable_mutex&) {
+            return *this;
+        }
     } lock;
 
     // ---- array description ----
@@ -73,7 +76,7 @@ public:
     int dim[CHARTS_META_MAX_DIM];
     char dim_name[CHARTS_META_MAX_DIM][CHARTS_META_MAX_DIMNAME]; // "F", "T", "D", etc
     int64_t stride[CHARTS_META_MAX_DIM]; // The stride counts elements, not bytes
-    int64_t offset;   // The offset counts elements, not bytes
+    int64_t offset;                      // The offset counts elements, not bytes
     void set_name(const std::string& name) {
         // Manually copying in a for loop to avoid possibly buggy GCC warning
         // about array bounds and stringop-truncation.
@@ -102,7 +105,7 @@ public:
         strncpy(this->dim_name[dim], name.c_str(), CHARTS_META_MAX_DIMNAME);
 #pragma GCC diagnostic pop
     }
-       void set_strides_simple() {
+    void set_strides_simple() {
         // Compute the strides from the set dims assuming simple contiguous
         // access.
         assert(this->dims >= 0);
@@ -145,7 +148,7 @@ public:
         std::lock_guard<std::mutex> lock(this->lock);
         return metadata.at(jsonMetadata::FRAME_COUNTER).template get<int>();
     }
-    
+
     // Time downsampling -- the factor by which the time samples have
     // been downsampled relative to FPGA samples.
     void set_time_downsampling_fpga(const int time_downsampling_fpga) {
@@ -183,7 +186,7 @@ public:
         std::lock_guard<std::mutex> lock(this->lock);
         return metadata.at(jsonMetadata::COARSE_FREQ).template get<std::vector<int>>();
     }
-    
+
     // Return the number of frequencies in this metadata (size of the coarse frequency vector)
     int get_nfreq() const {
         std::lock_guard<std::mutex> lock(this->lock);
@@ -222,12 +225,11 @@ public:
         return metadata.at(jsonMetadata::TIME0_FPGA).template get<int64_t>();
     }
 
-    
 
     void set_lost_timesamples(int32_t x);
     bool has_lost_timesamples() const;
     int32_t get_lost_timesamples() const;
-    
+
 private:
     jsonMetadata::metadata metadata;
 
