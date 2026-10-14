@@ -109,7 +109,7 @@ int main(int argc, char** argv) {
 
     const std::size_t n_freq = 672; // Full 672 CHARTS local channels
     const std::size_t n_ant = 32;   // 32 Antennas
-    const std::size_t max_beams = 4;
+    const std::size_t max_beams = 16;
     const std::size_t n_iterations = 25;
     const double real_time_budget_ms = (static_cast<double>(n_time) * 3.333333333333) / 1000.0;
 
@@ -239,7 +239,7 @@ int main(int argc, char** argv) {
     // Benchmark across beam counts
     std::cout << "[4/4] Benchmarking Direct Beam Tracker throughput (Blackwell SM120 Fused "
                  "Multi-Beam)...\n\n";
-    std::vector<std::size_t> test_beam_counts = {1, 2, 4};
+    std::vector<std::size_t> test_beam_counts = {1, 2, 4, 8, 12, 16};
 
     cudaEvent_t start_evt, stop_evt;
     cudaEventCreate(&start_evt);

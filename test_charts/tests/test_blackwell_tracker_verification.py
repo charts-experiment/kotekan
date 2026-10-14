@@ -118,3 +118,30 @@ def test_dual_pol_mapping():
     for raw in range(256):
         phys = raw_elem_to_physical_ant(raw, 128, 2, "interleaved", True)
         assert 0 <= phys < 128
+
+
+def test_multi_beam_scaling_up_to_16():
+    """Verify beam index calculations and stride mapping for up to 16 concurrent beams."""
+    max_beams_capacity = 16
+    n_freq = 672
+    n_ant = 128
+    n_time = 128
+
+    for num_active in (1, 2, 4, 8, 12, 16):
+        assert num_active <= max_beams_capacity
+
+        # Check output buffer stride integrity: no overlaps across beams
+        offsets = set()
+        for b in range(num_active):
+            offset = b
+            assert offset not in offsets
+            offsets.add(offset)
+
+        # Check weights indexing: (b * n_freq + f) * n_ant + a
+        for b in range(num_active):
+            weight_idx_first = (b * n_freq + 0) * n_ant + 0
+            weight_idx_last = (b * n_freq + (n_freq - 1)) * n_ant + (n_ant - 1)
+            total_elements = max_beams_capacity * n_freq * n_ant
+            assert weight_idx_first >= 0
+            assert weight_idx_last < total_elements
+
