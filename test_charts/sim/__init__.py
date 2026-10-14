@@ -76,6 +76,7 @@ from .verify import (
     verify_transit_lightcurve,
     verify_visibility_phasing,
 )
+
 try:
     from .visualizer import (
         plot_casm_correlation_matrix,
