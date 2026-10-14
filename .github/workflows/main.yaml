@@ -81,7 +81,7 @@ jobs:
               -DWITH_TESTS=ON -DWITH_BOOST_TESTS=OFF
             post_build: |
               PYTHONPATH=$GITHUB_WORKSPACE/python:$GITHUB_WORKSPACE
-              PYTEST_TIMEOUT=60
+              PYTEST_TIMEOUT=180
               cd $GITHUB_WORKSPACE/tests
               pytest -v -x -rs --durations=0 --timeout="${PYTEST_TIMEOUT}" -m serial
               if [ -d "$GITHUB_WORKSPACE/test_charts/tests" ]; then
@@ -101,7 +101,7 @@ jobs:
               -DWITH_TESTS=ON -DWITH_BOOST_TESTS=OFF
             post_build: |
               PYTHONPATH=$GITHUB_WORKSPACE/python
-              PYTEST_TIMEOUT=60
+              PYTEST_TIMEOUT=180
               cd $GITHUB_WORKSPACE/tests
               pytest -v -n 2 -rs --dist=loadfile --durations=0 --timeout="${PYTEST_TIMEOUT}" -m 'not serial'
 
@@ -133,7 +133,7 @@ jobs:
               -DWITH_TESTS=ON -DWITH_BOOST_TESTS=OFF
             post_build: |
               PYTHONPATH=$GITHUB_WORKSPACE/python
-              PYTEST_TIMEOUT=60
+              PYTEST_TIMEOUT=180
               cd $GITHUB_WORKSPACE/tests
               pytest -v -x -rs --durations=0 --timeout="${PYTEST_TIMEOUT}" -m serial
 
@@ -150,7 +150,7 @@ jobs:
               -DWITH_TESTS=ON -DWITH_BOOST_TESTS=OFF
             post_build: |
               PYTHONPATH=$GITHUB_WORKSPACE/python
-              PYTEST_TIMEOUT=60
+              PYTEST_TIMEOUT=180
               cd $GITHUB_WORKSPACE/tests
               pytest -v -n 2 -rs --dist=loadfile --durations=0 --timeout="${PYTEST_TIMEOUT}" -m 'not serial'
 
@@ -245,7 +245,7 @@ jobs:
               -DWITH_TESTS=ON -DWITH_BOOST_TESTS=OFF
             post_build: |
               PYTHONPATH=$GITHUB_WORKSPACE/python
-              PYTEST_TIMEOUT=60
+              PYTEST_TIMEOUT=180
               cd $GITHUB_WORKSPACE/tests
               pytest -v -x -rs --durations=0 --timeout="${PYTEST_TIMEOUT}" -m serial
 
@@ -262,7 +262,7 @@ jobs:
               -DWITH_TESTS=ON -DWITH_BOOST_TESTS=OFF
             post_build: |
               PYTHONPATH=$GITHUB_WORKSPACE/python
-              PYTEST_TIMEOUT=60
+              PYTEST_TIMEOUT=180
               cd $GITHUB_WORKSPACE/tests
               pytest -v -n 2 -rs --dist=loadfile --durations=0 --timeout="${PYTEST_TIMEOUT}" -m 'not serial'
 

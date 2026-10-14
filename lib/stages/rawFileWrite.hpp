@@ -25,7 +25,7 @@
  * @conf exit_after_n_files  Int. Stop writing after this many files, Default 0 = unlimited files.
  * @conf skip_frames         Int. Number of initial frames to skip before recording. Default 0.
  * @conf skip_zero_frames    Bool. If true, skip writing frames that consist entirely of zeros.
- *Default true.
+ *Default false.
  * @conf prefix_hostname    Bool. Prefix the filename with the hostname. Default true.
  * @conf allow_ndarray      Bool. Write an NDArray buffer's raw bytes instead of failing.
  *                          Default false. The frame descriptor is NOT written, so the
@@ -60,7 +60,7 @@ private:
     // Prefix file name with hostname or not
     bool _prefix_hostname;
     uint32_t _skip_frames = 0;
-    bool _skip_zero_frames = true;
+    bool _skip_zero_frames = false;
 };
 
 #endif

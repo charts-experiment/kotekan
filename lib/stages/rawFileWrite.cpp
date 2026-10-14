@@ -48,7 +48,7 @@ rawFileWrite::rawFileWrite(Config& config, const std::string& unique_name,
     _prefix_hostname = config.get_default<bool>(unique_name, "prefix_hostname", true);
     _exit_after_n_files = config.get_default<uint32_t>(unique_name, "exit_after_n_files", 0);
     _skip_frames = config.get_default<uint32_t>(unique_name, "skip_frames", 0);
-    _skip_zero_frames = config.get_default<bool>(unique_name, "skip_zero_frames", true);
+    _skip_zero_frames = config.get_default<bool>(unique_name, "skip_zero_frames", false);
     // Opt-in escape from the NDArray refusal below. The refusal exists because the frame
     // descriptor is set dynamically and is not written to the file, so a reader cannot
     // recover the shape from the file alone. That is no hazard when the shape is fixed and

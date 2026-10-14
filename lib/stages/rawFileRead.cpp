@@ -129,7 +129,7 @@ void rawFileRead::main_thread() {
         INFO("File size: {:d} bytes, no. of frames: {:d}", fileSize, num_frames_per_file);
 
         // Read each frame from the file and copy into the buffer.
-        for (uint64_t i = 0; i < num_frames_per_file; i++) {
+        for (uint64_t i = 0; i < num_frames_per_file && !stop_thread; i++) {
             uint32_t record_metadata_size = 0;
             if (fread(&record_metadata_size, sizeof(record_metadata_size), 1, fp) != 1)
                 FATAL_ERROR("rawFileRead: cannot read record metadata-size header in {}",
@@ -137,9 +137,12 @@ void rawFileRead::main_thread() {
             if (record_metadata_size != metadata_size)
                 FATAL_ERROR("rawFileRead: metadata size changed between records in {}", full_path);
 
+            if (stop_thread)
+                break;
+
             // Get an empty buffer to write into
             frame = buf->wait_for_empty_frame(unique_name, frame_id);
-            if (frame == nullptr)
+            if (frame == nullptr || stop_thread)
                 break;
 
             // If metadata exists then lets read it in.
