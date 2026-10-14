@@ -498,15 +498,14 @@ bool test_gpu_matrix_inversion_parity() {
     targets[1].direction = kotekan::DirectDirection3D{l1, 0.0f, std::sqrt(1.0f - l1 * l1)};
     const float l2 = -0.04f;
     const float m2 = 0.03f;
-    targets[2].direction =
-        kotekan::DirectDirection3D{l2, m2, std::sqrt(1.0f - l2 * l2 - m2 * m2)};
+    targets[2].direction = kotekan::DirectDirection3D{l2, m2, std::sqrt(1.0f - l2 * l2 - m2 * m2)};
 
     // 1. CPU reference
     std::vector<float2> cpu_M(n_freq * num_beams * num_beams);
     std::vector<float2> cpu_A(n_freq * num_beams * num_beams);
-    kotekan::compute_beam_coupling_and_inverses(
-        cpu_M.data(), cpu_A.data(), targets.data(), freqs, pos.data(), mask.data(), num_beams,
-        n_freq, n_ant, n_ant, diag_loading);
+    kotekan::compute_beam_coupling_and_inverses(cpu_M.data(), cpu_A.data(), targets.data(), freqs,
+                                                pos.data(), mask.data(), num_beams, n_freq, n_ant,
+                                                n_ant, diag_loading);
 
     // 2. GPU execution
     const std::size_t mat_bytes = n_freq * num_beams * num_beams * sizeof(float2);
@@ -536,8 +535,8 @@ bool test_gpu_matrix_inversion_parity() {
     CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_dirs, h_dirs.data(),
                                        num_beams * sizeof(kotekan::DirectDirection3D),
                                        cudaMemcpyHostToDevice));
-    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_wavenumbers, h_wavenumbers.data(),
-                                       n_freq * sizeof(double), cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_wavenumbers, h_wavenumbers.data(), n_freq * sizeof(double),
+                                       cudaMemcpyHostToDevice));
     CHECK_CUDA_ERROR_NON_OO(
         cudaMemcpy(d_pos, pos.data(), n_ant * sizeof(float3), cudaMemcpyHostToDevice));
     CHECK_CUDA_ERROR_NON_OO(

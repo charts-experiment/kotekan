@@ -26,10 +26,10 @@ enum class AntennaHealthStatus : std::uint8_t {
     DEAD = 1,
     SATURATED = 2,
     MANUAL_MASK = 3,
-    DC_LOCKED = 4,      ///< Stuck bit / excessive DC offset (low AC variance)
-    RFI_KURTOSIS = 5,   ///< Non-Gaussian impulsive RFI (high kurtosis) or CW tone (low kurtosis)
-    IQ_IMBALANCE = 6,   ///< Broken Real (I) or Imaginary (Q) 4-bit channel
-    OUTLIER_POWER = 7   ///< Robust Median/MAD Z-score power outlier relative to array
+    DC_LOCKED = 4,    ///< Stuck bit / excessive DC offset (low AC variance)
+    RFI_KURTOSIS = 5, ///< Non-Gaussian impulsive RFI (high kurtosis) or CW tone (low kurtosis)
+    IQ_IMBALANCE = 6, ///< Broken Real (I) or Imaginary (Q) 4-bit channel
+    OUTLIER_POWER = 7 ///< Robust Median/MAD Z-score power outlier relative to array
 };
 
 inline const char* antenna_health_status_to_string(AntennaHealthStatus s) {
@@ -75,13 +75,13 @@ struct alignas(16) AntennaRawStats {
  * @brief Rich telemetry and health state per antenna element.
  */
 struct AntennaHealthMetrics {
-    float power = 0.0f;              ///< Mean total power: E[re^2 + im^2]
-    float ac_variance = 0.0f;        ///< True AC variance: E[|z|^2] - |E[z]|^2
-    float dc_fraction = 0.0f;        ///< Fraction of power in DC: |E[z]|^2 / E[|z|^2]
-    float clipping_fraction = 0.0f;  ///< Fraction of nibbles hitting 4-bit rails (+7 or -8)
-    float kurtosis = 2.0f;           ///< Complex kurtosis: E[|z|^4] / (E[|z|^2])^2 (~2.0 for Gaussian)
-    float iq_imbalance = 0.0f;       ///< |E[re^2] - E[im^2]| / E[re^2 + im^2]
-    float robust_z_score = 0.0f;     ///< |P - Median(P)| / (1.4826 * MAD)
+    float power = 0.0f;             ///< Mean total power: E[re^2 + im^2]
+    float ac_variance = 0.0f;       ///< True AC variance: E[|z|^2] - |E[z]|^2
+    float dc_fraction = 0.0f;       ///< Fraction of power in DC: |E[z]|^2 / E[|z|^2]
+    float clipping_fraction = 0.0f; ///< Fraction of nibbles hitting 4-bit rails (+7 or -8)
+    float kurtosis = 2.0f;       ///< Complex kurtosis: E[|z|^4] / (E[|z|^2])^2 (~2.0 for Gaussian)
+    float iq_imbalance = 0.0f;   ///< |E[re^2] - E[im^2]| / E[re^2 + im^2]
+    float robust_z_score = 0.0f; ///< |P - Median(P)| / (1.4826 * MAD)
     std::uint32_t clipped_count = 0; ///< Absolute count of clipped nibbles in frame
     AntennaHealthStatus status = AntennaHealthStatus::HEALTHY;
     std::uint16_t consecutive_healthy = 0;
@@ -102,23 +102,23 @@ struct AntennaMaskConfig {
     bool blank_voltages_enabled = false;
 
     // Power & Saturation thresholds
-    float dead_power_threshold = 5.0f;      ///< Mean AC variance or power <= this -> DEAD
-    float sat_power_threshold = 80.0f;      ///< Mean power >= this -> SATURATED
-    float clip_fraction_threshold = 0.15f;  ///< Rail clip fraction >= this -> SATURATED
+    float dead_power_threshold = 5.0f;     ///< Mean AC variance or power <= this -> DEAD
+    float sat_power_threshold = 80.0f;     ///< Mean power >= this -> SATURATED
+    float clip_fraction_threshold = 0.15f; ///< Rail clip fraction >= this -> SATURATED
 
     // Advanced signal quality thresholds
     bool enable_dc_lock_check = true;
-    float max_dc_fraction = 0.35f;          ///< |E[z]|^2 / P >= this -> DC_LOCKED (stuck bits)
+    float max_dc_fraction = 0.35f; ///< |E[z]|^2 / P >= this -> DC_LOCKED (stuck bits)
 
     bool enable_iq_imbalance_check = true;
-    float max_iq_imbalance = 0.50f;         ///< |P_re - P_im| / P >= this -> IQ_IMBALANCE
+    float max_iq_imbalance = 0.50f; ///< |P_re - P_im| / P >= this -> IQ_IMBALANCE
 
     bool enable_kurtosis_check = true;
-    float min_kurtosis_threshold = 1.15f;   ///< Kurtosis <= this -> CW tone / oscillator lock
-    float max_kurtosis_threshold = 4.50f;   ///< Kurtosis >= this -> Impulsive RFI / arcing
+    float min_kurtosis_threshold = 1.15f; ///< Kurtosis <= this -> CW tone / oscillator lock
+    float max_kurtosis_threshold = 4.50f; ///< Kurtosis >= this -> Impulsive RFI / arcing
 
     bool enable_mad_outlier_check = true;
-    float mad_sigma_threshold = 6.0f;       ///< Robust Z-score >= this -> OUTLIER_POWER
+    float mad_sigma_threshold = 6.0f; ///< Robust Z-score >= this -> OUTLIER_POWER
 
     std::uint16_t revival_frames = 5;
     std::size_t sample_stride = 1;
@@ -136,16 +136,19 @@ struct AntennaMaskConfig {
 
     std::size_t raw_elem_to_physical_ant(std::size_t raw_elem) const {
         const std::size_t n_elem = total_elements();
-        if (n_elem == 0) return 0;
+        if (n_elem == 0)
+            return 0;
         const bool desc = (antenna_order == "descending");
         const std::size_t ordered_elem = desc ? ((n_elem - 1) - raw_elem) : raw_elem;
-        if (num_pols <= 1) return ordered_elem;
+        if (num_pols <= 1)
+            return ordered_elem;
         return (pol_layout == DirectPolLayout::INTERLEAVED) ? (ordered_elem / num_pols)
                                                             : (ordered_elem % num_antennas);
     }
 
     std::size_t raw_elem_to_pol(std::size_t raw_elem) const {
-        if (num_pols <= 1) return 0;
+        if (num_pols <= 1)
+            return 0;
         const std::size_t n_elem = total_elements();
         const bool desc = (antenna_order == "descending");
         const std::size_t ordered_elem = desc ? ((n_elem - 1) - raw_elem) : raw_elem;
@@ -162,64 +165,44 @@ struct AntennaMaskConfig {
  * @brief Full multi-moment inspection kernel: accumulates exact integer moments
  *        (sum_re, sum_im, sum_re2, sum_im2, sum_p2, clips) in a single pass.
  */
-void launch_inspect_antenna_moments(
-    const int4x2_t* __restrict__ d_voltages,
-    AntennaRawStats* __restrict__ d_raw_stats,
-    float* __restrict__ d_antenna_powers,
-    std::uint32_t* __restrict__ d_antenna_clips,
-    std::size_t n_time,
-    std::size_t n_freq,
-    std::size_t n_elem,
-    std::size_t sample_stride,
-    cudaStream_t stream);
+void launch_inspect_antenna_moments(const int4x2_t* __restrict__ d_voltages,
+                                    AntennaRawStats* __restrict__ d_raw_stats,
+                                    float* __restrict__ d_antenna_powers,
+                                    std::uint32_t* __restrict__ d_antenna_clips, std::size_t n_time,
+                                    std::size_t n_freq, std::size_t n_elem,
+                                    std::size_t sample_stride, cudaStream_t stream);
 
 /**
  * @brief Legacy-compatible wrapper for launch_inspect_antenna_health.
  */
-void launch_inspect_antenna_health(
-    const int4x2_t* __restrict__ d_voltages,
-    float* __restrict__ d_antenna_powers,
-    std::uint32_t* __restrict__ d_antenna_clips,
-    std::size_t n_time,
-    std::size_t n_freq,
-    std::size_t n_ant,
-    std::size_t sample_stride,
-    cudaStream_t stream);
+void launch_inspect_antenna_health(const int4x2_t* __restrict__ d_voltages,
+                                   float* __restrict__ d_antenna_powers,
+                                   std::uint32_t* __restrict__ d_antenna_clips, std::size_t n_time,
+                                   std::size_t n_freq, std::size_t n_ant, std::size_t sample_stride,
+                                   cudaStream_t stream);
 
 /**
  * @brief Coalesced in-place voltage blanking for bad antenna elements.
  */
-void launch_zero_bad_antennas(
-    int4x2_t* __restrict__ d_voltages,
-    const int* __restrict__ d_bad_antennas,
-    int num_bad_antennas,
-    std::size_t total_spectra,
-    std::size_t n_ant,
-    cudaStream_t stream);
+void launch_zero_bad_antennas(int4x2_t* __restrict__ d_voltages,
+                              const int* __restrict__ d_bad_antennas, int num_bad_antennas,
+                              std::size_t total_spectra, std::size_t n_ant, cudaStream_t stream);
 
 /**
  * @brief Coalesced warp-per-spectrum extraction of alive antennas into a compact buffer.
  */
-void launch_extract_alive_antennas(
-    const int4x2_t* __restrict__ d_voltages,
-    int4x2_t* __restrict__ d_alive_voltages,
-    const int* __restrict__ d_alive_antennas,
-    int num_to_extract,
-    int max_alive_antennas,
-    std::size_t total_spectra,
-    std::size_t n_ant,
-    cudaStream_t stream);
+void launch_extract_alive_antennas(const int4x2_t* __restrict__ d_voltages,
+                                   int4x2_t* __restrict__ d_alive_voltages,
+                                   const int* __restrict__ d_alive_antennas, int num_to_extract,
+                                   int max_alive_antennas, std::size_t total_spectra,
+                                   std::size_t n_ant, cudaStream_t stream);
 
 /**
  * @brief Chaos-engineering fault injection kernel (dead=1, rail_sat=2, dc_stuck=3, rfi_spike=4).
  */
-void launch_inject_faults(
-    int4x2_t* __restrict__ d_voltages,
-    const std::uint8_t* __restrict__ d_fault_types,
-    std::size_t total_spectra,
-    std::size_t n_ant,
-    unsigned int seed,
-    cudaStream_t stream);
+void launch_inject_faults(int4x2_t* __restrict__ d_voltages,
+                          const std::uint8_t* __restrict__ d_fault_types, std::size_t total_spectra,
+                          std::size_t n_ant, unsigned int seed, cudaStream_t stream);
 
 } // namespace kotekan
 
