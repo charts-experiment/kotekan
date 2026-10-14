@@ -156,8 +156,8 @@ def pack_int4x2(voltages: np.ndarray) -> np.ndarray:
                 f"Cannot interpret array with shape {voltages.shape} and dtype {voltages.dtype} as complex"
             )
 
-    r_quant = np.clip(np.round(v_real), -8, 7).astype(np.int8)
-    i_quant = np.clip(np.round(v_imag), -8, 7).astype(np.int8)
+    r_quant = np.clip(np.round(v_real), -7, 7).astype(np.int8)
+    i_quant = np.clip(np.round(v_imag), -7, 7).astype(np.int8)
 
     r_nibble = (r_quant & 0x0F).astype(np.uint8)
     i_nibble = ((i_quant & 0x0F) << 4).astype(np.uint8)
