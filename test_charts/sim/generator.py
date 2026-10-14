@@ -340,6 +340,53 @@ def build_frame_selection_schedule(
     return sorted_indices, frame_events
 
 
+SOURCE_MODELS = ("gaussian", "tone")
+
+
+def _source_waveform(
+    src_rng: np.random.Generator, n_chunk: int, num_freq: int, model: str
+) -> Optional[np.ndarray]:
+    """Unit-power source waveform w[t, f] for one source, or None for 'tone'.
+
+    'gaussian': w ~ CN(0, 1), independent per sample, channel and source, so
+    that E|amp * w|^2 = amp^2 (same power as the legacy phasor of amplitude
+    amp) while different sources are mutually incoherent.
+    """
+    if model == "tone":
+        return None
+    scale = np.float32(np.sqrt(0.5))
+    w_re = src_rng.standard_normal((n_chunk, num_freq), dtype=np.float32)
+    w_im = src_rng.standard_normal((n_chunk, num_freq), dtype=np.float32)
+    return (w_re * scale + 1j * (w_im * scale)).astype(np.complex64)
+
+
+def _add_source(
+    v_real: np.ndarray,
+    v_imag: np.ndarray,
+    amp_tf,
+    tot_phase: np.ndarray,
+    w: Optional[np.ndarray],
+) -> None:
+    """Add amp_tf[t, f] * w[t, f] * exp(j * tot_phase[t, f, a]) in place.
+
+    amp_tf is a scalar or an array broadcastable to (time, freq). With
+    w = None (tone model) this reduces exactly to the legacy expression
+    amp * cos(phase), amp * sin(phase).
+    """
+    amp_tf = np.asarray(amp_tf, dtype=np.float32)
+    amp_tf = amp_tf.reshape(amp_tf.shape + (1,) * (2 - amp_tf.ndim))[..., None]
+    cos_p = np.cos(tot_phase)
+    sin_p = np.sin(tot_phase)
+    if w is None:
+        v_real += amp_tf * cos_p
+        v_imag += amp_tf * sin_p
+        return
+    a_re = amp_tf * w.real[..., None]
+    a_im = amp_tf * w.imag[..., None]
+    v_real += a_re * cos_p - a_im * sin_p
+    v_imag += a_re * sin_p + a_im * cos_p
+
+
 def render_and_write_frame(job: Dict[str, Any]) -> Tuple[int, int, float, float, float]:
     """Renders 4-bit complex baseband voltage for one frame and writes .bin directly."""
     out_idx = job["out_idx"]
@@ -363,6 +410,12 @@ def render_and_write_frame(job: Dict[str, Any]) -> Tuple[int, int, float, float,
     active_events = job["active_events"]
 
     rng = np.random.default_rng(job["seed"])
+    source_model = job.get("source_model", "gaussian")
+    if source_model not in SOURCE_MODELS:
+        raise ValueError(f"source_model must be one of {SOURCE_MODELS}, got {source_model!r}")
+    # Separate stream for source waveforms: the noise realization does not
+    # depend on the source model or on the number of sources.
+    src_rng = np.random.default_rng([int(job["seed"]), 0x534F55])
     c_inv = np.float32(1.0 / C_LIGHT)
     two_pi = np.float32(2.0 * np.pi)
 
@@ -419,8 +472,8 @@ def render_and_write_frame(job: Dict[str, Any]) -> Tuple[int, int, float, float,
                     sun_delays[None, None, :] * freqs_hz[None, :, None]
                 )
             tot_sun_phase = -geom_phase.astype(np.float32)
-            v_real += sun_amp * np.cos(tot_sun_phase)
-            v_imag += sun_amp * np.sin(tot_sun_phase)
+            w_sun = _source_waveform(src_rng, n_chunk, num_freq, source_model)
+            _add_source(v_real, v_imag, sun_amp, tot_sun_phase, w_sun)
 
         # 3. Active Transient Events
         for ev in active_events:
@@ -456,6 +509,7 @@ def render_and_write_frame(job: Dict[str, Any]) -> Tuple[int, int, float, float,
                 geom_phases = two_pi * (delays[None, None, :] * freqs_hz[None, :, None])
 
             tot_phase = -geom_phases.astype(np.float32)
+            w_ev = _source_waveform(src_rng, n_chunk, num_freq, source_model)
 
             if ev_type == "frb":
                 dm = ev["dm"]
@@ -470,8 +524,7 @@ def render_and_write_frame(job: Dict[str, Any]) -> Tuple[int, int, float, float,
                 t_diff = (t_abs_s[:, None] - t_chan_center).astype(np.float32)
                 envelope = np.exp(-0.5 * (t_diff / width_s) ** 2).astype(np.float32)
 
-                v_real += ev_amp * envelope[:, :, None] * np.cos(tot_phase)
-                v_imag += ev_amp * envelope[:, :, None] * np.sin(tot_phase)
+                _add_source(v_real, v_imag, ev_amp * envelope, tot_phase, w_ev)
 
             elif ev_type == "pulsar":
                 period_s = ev["pulse_period_s"]
@@ -492,18 +545,21 @@ def render_and_write_frame(job: Dict[str, Any]) -> Tuple[int, int, float, float,
                     t_chan = t_pulse_0 + dm_delays_s[None, :]
                     t_diff = (t_abs_s[:, None] - t_chan).astype(np.float32)
                     env = np.exp(-0.5 * (t_diff / width_s) ** 2).astype(np.float32)
-                    v_real += ev_amp * env[:, :, None] * np.cos(tot_phase)
-                    v_imag += ev_amp * env[:, :, None] * np.sin(tot_phase)
+                    _add_source(v_real, v_imag, ev_amp * env, tot_phase, w_ev)
 
             elif ev_type == "rfi_narrow":
                 chans = [ch for ch in (ev["channels"] or []) if ch < num_freq]
                 for ch in chans:
-                    v_real[:, ch, :] += ev_amp * np.cos(tot_phase[:, ch, :])
-                    v_imag[:, ch, :] += ev_amp * np.sin(tot_phase[:, ch, :])
+                    _add_source(
+                        v_real[:, ch : ch + 1, :],
+                        v_imag[:, ch : ch + 1, :],
+                        ev_amp,
+                        tot_phase[:, ch : ch + 1, :],
+                        None if w_ev is None else w_ev[:, ch : ch + 1],
+                    )
 
             elif ev_type == "rfi_leo":
-                v_real += ev_amp * np.cos(tot_phase)
-                v_imag += ev_amp * np.sin(tot_phase)
+                _add_source(v_real, v_imag, ev_amp, tot_phase, w_ev)
 
         pwr_chunk = v_real**2 + v_imag**2
         total_power_sum += float(np.sum(pwr_chunk))
@@ -750,6 +806,7 @@ def generate_simulation_window(
         f" Sun Elevation           : {sun_el:+.2f} deg ({'UP' if sun_is_up else 'DOWN'})"
     )
     print(f" Active Events Scheduled : {len(events)}")
+    print(f" Source Model            : {getattr(config, 'source_model', 'gaussian')}")
     print(f" Workers                 : {config.workers}")
     print("=" * 76)
 
@@ -785,6 +842,7 @@ def generate_simulation_window(
                 "sun_info": sun_info,
                 "active_events": active_evs,
                 "seed": seed + frame_idx,
+                "source_model": getattr(config, "source_model", "gaussian"),
             }
         )
 
