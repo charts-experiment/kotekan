@@ -159,7 +159,7 @@ class TestSkyTransitModel(unittest.TestCase):
         self.assertTrue(np.all(np.abs(n_track) <= 1.0))
 
         # Sum of squares l^2 + m^2 + n^2 ~= 1
-        trans_sq = l_track**2 + m_track**2 + n_track**2
+        trans_sq = l_track ** 2 + m_track ** 2 + n_track ** 2
         np.testing.assert_allclose(trans_sq, 1.0, atol=1e-6)
 
         # Smoothness: diff between adjacent seconds should be very small (~ Earth rotation rate)

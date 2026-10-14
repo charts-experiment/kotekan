@@ -77,8 +77,7 @@ def load_astron_correlator_dump(
 
 
 def inspect_correlator_matrix(
-    vis_cube: np.ndarray,
-    freq_idx: Optional[int] = None,
+    vis_cube: np.ndarray, freq_idx: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Computes mathematical & scientific diagnostics on reconstructed visibility matrix."""
     num_channels, num_elements, _ = vis_cube.shape

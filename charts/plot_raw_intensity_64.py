@@ -134,9 +134,7 @@ def read_raw_frame(
 
 
 def decode_components(
-    values: np.ndarray,
-    encoding: str,
-    iq_order: str,
+    values: np.ndarray, encoding: str, iq_order: str,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Decode packed int4x2 bytes into float32 real and imaginary components."""
     low = (values & 0x0F).astype(np.int8)
@@ -720,11 +718,7 @@ def main() -> None:
             f"handler {handler}: {path.name} (file_seq={sequence}, "
             f"offset={offset}, metadata={metadata_size})"
             for handler, path, sequence, offset, metadata_size in zip(
-                handlers,
-                paths,
-                file_sequences,
-                group.handler_offsets,
-                metadata_sizes,
+                handlers, paths, file_sequences, group.handler_offsets, metadata_sizes,
             )
         )
         print(

@@ -117,8 +117,9 @@ class TestBasebandWriterSuite(unittest.TestCase):
         code 0x8 to -8 so that hardware data using the full two's complement
         range can be read.
         """
-        vals = np.array([-12.3 - 9.0j, -7.6 + 7.6j, 7.4 - 7.4j, 20.0 + 0.0j],
-                        dtype=np.complex64)
+        vals = np.array(
+            [-12.3 - 9.0j, -7.6 + 7.6j, 7.4 - 7.4j, 20.0 + 0.0j], dtype=np.complex64
+        )
         unpacked = unpack_int4x2(pack_int4x2(vals))
         np.testing.assert_array_equal(unpacked.real, [-7, -7, 7, 7])
         np.testing.assert_array_equal(unpacked.imag, [-7, 7, -7, 0])

@@ -231,10 +231,7 @@ def save_as_reference_window(
 
     # Generate and write manifest inside the reference directory
     manifest = create_reference_manifest(
-        window_dir=dest_dir,
-        tag=tag,
-        description=description,
-        **kwargs,
+        window_dir=dest_dir, tag=tag, description=description, **kwargs,
     )
     manifest_path = dest_dir / "window_manifest.json"
     manifest.save(manifest_path)
@@ -288,8 +285,7 @@ def list_reference_windows(
 
 
 def get_reference_window(
-    tag_or_path: Union[str, Path],
-    reference_dir: Optional[Path] = None,
+    tag_or_path: Union[str, Path], reference_dir: Optional[Path] = None,
 ) -> Tuple[Path, ReferenceWindowManifest]:
     """Retrieves path and manifest for a given reference window tag or path."""
     p = Path(tag_or_path)

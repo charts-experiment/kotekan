@@ -321,9 +321,9 @@ def run_window_correlator(
     # 2. Setup Environment & Execute Kotekan
     print(f"\n[2/3] Executing Kotekan AstronCorrelator over {n_frames} frames...")
     env = dict(os.environ)
-    env["LD_LIBRARY_PATH"] = (
-        f"{_kotekan_root / 'build' / 'external' / 'n2k'}:{env.get('LD_LIBRARY_PATH', '')}"
-    )
+    env[
+        "LD_LIBRARY_PATH"
+    ] = f"{_kotekan_root / 'build' / 'external' / 'n2k'}:{env.get('LD_LIBRARY_PATH', '')}"
 
     if "CUDA_HOME" not in env:
         for var in ["CUDA_ROOT", "EBROOTCUDA", "CUDA_PATH"]:

@@ -152,7 +152,7 @@ def schedule_random_events(
 
         if ev_type == "frb":
             dm = float(rng.uniform(100.0, 350.0))
-            sweep_s = 4148.8 * dm * (1.0 / (300.0**2) - 1.0 / (400.5**2))
+            sweep_s = 4148.8 * dm * (1.0 / (300.0 ** 2) - 1.0 / (400.5 ** 2))
             width_ms = float(rng.uniform(1.2, 3.5))
             amp = float(rng.uniform(2.8, 4.5))
             ra_deg = float(rng.uniform(0.0, 360.0))
@@ -350,7 +350,10 @@ def build_frame_selection_schedule(
         if ev.is_persistent:
             continue
         k_start = max(0, int(math.floor(ev.t_start_s / frame_duration_s)))
-        k_end = min(total_frames, int(math.ceil((ev.t_start_s + ev.duration_s) / frame_duration_s)))
+        k_end = min(
+            total_frames,
+            int(math.ceil((ev.t_start_s + ev.duration_s) / frame_duration_s)),
+        )
         for k in sorted_indices:
             if k_start <= k < k_end:
                 frame_events.setdefault(k, []).append(ev.event_id)
@@ -435,7 +438,9 @@ def render_and_write_frame(job: Dict[str, Any]) -> Tuple[int, int, float, float,
     rng = np.random.default_rng(job["seed"])
     source_model = job.get("source_model", "gaussian")
     if source_model not in SOURCE_MODELS:
-        raise ValueError(f"source_model must be one of {SOURCE_MODELS}, got {source_model!r}")
+        raise ValueError(
+            f"source_model must be one of {SOURCE_MODELS}, got {source_model!r}"
+        )
     # Separate stream for source waveforms: the noise realization does not
     # depend on the source model or on the number of sources.
     src_rng = np.random.default_rng([int(job["seed"]), 0x534F55])
@@ -540,7 +545,7 @@ def render_and_write_frame(job: Dict[str, Any]) -> Tuple[int, int, float, float,
                 t_arrival_top = ev["t_start_s"]
                 f_ghz = freqs_hz / 1e9
                 dm_delays_s = (
-                    (K_DM * 1e-6) * dm * (1.0 / (f_ghz**2) - 1.0 / (f_top_ghz**2))
+                    (K_DM * 1e-6) * dm * (1.0 / (f_ghz ** 2) - 1.0 / (f_top_ghz ** 2))
                 ).astype(np.float32)
 
                 t_chan_center = t_arrival_top + dm_delays_s[None, :]
@@ -555,7 +560,7 @@ def render_and_write_frame(job: Dict[str, Any]) -> Tuple[int, int, float, float,
                 dm = ev["dm"]
                 f_ghz = freqs_hz / 1e9
                 dm_delays_s = (
-                    (K_DM * 1e-6) * dm * (1.0 / (f_ghz**2) - 1.0 / (f_top_ghz**2))
+                    (K_DM * 1e-6) * dm * (1.0 / (f_ghz ** 2) - 1.0 / (f_top_ghz ** 2))
                 ).astype(np.float32)
 
                 t_min = t_abs_s[0] - dm_delays_s[-1] - 3.0 * width_s
@@ -595,7 +600,7 @@ def render_and_write_frame(job: Dict[str, Any]) -> Tuple[int, int, float, float,
                             None if w_ev is None else w_ev[:, ch : ch + 1],
                         )
 
-        pwr_chunk = v_real**2 + v_imag**2
+        pwr_chunk = v_real ** 2 + v_imag ** 2
         total_power_sum += float(np.sum(pwr_chunk))
         max_power_val = max(max_power_val, float(np.max(pwr_chunk)))
         total_clipped += int(np.sum(np.abs(v_real) > 7.5)) + int(
@@ -650,14 +655,16 @@ def compute_analytic_lightcurve(
     f_ghz = freqs_hz / 1e9
 
     for ev in events:
-        amp_sq = ev.nominal_amp**2
+        amp_sq = ev.nominal_amp ** 2
         t0 = ev.t_start_s
         dur = ev.duration_s
 
         if ev.event_type == "frb":
             dm = ev.dm
             width_s = ev.pulse_width_ms * 1e-3
-            dm_delays_s = (K_DM * 1e-6) * dm * (1.0 / (f_ghz**2) - 1.0 / (f_top_ghz**2))
+            dm_delays_s = (
+                (K_DM * 1e-6) * dm * (1.0 / (f_ghz ** 2) - 1.0 / (f_top_ghz ** 2))
+            )
             for idx, t in enumerate(t_points):
                 if t0 - 0.5 <= t <= t0 + dur + 0.5:
                     t_chan = t0 + dm_delays_s
@@ -688,8 +695,7 @@ def compute_analytic_lightcurve(
 
 
 def generate_simulation_window(
-    config: SimulationConfig,
-    writer: Optional[BasebandWriter] = None,
+    config: SimulationConfig, writer: Optional[BasebandWriter] = None,
 ) -> Dict[str, Any]:
     """Master generator function creating baseband frames, HDF5 metadata, and event JSON."""
     if writer is not None and hasattr(writer, "target_dir"):
@@ -913,9 +919,9 @@ def generate_simulation_window(
     stats_list.sort(key=lambda x: x[0])
 
     # Compute analytic lightcurve
-    noise_pwr_base = float(np.mean(2.0 * (sigma_ant**2)) * np.mean(bandpass**2))
+    noise_pwr_base = float(np.mean(2.0 * (sigma_ant ** 2)) * np.mean(bandpass ** 2))
     sun_pwr_series = np.full(
-        int(round(config.duration_s * 10.0)), sun_amp**2 if sun_is_up else 0.0
+        int(round(config.duration_s * 10.0)), sun_amp ** 2 if sun_is_up else 0.0
     )
 
     lc_t, lc_power = compute_analytic_lightcurve(

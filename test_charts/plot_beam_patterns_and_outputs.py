@@ -85,7 +85,7 @@ def compute_array_factor_2d(
     L_grid, M_grid = np.meshgrid(l_lin, m_lin)
 
     # Unit hemisphere mask: l^2 + m^2 <= 1
-    sky_mask = (L_grid**2 + M_grid**2) <= 1.0
+    sky_mask = (L_grid ** 2 + M_grid ** 2) <= 1.0
 
     wavenumber = 2.0 * np.pi * freq_hz / C_LIGHT
 

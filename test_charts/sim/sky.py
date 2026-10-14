@@ -98,8 +98,7 @@ class VerifiedTarget:
         return dt
 
     def direction_cosines_at_transit(
-        self,
-        lat_deg: float = CHARTS_LATITUDE_DEG,
+        self, lat_deg: float = CHARTS_LATITUDE_DEG,
     ) -> Tuple[float, float]:
         """Direction cosines (l, m) at the confirmed transit time."""
         lst_h = datetime_to_lst_hours(self.transit_dt)
@@ -167,8 +166,7 @@ def load_verified_catalog(
 
 
 def find_verified_target(
-    name: str,
-    catalog: Optional[Dict[str, VerifiedTarget]] = None,
+    name: str, catalog: Optional[Dict[str, VerifiedTarget]] = None,
 ) -> VerifiedTarget:
     """Fuzzy-finds a verified target by name (case-insensitive substring match).
 
@@ -400,8 +398,7 @@ def _catalog_date(
 
 
 def _anchor_to_catalog_date(
-    hour_spec: Union[str, float],
-    catalog: Optional[Dict[str, VerifiedTarget]] = None,
+    hour_spec: Union[str, float], catalog: Optional[Dict[str, VerifiedTarget]] = None,
 ) -> datetime.datetime:
     """Anchors 'HH:MM' / float-hour specs to the verified catalog date."""
     base = _catalog_date(catalog)
@@ -425,8 +422,7 @@ def _anchor_to_catalog_date(
 
 
 def _resolve_local_slot(
-    slot_local: str,
-    catalog: Optional[Dict[str, VerifiedTarget]] = None,
+    slot_local: str, catalog: Optional[Dict[str, VerifiedTarget]] = None,
 ) -> datetime.datetime:
     """Converts a local routine set-hour slot ('09:00') to UTC on the catalog date.
 

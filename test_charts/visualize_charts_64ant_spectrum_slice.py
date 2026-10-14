@@ -85,8 +85,7 @@ from constants import (
 
 # Precomputed LUT for 4-bit two's complement integer decoding: [-8..+7]
 INT4_LUT = np.array(
-    [0, 1, 2, 3, 4, 5, 6, 7, -8, -7, -6, -5, -4, -3, -2, -1],
-    dtype=np.float32,
+    [0, 1, 2, 3, 4, 5, 6, 7, -8, -7, -6, -5, -4, -3, -2, -1], dtype=np.float32,
 )
 
 DEFAULT_SATURATED_ANTENNAS = [7, 23, 42, 55]
@@ -100,9 +99,7 @@ def unpack_int4x2_power(packed_bytes: np.ndarray) -> np.ndarray:
 
 
 def load_baseband_frame(
-    file_path: Path,
-    frame_idx: int = 0,
-    samples_per_frame: int = 1536,
+    file_path: Path, frame_idx: int = 0, samples_per_frame: int = 1536,
 ) -> Tuple[np.ndarray, Dict[str, any]]:
     """Loads 1 frame of baseband data from either .h5 or .bin file."""
     if file_path.suffix.lower() in [".h5", ".hdf5"]:
@@ -723,11 +720,7 @@ def main():
         help="Directory to save generated plots (default: ./dumps_charts_64ant/plots).",
     )
     parser.add_argument(
-        "--frame",
-        "-f",
-        type=int,
-        default=0,
-        help="Frame index to load (default: 0).",
+        "--frame", "-f", type=int, default=0, help="Frame index to load (default: 0).",
     )
     parser.add_argument(
         "--overlay-only",
@@ -772,13 +765,16 @@ def main():
             print(f"\nProcessing {filepath.name} at t = {args.time:.2f} ms ...")
             try:
                 frame_packed, meta = load_baseband_frame(filepath, frame_idx=args.frame)
-                power_spectrum, freqs_mhz, actual_t_ms, sample_idx = (
-                    extract_spectrum_at_time(
-                        frame_packed,
-                        meta,
-                        target_time_ms=args.time,
-                        window_samples=args.window_samples,
-                    )
+                (
+                    power_spectrum,
+                    freqs_mhz,
+                    actual_t_ms,
+                    sample_idx,
+                ) = extract_spectrum_at_time(
+                    frame_packed,
+                    meta,
+                    target_time_ms=args.time,
+                    window_samples=args.window_samples,
                 )
                 if not args.overlay_only:
                     plot_8x8_spectrum_grid(

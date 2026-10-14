@@ -97,7 +97,8 @@ struct DirectBeamTrackerConfig {
 
     std::size_t raw_elem_to_physical_ant(std::size_t raw_elem) const {
         const std::size_t n_elem = total_elements();
-        if (n_elem == 0) return 0;
+        if (n_elem == 0)
+            return 0;
         const bool desc = (antenna_order == "descending");
         const std::size_t ordered_elem = desc ? ((n_elem - 1) - raw_elem) : raw_elem;
         if (num_pols <= 1) {
@@ -177,38 +178,22 @@ inline void compute_celestial_direction(double ra_deg, double dec_deg, double ls
     out_dir.z = static_cast<float>(n);
 }
 
-void launch_direct_beamformer(
-    const int4x2_t* d_packed,
-    const float2* d_weights,
-    const float2* d_step_weights,
-    float2* d_voltages,
-    std::size_t n_time,
-    std::size_t n_freq,
-    std::size_t n_ant,
-    std::size_t num_active_beams,
-    std::size_t max_beams_stride,
-    std::size_t time_chunk_size = 256,
-    std::size_t time_unroll = 4,
-    std::size_t beam_tile_size = 4,
-    cudaStream_t stream = nullptr,
-    std::size_t n_pol = 1,
-    DirectPolLayout pol_layout = DirectPolLayout::INTERLEAVED);
+void launch_direct_beamformer(const int4x2_t* d_packed, const float2* d_weights,
+                              const float2* d_step_weights, float2* d_voltages, std::size_t n_time,
+                              std::size_t n_freq, std::size_t n_ant, std::size_t num_active_beams,
+                              std::size_t max_beams_stride, std::size_t time_chunk_size = 256,
+                              std::size_t time_unroll = 4, std::size_t beam_tile_size = 4,
+                              cudaStream_t stream = nullptr, std::size_t n_pol = 1,
+                              DirectPolLayout pol_layout = DirectPolLayout::INTERLEAVED);
 
-inline void launch_direct_beamformer(
-    const int4x2_t* d_packed,
-    const float2* d_weights,
-    float2* d_voltages,
-    std::size_t n_time,
-    std::size_t n_freq,
-    std::size_t n_ant,
-    std::size_t num_active_beams,
-    std::size_t max_beams_stride,
-    std::size_t time_chunk_size = 256,
-    std::size_t time_unroll = 4,
-    std::size_t beam_tile_size = 4,
-    cudaStream_t stream = nullptr,
-    std::size_t n_pol = 1,
-    DirectPolLayout pol_layout = DirectPolLayout::INTERLEAVED) {
+inline void launch_direct_beamformer(const int4x2_t* d_packed, const float2* d_weights,
+                                     float2* d_voltages, std::size_t n_time, std::size_t n_freq,
+                                     std::size_t n_ant, std::size_t num_active_beams,
+                                     std::size_t max_beams_stride,
+                                     std::size_t time_chunk_size = 256, std::size_t time_unroll = 4,
+                                     std::size_t beam_tile_size = 4, cudaStream_t stream = nullptr,
+                                     std::size_t n_pol = 1,
+                                     DirectPolLayout pol_layout = DirectPolLayout::INTERLEAVED) {
     launch_direct_beamformer(d_packed, d_weights, nullptr, d_voltages, n_time, n_freq, n_ant,
                              num_active_beams, max_beams_stride, time_chunk_size, time_unroll,
                              beam_tile_size, stream, n_pol, pol_layout);
@@ -217,84 +202,53 @@ inline void launch_direct_beamformer(
 void set_l2_persisting_weights_policy(cudaStream_t stream, const void* ptr, std::size_t bytes);
 
 void launch_generate_steering_weights(
-    float2* d_weights,
-    float2* d_step_weights,
-    const DirectDirection3D* d_directions_start,
-    const DirectDirection3D* d_directions_end,
-    const double* d_wavenumbers,
-    const float3* d_antenna_positions,
-    const std::uint8_t* d_antenna_mask,
-    const float2* d_calibration_gains,
-    std::size_t num_beams,
-    std::size_t n_freq,
-    std::size_t n_elem,
-    std::size_t n_time,
-    std::size_t n_active = 0,
-    cudaStream_t stream = nullptr,
+    float2* d_weights, float2* d_step_weights, const DirectDirection3D* d_directions_start,
+    const DirectDirection3D* d_directions_end, const double* d_wavenumbers,
+    const float3* d_antenna_positions, const std::uint8_t* d_antenna_mask,
+    const float2* d_calibration_gains, std::size_t num_beams, std::size_t n_freq,
+    std::size_t n_elem, std::size_t n_time, std::size_t n_active = 0, cudaStream_t stream = nullptr,
     std::size_t n_pol = 1);
 
-inline void launch_generate_steering_weights(
-    float2* d_weights,
-    const DirectDirection3D* d_directions,
-    const double* d_wavenumbers,
-    const float3* d_antenna_positions,
-    const std::uint8_t* d_antenna_mask,
-    const float2* d_calibration_gains,
-    std::size_t num_beams,
-    std::size_t n_freq,
-    std::size_t n_elem,
-    std::size_t n_active = 0,
-    cudaStream_t stream = nullptr,
-    std::size_t n_pol = 1) {
+inline void
+launch_generate_steering_weights(float2* d_weights, const DirectDirection3D* d_directions,
+                                 const double* d_wavenumbers, const float3* d_antenna_positions,
+                                 const std::uint8_t* d_antenna_mask,
+                                 const float2* d_calibration_gains, std::size_t num_beams,
+                                 std::size_t n_freq, std::size_t n_elem, std::size_t n_active = 0,
+                                 cudaStream_t stream = nullptr, std::size_t n_pol = 1) {
     launch_generate_steering_weights(d_weights, nullptr, d_directions, nullptr, d_wavenumbers,
                                      d_antenna_positions, d_antenna_mask, d_calibration_gains,
                                      num_beams, n_freq, n_elem, 0, n_active, stream, n_pol);
 }
 
-inline void launch_generate_steering_weights(
-    float2* d_weights,
-    const DirectDirection3D* d_directions,
-    const double* d_wavenumbers,
-    const float3* d_antenna_positions,
-    const std::uint8_t* d_antenna_mask,
-    const float2* d_calibration_gains,
-    std::size_t num_beams,
-    std::size_t n_freq,
-    std::size_t n_elem,
-    cudaStream_t stream) {
+inline void
+launch_generate_steering_weights(float2* d_weights, const DirectDirection3D* d_directions,
+                                 const double* d_wavenumbers, const float3* d_antenna_positions,
+                                 const std::uint8_t* d_antenna_mask,
+                                 const float2* d_calibration_gains, std::size_t num_beams,
+                                 std::size_t n_freq, std::size_t n_elem, cudaStream_t stream) {
     launch_generate_steering_weights(d_weights, nullptr, d_directions, nullptr, d_wavenumbers,
                                      d_antenna_positions, d_antenna_mask, d_calibration_gains,
                                      num_beams, n_freq, n_elem, 0, 0, stream, 1);
 }
 
-void launch_precompute_sky_grid(
-    float2* d_grid_weights,
-    const float2* d_grid_lms,
-    const double* d_wavenumbers,
-    const float3* d_antenna_positions,
-    const std::uint8_t* d_antenna_mask,
-    const float2* d_calibration_gains,
-    std::size_t num_grid_points,
-    std::size_t n_freq,
-    std::size_t n_elem,
-    std::size_t n_active = 0,
-    cudaStream_t stream = nullptr,
-    std::size_t n_pol = 1);
+void launch_precompute_sky_grid(float2* d_grid_weights, const float2* d_grid_lms,
+                                const double* d_wavenumbers, const float3* d_antenna_positions,
+                                const std::uint8_t* d_antenna_mask,
+                                const float2* d_calibration_gains, std::size_t num_grid_points,
+                                std::size_t n_freq, std::size_t n_elem, std::size_t n_active = 0,
+                                cudaStream_t stream = nullptr, std::size_t n_pol = 1);
 
-inline void launch_precompute_sky_grid(
-    float2* d_grid_weights,
-    const float2* d_grid_lms,
-    const double* d_wavenumbers,
-    const float3* d_antenna_positions,
-    const std::uint8_t* d_antenna_mask,
-    const float2* d_calibration_gains,
-    std::size_t num_grid_points,
-    std::size_t n_freq,
-    std::size_t n_elem,
-    cudaStream_t stream) {
+inline void launch_precompute_sky_grid(float2* d_grid_weights, const float2* d_grid_lms,
+                                       const double* d_wavenumbers,
+                                       const float3* d_antenna_positions,
+                                       const std::uint8_t* d_antenna_mask,
+                                       const float2* d_calibration_gains,
+                                       std::size_t num_grid_points, std::size_t n_freq,
+                                       std::size_t n_elem, cudaStream_t stream) {
     launch_precompute_sky_grid(d_grid_weights, d_grid_lms, d_wavenumbers, d_antenna_positions,
-                               d_antenna_mask, d_calibration_gains, num_grid_points, n_freq,
-                               n_elem, 0, stream, 1);
+                               d_antenna_mask, d_calibration_gains, num_grid_points, n_freq, n_elem,
+                               0, stream, 1);
 }
 
 } // namespace kotekan

@@ -160,7 +160,7 @@ def compute_topocentric_direction_cosines(
         lat_rad
     ) * math.cos(ha_rad)
     # n: Up / Zenith
-    n_sq = max(0.0, 1.0 - l**2 - m**2)
+    n_sq = max(0.0, 1.0 - l ** 2 - m ** 2)
     n = math.sqrt(n_sq)
     return l, m, n
 

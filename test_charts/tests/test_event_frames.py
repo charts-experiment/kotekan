@@ -23,10 +23,24 @@ TOTAL = int(5.0 / FRAME_S)
 
 def _events():
     return [
-        SimulatedEvent(event_id="leo", event_type="rfi_leo", t_start_s=1.585,
-                       duration_s=3.415, nominal_amp=12.0, l0=0.0, m0=0.0),
-        SimulatedEvent(event_id="rfi", event_type="rfi_narrow", t_start_s=4.012,
-                       duration_s=0.988, nominal_amp=7.0, l0=0.5, m0=0.5),
+        SimulatedEvent(
+            event_id="leo",
+            event_type="rfi_leo",
+            t_start_s=1.585,
+            duration_s=3.415,
+            nominal_amp=12.0,
+            l0=0.0,
+            m0=0.0,
+        ),
+        SimulatedEvent(
+            event_id="rfi",
+            event_type="rfi_narrow",
+            t_start_s=4.012,
+            duration_s=0.988,
+            nominal_amp=7.0,
+            l0=0.5,
+            m0=0.5,
+        ),
     ]
 
 
@@ -34,13 +48,17 @@ class TestEventFrameMembership(unittest.TestCase):
     def _check(self, dense_s):
         events = _events()
         idx, frame_events = build_frame_selection_schedule(
-            TOTAL, FRAME_S, events, event_dense_s=dense_s)
+            TOTAL, FRAME_S, events, event_dense_s=dense_s
+        )
         for ev in events:
             for k in idx:
                 t = k * FRAME_S
                 overlaps = ev.t_start_s - FRAME_S < t < ev.t_start_s + ev.duration_s
-                self.assertEqual(ev.event_id in frame_events.get(k, []), overlaps,
-                                 f"{ev.event_id} at frame {k} (t = {t:.3f} s)")
+                self.assertEqual(
+                    ev.event_id in frame_events.get(k, []),
+                    overlaps,
+                    f"{ev.event_id} at frame {k} (t = {t:.3f} s)",
+                )
 
     def test_overlapping_events_dense_window(self):
         self._check(dense_s=1.0)
@@ -49,7 +67,9 @@ class TestEventFrameMembership(unittest.TestCase):
         self._check(dense_s=0.05)
 
     def test_selection_unchanged(self):
-        idx, _ = build_frame_selection_schedule(TOTAL, FRAME_S, _events(), event_dense_s=0.05)
+        idx, _ = build_frame_selection_schedule(
+            TOTAL, FRAME_S, _events(), event_dense_s=0.05
+        )
         self.assertEqual(len(idx), len(set(idx)))
         self.assertTrue(all(0 <= k < TOTAL for k in idx))
 

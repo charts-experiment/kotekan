@@ -506,9 +506,7 @@ def save_baseband_to_hdf5(
 
         f_group = f.create_group("fengine_compat")
         v_dset = f_group.create_dataset(
-            "voltage",
-            data=np.expand_dims(h5_array, axis=1),
-            dtype=np.uint8,
+            "voltage", data=np.expand_dims(h5_array, axis=1), dtype=np.uint8,
         )
         v_dset.attrs["dim_names"] = ["D", "P", "F", "T"]
         v_dset.attrs["coarse_freq"] = list(range(n_freq))

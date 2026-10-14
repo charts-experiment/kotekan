@@ -322,8 +322,8 @@ def run_stress_test(
 
     # 3. Calculate Performance Metrics
     throughput_fps = repeats / elapsed_s
-    throughput_input_gbps = (total_input_bytes / (1024**3)) / elapsed_s
-    throughput_input_mbps = (total_input_bytes / (1024**2)) / elapsed_s
+    throughput_input_gbps = (total_input_bytes / (1024 ** 3)) / elapsed_s
+    throughput_input_mbps = (total_input_bytes / (1024 ** 2)) / elapsed_s
     spectra_rate_msps = (n_time * n_freq * repeats) / (elapsed_s * 1e6)
     ms_per_frame = (elapsed_s / repeats) * 1000.0
     us_per_spectra = (elapsed_s / (n_time * repeats)) * 1e6

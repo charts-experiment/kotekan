@@ -653,9 +653,9 @@ class HDF5Writer:
                 )
                 dset.attrs["dimension_labels"] = ["frame", "t_samp", "freq", "element"]
                 dset.attrs["encoding"] = "int4x2_packed"
-                dset.attrs["packing_formula"] = (
-                    "Byte = (Re & 0x0F) | ((Im & 0x0F) << 4)"
-                )
+                dset.attrs[
+                    "packing_formula"
+                ] = "Byte = (Re & 0x0F) | ((Im & 0x0F) << 4)"
             else:
                 dset = h5["baseband"]
 
@@ -770,11 +770,7 @@ class HDF5Writer:
         sha_pref = compute_file_sha256(self.h5_path) if self.h5_path.exists() else ""
 
         frame_entries = [
-            {
-                "name": self.h5_path.name,
-                "size_bytes": size,
-                "sha256_prefix": sha_pref,
-            }
+            {"name": self.h5_path.name, "size_bytes": size, "sha256_prefix": sha_pref,}
         ]
 
         obs_start_utc = (

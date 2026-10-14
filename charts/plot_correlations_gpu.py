@@ -138,10 +138,7 @@ def plot_element_pairs(
 
 
 def plot_global_matrix(
-    correlation: np.ndarray,
-    selected: list[int],
-    polarizations: int,
-    output_path: Path,
+    correlation: np.ndarray, selected: list[int], polarizations: int, output_path: Path,
 ) -> np.ndarray:
     """Plot a compact all-pairs summary using mean magnitude over frequency."""
     matrix = np.empty((len(selected), len(selected)), dtype=np.float64)

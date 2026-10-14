@@ -241,9 +241,9 @@ def run_pipeline(
         "\n--- PHASE 2: Correlating Baseband Streams via Kotekan AstronCorrelator ---"
     )
     env = dict(os.environ)
-    env["LD_LIBRARY_PATH"] = (
-        f"{_kotekan_root / 'build' / 'external' / 'n2k'}:{env.get('LD_LIBRARY_PATH', '')}"
-    )
+    env[
+        "LD_LIBRARY_PATH"
+    ] = f"{_kotekan_root / 'build' / 'external' / 'n2k'}:{env.get('LD_LIBRARY_PATH', '')}"
     if "CUDA_HOME" not in env:
         for var in ["CUDA_ROOT", "EBROOTCUDA", "CUDA_PATH"]:
             if var in env:

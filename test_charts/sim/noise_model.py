@@ -107,7 +107,7 @@ class ChartsNoiseModel:
 
         # Antenna directivity from HPBW (Gaussian beam approximation)
         hpbw_rad = math.radians(self.params.antenna_hpbw_deg)
-        self.omega_a_sr = 1.133 * (hpbw_rad**2)
+        self.omega_a_sr = 1.133 * (hpbw_rad ** 2)
         self.directivity = (4.0 * math.pi) / self.omega_a_sr
         self.directivity_dbi = lin_to_db_power(self.directivity)
 
@@ -125,7 +125,7 @@ class ChartsNoiseModel:
     ) -> Union[float, np.ndarray]:
         """Computes antenna effective aperture A_eff(nu) = D * lambda^2 / (4 * pi)."""
         wavelength_m = C_LIGHT / (np.asarray(freq_mhz) * 1e6)
-        return (self.directivity * (wavelength_m**2)) / (4.0 * math.pi)
+        return (self.directivity * (wavelength_m ** 2)) / (4.0 * math.pi)
 
     def primary_beam_attenuation(
         self, theta_deg: Union[float, np.ndarray]

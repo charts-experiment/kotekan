@@ -460,7 +460,7 @@ def run_pipeline_and_validate():
         ref_b = ref_voltages[:, :, b]
 
         diff = np.abs(gpu_b - ref_b)
-        rms_err = float(np.sqrt(np.mean(diff**2)))
+        rms_err = float(np.sqrt(np.mean(diff ** 2)))
         max_err = float(np.max(diff))
 
         gpu_power = float(np.mean(np.abs(gpu_b) ** 2))

@@ -55,10 +55,7 @@ def baseline_index(receiver_y: int, receiver_x: int) -> int:
 
 
 def extract_baseline_visibilities(
-    c_data: np.ndarray,
-    ant_i: int,
-    ant_j: int,
-    polarizations: int = 2,
+    c_data: np.ndarray, ant_i: int, ant_j: int, polarizations: int = 2,
 ) -> np.ndarray:
     """
     Extracts visibility V_ij(f) of shape (num_channels,) from packed correlator data
@@ -75,9 +72,7 @@ def extract_baseline_visibilities(
 
 
 def extract_all_auto_powers(
-    c_data: np.ndarray,
-    num_elements: int = 64,
-    polarizations: int = 2,
+    c_data: np.ndarray, num_elements: int = 64, polarizations: int = 2,
 ) -> np.ndarray:
     """
     Extracts auto-power for all antennas.

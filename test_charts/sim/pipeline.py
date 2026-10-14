@@ -216,20 +216,24 @@ def create_beam_tracker_yaml(
     command_sections = []
 
     # 1. Input copy
-    command_sections.append("""    - name: cudaInputData
+    command_sections.append(
+        """    - name: cudaInputData
       in_buf: host_voltage
       gpu_mem: voltage
-    - name: cudaSyncInput""")
+    - name: cudaSyncInput"""
+    )
 
     # 2. Antenna mask (optional)
     if enable_mask:
-        command_sections.append(f"""    - name: cudaAntennaMaskCommand
+        command_sections.append(
+            f"""    - name: cudaAntennaMaskCommand
       gpu_mem_voltage: voltage
       num_elements: {num_elements}
       num_local_freq: {num_local_freq}
       samples_per_data_set: {samples_per_data_set}
       buffer_depth: {buffer_depth}
-      auto_detect_enabled: true""")
+      auto_detect_enabled: true"""
+        )
 
     # 3. Direct Beam Tracker (cudaDirectBeamTrackerCommand)
     # Beam Tracker V5 is legacy and unsupported in CHARTS.
@@ -251,7 +255,8 @@ def create_beam_tracker_yaml(
         target_lines.append(f"      initial_lst_hours{prefix}: {lst:.4f}")
     targets_str = "\n".join(target_lines)
 
-    command_sections.append(f"""    - name: cudaDirectBeamTrackerCommand
+    command_sections.append(
+        f"""    - name: cudaDirectBeamTrackerCommand
       gpu_mem_voltage: voltage
       gpu_mem_formed_beams: formed_beams
       num_elements: {num_elements}
@@ -268,11 +273,13 @@ def create_beam_tracker_yaml(
       site_lon_deg: {CHARTS_LONGITUDE_DEG}
       freq_start_hz: {freq_start_hz:.1f}
       freq_step_hz: {freq_step_hz:.1f}
-{targets_str}""")
+{targets_str}"""
+    )
 
     # 4. BiSLC (optional)
     if enable_bislc:
-        command_sections.append(f"""    - name: cudaBiSLCCommand
+        command_sections.append(
+            f"""    - name: cudaBiSLCCommand
       gpu_mem_formed_beams: formed_beams
       gpu_mem_cleaned_beams: formed_beams
       num_elements: {num_elements}
@@ -285,12 +292,14 @@ def create_beam_tracker_yaml(
       diagonal_loading: 1.0e-4
       enabled: true
       freq_start_hz: {freq_start_hz:.1f}
-      freq_step_hz: {freq_step_hz:.1f}""")
+      freq_step_hz: {freq_step_hz:.1f}"""
+        )
 
     # 5. Transient trigger (optional)
     if enable_transient_trigger:
         cand_dir = (tracker_dir / "transients").as_posix()
-        command_sections.append(f"""    - name: cudaTransientTriggerCommand
+        command_sections.append(
+            f"""    - name: cudaTransientTriggerCommand
       gpu_mem_cleaned_beams: formed_beams
       num_local_freq: {num_local_freq}
       samples_per_data_set: {samples_per_data_set}
@@ -304,14 +313,17 @@ def create_beam_tracker_yaml(
       min_flagged_channels: 8
       dump_directory: "{cand_dir}"
       auto_dump_enabled: true
-      enabled: true""")
+      enabled: true"""
+        )
 
     # 6. Output transfer
-    command_sections.append("""    - name: cudaSyncOutput
+    command_sections.append(
+        """    - name: cudaSyncOutput
     - name: cudaOutputData
       in_buf: host_voltage
       gpu_mem: formed_beams
-      out_buf: host_formed_beams""")
+      out_buf: host_formed_beams"""
+    )
 
     all_commands_str = "\n".join(command_sections)
 

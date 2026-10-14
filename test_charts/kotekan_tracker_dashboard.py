@@ -1020,27 +1020,33 @@ def create_app(rest_host: str = "127.0.0.1", rest_port: int = 12048) -> dash.Das
     def toggle_pulse_injection(n_clicks):
         app_state["inject_test_pulse"] = not app_state["inject_test_pulse"]
         if app_state["inject_test_pulse"]:
-            return "❌ Clear Injected Pulse", {
-                "backgroundColor": "#DA3633",
-                "color": "#FFFFFF",
-                "border": "none",
-                "padding": "6px 12px",
-                "borderRadius": "4px",
-                "cursor": "pointer",
-                "fontSize": "12px",
-                "fontWeight": "bold",
-            }
+            return (
+                "❌ Clear Injected Pulse",
+                {
+                    "backgroundColor": "#DA3633",
+                    "color": "#FFFFFF",
+                    "border": "none",
+                    "padding": "6px 12px",
+                    "borderRadius": "4px",
+                    "cursor": "pointer",
+                    "fontSize": "12px",
+                    "fontWeight": "bold",
+                },
+            )
         else:
-            return "⚡ Inject Test Pulse / FRB (DM 350)", {
-                "backgroundColor": "#D29922",
-                "color": "#0D1117",
-                "border": "none",
-                "padding": "6px 12px",
-                "borderRadius": "4px",
-                "cursor": "pointer",
-                "fontSize": "12px",
-                "fontWeight": "bold",
-            }
+            return (
+                "⚡ Inject Test Pulse / FRB (DM 350)",
+                {
+                    "backgroundColor": "#D29922",
+                    "color": "#0D1117",
+                    "border": "none",
+                    "padding": "6px 12px",
+                    "borderRadius": "4px",
+                    "cursor": "pointer",
+                    "fontSize": "12px",
+                    "fontWeight": "bold",
+                },
+            )
 
     @app.callback(
         Output("active-beams-dropdown", "value"),
@@ -1453,7 +1459,7 @@ def create_app(rest_host: str = "127.0.0.1", rest_port: int = 12048) -> dash.Das
             )
             f_ref = np.max(f_axis)
             pulse_delays = (
-                K_DM * app_state["inject_dm"] * ((f_axis**-2.0) - (f_ref**-2.0))
+                K_DM * app_state["inject_dm"] * ((f_axis ** -2.0) - (f_ref ** -2.0))
             ) / (FPGA_TIME_RESOLUTION_US * 1e-6)
             amp = app_state["inject_snr"] * 1.5
             t_center = n_t // 3

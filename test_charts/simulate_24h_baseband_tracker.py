@@ -122,10 +122,7 @@ def get_antenna_positions(
 
 
 def compute_topocentric_coordinates(
-    ra_deg: float,
-    dec_deg: float,
-    lst_deg: float,
-    lat_deg: float = CHARTS_LATITUDE_DEG,
+    ra_deg: float, dec_deg: float, lst_deg: float, lat_deg: float = CHARTS_LATITUDE_DEG,
 ) -> Tuple[float, float, float, float, float]:
     """Computes topocentric direction cosines (l, m, n), Elevation, and Azimuth."""
     ha_rad = math.radians(lst_deg - ra_deg)
@@ -183,7 +180,7 @@ def simulate_24h_beam_tracker(
 
     # 1. Ingest Baseband Data & Analyze Health
     print(f"\n[1/4] Ingesting Real Site Baseband Snapshot: {h5_path.name}...")
-    file_size_gb = os.path.getsize(h5_path) / (1024**3)
+    file_size_gb = os.path.getsize(h5_path) / (1024 ** 3)
     print(f"  -> File Size on Disk: {file_size_gb:.3f} GB")
 
     with h5py.File(h5_path, "r") as f:

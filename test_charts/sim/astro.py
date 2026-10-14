@@ -248,8 +248,7 @@ def datetime_to_julian_date(dt: datetime.datetime) -> float:
 
 
 def datetime_to_lst_hours(
-    dt: datetime.datetime,
-    longitude_deg: float = CHARTS_LONGITUDE_DEG,
+    dt: datetime.datetime, longitude_deg: float = CHARTS_LONGITUDE_DEG,
 ) -> float:
     """Computes Local Sidereal Time (LST) in hours.
 

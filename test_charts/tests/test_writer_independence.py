@@ -141,9 +141,7 @@ class TestWriterIndependence(unittest.TestCase):
 
         # 2. Read back using pure NumPy reader (no Kotekan binary)
         read_voltages = read_raw_bin_frame(
-            frame_file,
-            shape=(samples_per_frame, num_freq, num_ant),
-            unpack=True,
+            frame_file, shape=(samples_per_frame, num_freq, num_ant), unpack=True,
         )
         self.assertEqual(read_voltages.shape, (samples_per_frame, num_freq, num_ant))
 

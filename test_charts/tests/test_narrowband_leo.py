@@ -85,8 +85,11 @@ class TestNarrowbandLEO(unittest.TestCase):
     def test_01_schedule_contiguous_block(self):
         for seed in range(20):
             events = schedule_random_events(
-                duration_s=30.0, num_events=3, allowed_types=["rfi_leo"],
-                seed=seed, num_freq=NUM_FREQ,
+                duration_s=30.0,
+                num_events=3,
+                allowed_types=["rfi_leo"],
+                seed=seed,
+                num_freq=NUM_FREQ,
             )
             for ev in events:
                 ch = ev.channels
@@ -97,25 +100,28 @@ class TestNarrowbandLEO(unittest.TestCase):
     def test_02_power_confined_to_channels(self):
         p = self._channel_power([4, 5])
         noise = np.median(p)
-        self.assertGreater(p[4], noise + 0.8 * LEO_AMP**2)
-        self.assertGreater(p[5], noise + 0.8 * LEO_AMP**2)
+        self.assertGreater(p[4], noise + 0.8 * LEO_AMP ** 2)
+        self.assertGreater(p[5], noise + 0.8 * LEO_AMP ** 2)
         out = np.delete(p, [4, 5])
         np.testing.assert_allclose(out, noise, rtol=0.1)
 
     def test_03_legacy_event_without_channels_is_full_band(self):
         p = self._channel_power(None)
-        self.assertTrue(np.all(p > 2.0 + 0.8 * LEO_AMP**2), p)
+        self.assertTrue(np.all(p > 2.0 + 0.8 * LEO_AMP ** 2), p)
 
     def test_04_lightcurve_scales_with_channel_fraction(self):
         events = schedule_random_events(
-            duration_s=10.0, num_events=1, allowed_types=["rfi_leo"], seed=3,
+            duration_s=10.0,
+            num_events=1,
+            allowed_types=["rfi_leo"],
+            seed=3,
             num_freq=NUM_FREQ,
         )
         ev = events[0]
         freqs = 340e6 + np.arange(NUM_FREQ) * 0.3e6
         t, p = compute_analytic_lightcurve(10.0, 0.0, 0.0, [ev], freqs)
         on = (t >= ev.t_start_s) & (t <= ev.t_start_s + ev.duration_s)
-        expected = ev.nominal_amp**2 * len(ev.channels) / NUM_FREQ
+        expected = ev.nominal_amp ** 2 * len(ev.channels) / NUM_FREQ
         np.testing.assert_allclose(p[on], expected)
 
 

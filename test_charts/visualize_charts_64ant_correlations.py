@@ -156,14 +156,7 @@ def plot_uv_coverage(ax: plt.Axes, wavelength_m: float = 0.857):
     ax.grid(True, linestyle="--", color="#334155", alpha=0.6)
 
     # 2D hexbin or scatter for density
-    hb = ax.hexbin(
-        u_arr,
-        v_arr,
-        gridsize=30,
-        cmap="mako",
-        mincnt=1,
-        edgecolors="none",
-    )
+    hb = ax.hexbin(u_arr, v_arr, gridsize=30, cmap="mako", mincnt=1, edgecolors="none",)
 
     ax.set_title(
         f"Interferometric Baseline Distribution (2016 Baselines)\n"
@@ -238,7 +231,7 @@ def compute_or_load_correlation_matrix(
     if use_noise:
         sigmas = rng.uniform(0.4, 0.7, size=num_elements)
         # Thermal noise on diagonal
-        np.fill_diagonal(v_matrix, np.diag(v_matrix) + (sigmas**2) * 1536.0 * 0.1)
+        np.fill_diagonal(v_matrix, np.diag(v_matrix) + (sigmas ** 2) * 1536.0 * 0.1)
         # Small background fluctuation
         noise_cross = (
             (
@@ -262,8 +255,7 @@ def compute_or_load_correlation_matrix(
 
 
 def generate_master_visualization(
-    output_png: Path,
-    dumps_dir: Path | None = None,
+    output_png: Path, dumps_dir: Path | None = None,
 ):
     """Generates the comprehensive 8-panel master PNG visualization dashboard."""
     output_png.parent.mkdir(parents=True, exist_ok=True)

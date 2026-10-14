@@ -189,7 +189,7 @@ def main():
         print(f"[ERROR] File not found: {args.h5_path}")
         sys.exit(1)
 
-    file_size_gb = os.path.getsize(args.h5_path) / (1024**3)
+    file_size_gb = os.path.getsize(args.h5_path) / (1024 ** 3)
     print(f" File Size on Disk: {file_size_gb:.3f} GB")
 
     with h5py.File(args.h5_path, "r") as f:
@@ -266,7 +266,7 @@ def main():
 
     bf_time_ms = (t1_bf - t0_bf) * 1000.0
     payload_bytes = n_time * n_freq * n_ant_file
-    throughput_gb_s = (payload_bytes / (1024**3)) / ((t1_bf - t0_bf))
+    throughput_gb_s = (payload_bytes / (1024 ** 3)) / ((t1_bf - t0_bf))
     real_time_budget_ms = n_time * delta_time_us / 1000.0
 
     print(f"  Execution Time   : {bf_time_ms:.2f} ms")

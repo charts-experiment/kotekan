@@ -284,7 +284,7 @@ def run_fengine_direct_tracker_test(h5_path: str, plot_path: str = ""):
 
     gain_direct = mean_p_direct / max(1e-12, mean_ant_power)
     gain_v5 = mean_p_v5 / max(1e-12, mean_ant_power)
-    theoretical_max_gain = float(n_ant**2)
+    theoretical_max_gain = float(n_ant ** 2)
 
     sidelobe_rejection_db = 10.0 * np.log10(
         max(1e-12, mean_p_direct) / max(1e-12, mean_p_off)

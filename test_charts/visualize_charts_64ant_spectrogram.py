@@ -99,8 +99,7 @@ from constants import (
 
 # Precomputed LUT for 4-bit two's complement integer decoding: [-8..+7]
 INT4_LUT = np.array(
-    [0, 1, 2, 3, 4, 5, 6, 7, -8, -7, -6, -5, -4, -3, -2, -1],
-    dtype=np.float32,
+    [0, 1, 2, 3, 4, 5, 6, 7, -8, -7, -6, -5, -4, -3, -2, -1], dtype=np.float32,
 )
 
 DEFAULT_SATURATED_ANTENNAS = [7, 23, 42, 55]
@@ -128,9 +127,7 @@ def unpack_int4x2_power(packed_bytes: np.ndarray) -> np.ndarray:
 
 
 def load_frame_from_hdf5(
-    h5_path: Path,
-    frame_idx: int = 0,
-    samples_per_frame: int = 1536,
+    h5_path: Path, frame_idx: int = 0, samples_per_frame: int = 1536,
 ) -> Tuple[np.ndarray, Dict[str, any]]:
     """
     Extracts 1 frame of baseband data for all 64 antennas from an HDF5 dump.
@@ -255,9 +252,7 @@ def load_frame_from_raw_bin(
 
 
 def load_baseband_frame(
-    file_path: Path,
-    frame_idx: int = 0,
-    samples_per_frame: int = 1536,
+    file_path: Path, frame_idx: int = 0, samples_per_frame: int = 1536,
 ) -> Tuple[np.ndarray, Dict[str, any]]:
     """Loads 1 frame of baseband data from either .h5 or .bin file."""
     if file_path.suffix.lower() in [".h5", ".hdf5"]:

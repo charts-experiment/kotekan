@@ -217,7 +217,7 @@ def verify_visibility_phasing(
 
     errors_arr = np.array(errors, dtype=np.float64)
     max_err = float(np.max(errors_arr)) if len(errors_arr) > 0 else 0.0
-    rms_err = float(np.sqrt(np.mean(errors_arr**2))) if len(errors_arr) > 0 else 0.0
+    rms_err = float(np.sqrt(np.mean(errors_arr ** 2))) if len(errors_arr) > 0 else 0.0
     passed = max_err <= max_phase_err_rad
 
     return {

@@ -62,23 +62,17 @@ def unpack_4bit_complex(u8_array: np.ndarray) -> np.ndarray:
 
 
 def compute_dispersion_delay_samples(
-    freqs_mhz: np.ndarray,
-    dm: float,
-    sample_time_s: float,
-    f_ref_mhz: float,
+    freqs_mhz: np.ndarray, dm: float, sample_time_s: float, f_ref_mhz: float,
 ) -> np.ndarray:
     """Computes dispersion delay in integer/float time samples relative to f_ref."""
     if dm == 0.0:
         return np.zeros_like(freqs_mhz, dtype=np.int64)
-    delays_s = K_DM * dm * ((freqs_mhz**-2.0) - (f_ref_mhz**-2.0))
+    delays_s = K_DM * dm * ((freqs_mhz ** -2.0) - (f_ref_mhz ** -2.0))
     return np.round(delays_s / sample_time_s).astype(np.int64)
 
 
 def dedisperse_waterfall(
-    waterfall: np.ndarray,
-    freqs_mhz: np.ndarray,
-    dm: float,
-    sample_time_s: float,
+    waterfall: np.ndarray, freqs_mhz: np.ndarray, dm: float, sample_time_s: float,
 ) -> np.ndarray:
     """De-disperses a 2D (n_freq, n_time) dynamic spectrum waterfall by shifting frequency channels."""
     n_freq, n_time = waterfall.shape
@@ -286,7 +280,7 @@ def plot_frb_candidate_diagnostic(
     f_ref = np.max(freqs_mhz)
     t_sweep_ms = (
         best_cand.get("time_ms", 0.0)
-        + (K_DM * best_cand.get("dm", 0.0) * ((freqs_mhz**-2.0) - (f_ref**-2.0)))
+        + (K_DM * best_cand.get("dm", 0.0) * ((freqs_mhz ** -2.0) - (f_ref ** -2.0)))
         * 1000.0
     )
     ax1.plot(

@@ -85,8 +85,9 @@ def test_fp64_phase_rotator_precision():
     assert abs(delta_phase_accurate) < 1.0e-4
 
 
-def raw_elem_to_physical_ant(raw_elem: int, num_antennas: int, num_pols: int,
-                            layout: str, descending: bool):
+def raw_elem_to_physical_ant(
+    raw_elem: int, num_antennas: int, num_pols: int, layout: str, descending: bool
+):
     """Python model of DirectBeamTrackerConfig::raw_elem_to_physical_ant."""
     n_elem = num_antennas * num_pols
     ordered_elem = ((n_elem - 1) - raw_elem) if descending else raw_elem
@@ -144,4 +145,3 @@ def test_multi_beam_scaling_up_to_16():
             total_elements = max_beams_capacity * n_freq * n_ant
             assert weight_idx_first >= 0
             assert weight_idx_last < total_elements
-

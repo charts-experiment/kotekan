@@ -43,14 +43,12 @@ import multiprocessing as mp
 
 # 4-bit two's complement LUT
 INT4_LUT = np.array(
-    [0, 1, 2, 3, 4, 5, 6, 7, -8, -7, -6, -5, -4, -3, -2, -1],
-    dtype=np.float64,
+    [0, 1, 2, 3, 4, 5, 6, 7, -8, -7, -6, -5, -4, -3, -2, -1], dtype=np.float64,
 )
 
 # 4-bit two's complement square LUT
 INT4_SQUARES = np.array(
-    [0, 1, 4, 9, 16, 25, 36, 49, 64, 49, 36, 25, 16, 9, 4, 1],
-    dtype=np.float32,
+    [0, 1, 4, 9, 16, 25, 36, 49, 64, 49, 36, 25, 16, 9, 4, 1], dtype=np.float32,
 )
 # Precompute 256-element byte power LUT: |v|^2 = real^2 + imag^2
 BYTE_POWER_LUT = np.array(
@@ -129,8 +127,7 @@ def load_baseband_frame(
 
 
 def compute_baseband_spectrogram(
-    voltages: np.ndarray,
-    num_antennas: int = 64,
+    voltages: np.ndarray, num_antennas: int = 64,
 ) -> np.ndarray:
     """
     Computes per-antenna frequency power (averaged over time).
@@ -406,10 +403,7 @@ def generate_baseband_spectrogram_video(
 # Video 2: Correlator Matrix Video (2-Channel / Interesting Channel)
 # ---------------------------------------------------------------------------
 def find_interesting_correlator_channels(
-    corr_dir: Path,
-    corr_name: str,
-    num_elements: int = 64,
-    num_channels: int = 672,
+    corr_dir: Path, corr_name: str, num_elements: int = 64, num_channels: int = 672,
 ) -> Tuple[int, int]:
     """
     Identifies:

@@ -195,8 +195,7 @@ def pfb_channelize(
 
 
 def quantize_int4x2(
-    channels: np.ndarray,
-    scale: float = 7.5,
+    channels: np.ndarray, scale: float = 7.5,
 ) -> Tuple[np.ndarray, np.ndarray]:
     r"""Quantizes complex channel voltages to int4x2 (Julia `quantize!`).
 
@@ -341,8 +340,7 @@ def simulate_fengine_frame(
 
 
 def measure_quantization_snr_loss(
-    channels_float: np.ndarray,
-    channels_quant: np.ndarray,
+    channels_float: np.ndarray, channels_quant: np.ndarray,
 ) -> float:
     r"""Quantization SNR loss in dB between float and quantized channels.
 
@@ -365,8 +363,7 @@ def measure_quantization_snr_loss(
 
 
 def optimal_noise_sigma_lsb(
-    n_trials: int = 400_000,
-    rng: Optional[np.random.Generator] = None,
+    n_trials: int = 400_000, rng: Optional[np.random.Generator] = None,
 ) -> float:
     """Numerically finds the per-component noise sigma (in LSB) minimizing
     quantization SNR loss for the 15-level (±7) digitizer.

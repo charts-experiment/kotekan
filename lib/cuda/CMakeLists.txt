@@ -6,11 +6,28 @@ if(DEFINED CUDA_ARCHITECTURE AND NOT "${CUDA_ARCHITECTURE}" STREQUAL "")
 elseif(DEFINED CUDA_ARCHITECTURES AND NOT "${CUDA_ARCHITECTURES}" STREQUAL "")
     set(CMAKE_CUDA_ARCHITECTURES ${CUDA_ARCHITECTURES})
 elseif(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR "${CMAKE_CUDA_ARCHITECTURES}" STREQUAL "")
-    if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
-        set(CMAKE_CUDA_ARCHITECTURES 75 80 86 89 90 100 120)
-    elseif(DEFINED CMAKE_CUDA_COMPILER_VERSION AND CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.8)
-        set(CMAKE_CUDA_ARCHITECTURES 75 80 86 89 90 100 120)
-    elseif(DEFINED CMAKE_CUDA_COMPILER_VERSION AND CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.0)
+    if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL
+                                               13.0)
+        set(CMAKE_CUDA_ARCHITECTURES
+            75
+            80
+            86
+            89
+            90
+            100
+            120)
+    elseif(DEFINED CMAKE_CUDA_COMPILER_VERSION AND CMAKE_CUDA_COMPILER_VERSION
+                                                   VERSION_GREATER_EQUAL 12.8)
+        set(CMAKE_CUDA_ARCHITECTURES
+            75
+            80
+            86
+            89
+            90
+            100
+            120)
+    elseif(DEFINED CMAKE_CUDA_COMPILER_VERSION AND CMAKE_CUDA_COMPILER_VERSION
+                                                   VERSION_GREATER_EQUAL 12.0)
         set(CMAKE_CUDA_ARCHITECTURES 75 80 86 89 90)
     else()
         set(CMAKE_CUDA_ARCHITECTURES 61 75 80 86 89 90)
@@ -172,10 +189,8 @@ target_include_directories(kotekan_cuda INTERFACE ${CUDAToolkit_INCLUDE_DIRS})
 target_include_directories(kotekan_cuda PUBLIC .)
 
 if(DEFINED CUDAToolkit_INCLUDE_DIRS)
-    target_compile_definitions(
-        kotekan_cuda
-        PRIVATE
-        KOTEKAN_CUDA_INCLUDE_DIRS="${CUDAToolkit_INCLUDE_DIRS}")
+    target_compile_definitions(kotekan_cuda
+                               PRIVATE KOTEKAN_CUDA_INCLUDE_DIRS="${CUDAToolkit_INCLUDE_DIRS}")
 endif()
 
 # Per-architecture gencode flags are derived from CMAKE_CUDA_ARCHITECTURES (set above); keep

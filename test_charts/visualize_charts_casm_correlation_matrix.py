@@ -102,8 +102,7 @@ from inspect_correlator_dump import load_astron_correlator_dump
 
 # 4-bit LUT for baseband decoding
 INT4_LUT = np.array(
-    [0, 1, 2, 3, 4, 5, 6, 7, -8, -7, -6, -5, -4, -3, -2, -1],
-    dtype=np.float64,
+    [0, 1, 2, 3, 4, 5, 6, 7, -8, -7, -6, -5, -4, -3, -2, -1], dtype=np.float64,
 )
 
 
@@ -199,9 +198,7 @@ def load_visibilities_from_correlator_dir(
 
 
 def load_visibilities_from_baseband(
-    baseband_path: Path,
-    num_time_chunks: int = 64,
-    samples_per_frame: int = 1536,
+    baseband_path: Path, num_time_chunks: int = 64, samples_per_frame: int = 1536,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Loads baseband voltages and computes short-time cross-correlations V_ij(t, f).

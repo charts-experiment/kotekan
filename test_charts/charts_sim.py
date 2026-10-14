@@ -768,9 +768,7 @@ def main():
         tracker_yaml = wdir / "kotekan_direct_tracker.yaml"
 
         beam_targets = parse_beam_targets(
-            args.beam_targets,
-            max_beams=args.max_beams,
-            default_lst=obs_lst,
+            args.beam_targets, max_beams=args.max_beams, default_lst=obs_lst,
         )
 
         create_beam_tracker_yaml(
