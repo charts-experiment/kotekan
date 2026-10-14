@@ -213,7 +213,10 @@ void cudaBiSLCCommand::update_matrices_if_needed(cudaStream_t stream) {
 
             current_cfg.num_active_beams = tracker_cfg.num_active_beams;
             current_cfg.antenna_mask = tracker_cfg.antenna_mask;
-            current_cfg.targets = tracker_cfg.targets;
+            for (std::size_t b = 0;
+                 b < std::min(current_cfg.targets.size(), tracker_cfg.targets.size()); ++b) {
+                current_cfg.targets[b] = tracker_cfg.targets[b];
+            }
             current_cfg.antenna_positions = tracker_cfg.antenna_positions;
             current_cfg.num_active_antennas = tracker_cfg.num_active_antennas;
 
