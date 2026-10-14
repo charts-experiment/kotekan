@@ -1,0 +1,4 @@
+# Code Owners configuration for CHARTS kotekan
+# Automatically requests review from @fmpalmab for all Pull Requests
+
+* @fmpalmab

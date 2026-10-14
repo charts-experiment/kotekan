@@ -9,8 +9,12 @@ on:
       build_branch:
         description: "Tag/branch name to use for the Docker images (will be sanitized for tag)"
         required: true
-        default: 'develop'
+        default: 'kotekan_charts'
         type: string
+
+permissions:
+  contents: read
+  packages: write
 
 jobs:
   manual-build-docker:

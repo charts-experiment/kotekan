@@ -7,7 +7,12 @@ on:
   pull_request:
     types: [closed]
     branches:
+      - kotekan_charts
       - develop
+
+permissions:
+  contents: read
+  packages: write
 
 jobs:
   build-docker-on-merge:

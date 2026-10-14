@@ -17,6 +17,10 @@ on:
         default: ''
         type: string
 
+permissions:
+  actions: write
+  contents: read
+
 jobs:
   determine-branches:
     runs-on: ubuntu-latest

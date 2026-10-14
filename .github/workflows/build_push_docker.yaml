@@ -42,12 +42,17 @@ on:
         description: "Full Intel-compiler image name (including tag) built or selected by this workflow"
         value: ${{ jobs.build-push-docker.outputs.docker_intel_img_name }}
 
+permissions:
+  contents: read
+
 jobs:
 
   build-push-docker:
     name: "Build and push CPU and GPU docker images"
     runs-on: ubuntu-latest
-    permissions: write-all
+    permissions:
+      contents: read
+      packages: write
 
     outputs:
       docker_cpu_img_name: ${{ steps.docker_img.outputs.cpu_img_name }}
@@ -57,26 +62,37 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          # `changed-files` with `since_last_remote_commit` needs the history: on a newly
-          # opened PR it falls back to `HEAD^`, which a depth-1 checkout does not have.
+          # The Dockerfile change check below diffs against the base branch and
+          # the previous push, which a depth-1 checkout does not have.
           fetch-depth: 0
 
-      # Has the Dockerfile ever changed vs base branch? (for tag selection)
-      - name: Check Dockerfile diff vs base
-        id: changed-vs-base
-        uses: tj-actions/changed-files@v47
-        with:
-          files: |
-            tools/docker/24.04/Dockerfile
-
-       # Has the Dockerfile changed in the latest push? (for rebuild decision)
-      - name: Check Dockerfile diff in latest push
-        id: changed-latest
-        uses: tj-actions/changed-files@v47
-        with:
-          files: |
-            tools/docker/24.04/Dockerfile
-          since_last_remote_commit: true
+      # Check if Dockerfile changed in this PR vs base branch or in latest push
+      - name: Check Dockerfile changes
+        id: dockerfile
+        env:
+          EVENT_BEFORE: ${{ github.event.before }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          f=tools/docker/24.04/Dockerfile
+          head="${PR_HEAD:-HEAD}"
+          ever=false
+          recent=false
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            git fetch -q origin "$GITHUB_BASE_REF"
+            git diff --quiet "origin/$GITHUB_BASE_REF...$head" -- "$f" || ever=true
+          fi
+          # github.event.before is the previous head on a push or PR synchronize.
+          # It is empty on a newly opened PR and may be gone after a force-push.
+          if [[ -n "$EVENT_BEFORE" ]] && git cat-file -e "$EVENT_BEFORE^{commit}" 2>/dev/null; then
+            git diff --quiet "$EVENT_BEFORE" "$head" -- "$f" || recent=true
+          elif [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            recent=$ever
+          else
+            git diff --quiet "$head^" "$head" -- "$f" || recent=true
+          fi
+          echo "ever_changed=$ever" >> "$GITHUB_OUTPUT"
+          echo "recent_changed=$recent" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -92,8 +108,8 @@ jobs:
       - name: Check to see if Docker rebuild is needed
         id: docker_img
         env:
-          DOCKERFILE_EVER_CHANGED: ${{ steps.changed-vs-base.outputs.any_changed }}
-          DOCKERFILE_RECENT_CHANGED: ${{ steps.changed-latest.outputs.any_changed }}
+          DOCKERFILE_EVER_CHANGED: ${{ steps.dockerfile.outputs.ever_changed }}
+          DOCKERFILE_RECENT_CHANGED: ${{ steps.dockerfile.outputs.recent_changed }}
           BUILD_BRANCH: ${{ inputs.build_branch }}
         run: |
           set -euo pipefail
@@ -168,33 +184,68 @@ jobs:
           GPU_IMAGE_TAG="${GPU_IMG}:${tag}"
           INTEL_IMAGE_TAG="${INTEL_IMG}:${tag}"
 
-          # As a last check, ensure images actually exist in the registry.
-          # If they don't, force a rebuild (only for real GitHub runs, not act).
-          if [[ -z "${ACT:-}" ]]; then
-            echo "Checking whether images exist in ${REGISTRY}..."
-            missing=0
+          UPSTREAM_CPU_IMG="ghcr.io/kotekan/kotekan/kotekan-2404-cpu:develop"
+          UPSTREAM_GPU_IMG="ghcr.io/kotekan/kotekan/kotekan-2404:develop"
+          UPSTREAM_INTEL_IMG="ghcr.io/kotekan/kotekan/kotekan-2404-intel:develop"
 
+          # Fallback check:
+          # If no rebuild was forced (Dockerfile untouched, no manual rebuild):
+          if [[ "$needs_build" -eq 0 && -z "${ACT:-}" ]]; then
+            echo "Checking whether target images exist in ${REGISTRY}..."
+
+            # 1. CPU image
             if ! docker manifest inspect "$CPU_IMAGE_TAG" >/dev/null 2>&1; then
-              echo "CPU image $CPU_IMAGE_TAG not found in registry."
-              missing=1
+              echo "Target CPU image $CPU_IMAGE_TAG not found."
+              if docker manifest inspect "${CPU_IMG}:kotekan_charts" >/dev/null 2>&1; then
+                CPU_IMAGE_TAG="${CPU_IMG}:kotekan_charts"
+                echo "Using existing repository image ${CPU_IMAGE_TAG}"
+              elif docker manifest inspect "${CPU_IMG}:develop" >/dev/null 2>&1; then
+                CPU_IMAGE_TAG="${CPU_IMG}:develop"
+                echo "Using existing repository image ${CPU_IMAGE_TAG}"
+              elif docker manifest inspect "$UPSTREAM_CPU_IMG" >/dev/null 2>&1; then
+                CPU_IMAGE_TAG="$UPSTREAM_CPU_IMG"
+                echo "Falling back to upstream pre-built image $CPU_IMAGE_TAG"
+              else
+                echo "No pre-built CPU image available; forcing rebuild."
+                needs_build=1
+              fi
             fi
 
+            # 2. GPU image
             if ! docker manifest inspect "$GPU_IMAGE_TAG" >/dev/null 2>&1; then
-              echo "GPU image $GPU_IMAGE_TAG not found in registry."
-              missing=1
+              echo "Target GPU image $GPU_IMAGE_TAG not found."
+              if docker manifest inspect "${GPU_IMG}:kotekan_charts" >/dev/null 2>&1; then
+                GPU_IMAGE_TAG="${GPU_IMG}:kotekan_charts"
+                echo "Using existing repository image ${GPU_IMAGE_TAG}"
+              elif docker manifest inspect "${GPU_IMG}:develop" >/dev/null 2>&1; then
+                GPU_IMAGE_TAG="${GPU_IMG}:develop"
+                echo "Using existing repository image ${GPU_IMAGE_TAG}"
+              elif docker manifest inspect "$UPSTREAM_GPU_IMG" >/dev/null 2>&1; then
+                GPU_IMAGE_TAG="$UPSTREAM_GPU_IMG"
+                echo "Falling back to upstream pre-built image $GPU_IMAGE_TAG"
+              else
+                echo "No pre-built GPU image available; forcing rebuild."
+                needs_build=1
+              fi
             fi
 
+            # 3. Intel image
             if ! docker manifest inspect "$INTEL_IMAGE_TAG" >/dev/null 2>&1; then
-              echo "Intel image $INTEL_IMAGE_TAG not found in registry."
-              missing=1
+              echo "Target Intel image $INTEL_IMAGE_TAG not found."
+              if docker manifest inspect "${INTEL_IMG}:kotekan_charts" >/dev/null 2>&1; then
+                INTEL_IMAGE_TAG="${INTEL_IMG}:kotekan_charts"
+                echo "Using existing repository image ${INTEL_IMAGE_TAG}"
+              elif docker manifest inspect "${INTEL_IMG}:develop" >/dev/null 2>&1; then
+                INTEL_IMAGE_TAG="${INTEL_IMG}:develop"
+                echo "Using existing repository image ${INTEL_IMAGE_TAG}"
+              elif docker manifest inspect "$UPSTREAM_INTEL_IMG" >/dev/null 2>&1; then
+                INTEL_IMAGE_TAG="$UPSTREAM_INTEL_IMG"
+                echo "Falling back to upstream pre-built image $INTEL_IMAGE_TAG"
+              else
+                echo "No pre-built Intel image available; forcing rebuild."
+                needs_build=1
+              fi
             fi
-
-            if [[ "$missing" -eq 1 ]]; then
-              echo "One or more images missing; forcing docker rebuild."
-              needs_build=1
-            fi
-          else
-            echo "ACT detected; skipping remote image existence check."
           fi
 
           echo "docker_build=$needs_build"   >> "$GITHUB_OUTPUT"
@@ -247,10 +298,14 @@ jobs:
           file: tools/docker/24.04/Dockerfile
           target: cpu
           tags: ${{ steps.docker_img.outputs.cpu_img_name }}
-          push: ${{ env.ACT == '' }} # true on GitHub, false under act
-          load: ${{ env.ACT != '' }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          push: ${{ env.ACT == '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+          load: ${{ env.ACT != '' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
+          cache-from: |
+            type=registry,ref=${{ steps.docker_img.outputs.cpu_img_name }}
+            type=registry,ref=${{ env.CPU_IMG }}:kotekan_charts
+            type=registry,ref=${{ env.CPU_IMG }}:develop
+            type=registry,ref=ghcr.io/kotekan/kotekan/kotekan-2404-cpu:develop
+          cache-to: type=inline
 
       - name: Build Intel (target=intel) image
         if: steps.docker_img.outputs.docker_build == '1'
@@ -260,10 +315,14 @@ jobs:
           file: tools/docker/24.04/Dockerfile
           target: intel
           tags: ${{ steps.docker_img.outputs.intel_img_name }}
-          push: ${{ env.ACT == '' }} # true on GitHub, false under act
-          load: ${{ env.ACT != '' }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          push: ${{ env.ACT == '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+          load: ${{ env.ACT != '' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
+          cache-from: |
+            type=registry,ref=${{ steps.docker_img.outputs.intel_img_name }}
+            type=registry,ref=${{ env.INTEL_IMG }}:kotekan_charts
+            type=registry,ref=${{ env.INTEL_IMG }}:develop
+            type=registry,ref=ghcr.io/kotekan/kotekan/kotekan-2404-intel:develop
+          cache-to: type=inline
 
       - name: Build GPU (target=gpu) image
         if: steps.docker_img.outputs.docker_build == '1'
@@ -273,7 +332,11 @@ jobs:
           file: tools/docker/24.04/Dockerfile
           target: gpu
           tags: ${{ steps.docker_img.outputs.gpu_img_name }}
-          push: ${{ env.ACT == '' }} # true on GitHub, false under act
-          load: ${{ env.ACT != '' }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          push: ${{ env.ACT == '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+          load: ${{ env.ACT != '' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
+          cache-from: |
+            type=registry,ref=${{ steps.docker_img.outputs.gpu_img_name }}
+            type=registry,ref=${{ env.GPU_IMG }}:kotekan_charts
+            type=registry,ref=${{ env.GPU_IMG }}:develop
+            type=registry,ref=ghcr.io/kotekan/kotekan/kotekan-2404:develop
+          cache-to: type=inline

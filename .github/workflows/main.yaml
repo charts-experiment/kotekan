@@ -7,10 +7,17 @@ name: kotekan-ci-tests
 on:
   pull_request:
     branches:
-    - develop
+      - kotekan_charts
+      - develop
+      - master
+      - main
   push:
     branches:
-    - develop
+      - kotekan_charts
+      - develop
+      - master
+      - main
+  workflow_dispatch:
 
 # Cancel a superseded PR run on a new commit; let push runs finish.
 concurrency:
@@ -20,11 +27,17 @@ concurrency:
 env:
   REGISTRY: ghcr.io
 
+permissions:
+  contents: read
+  packages: read
+
 jobs:
 
   # Kotekan docker image build and push
   kotekan-docker:
-    permissions: write-all
+    permissions:
+      contents: read
+      packages: write
     uses: ./.github/workflows/build_push_docker.yaml
 
   kotekan-cpu-tests:
@@ -67,10 +80,13 @@ jobs:
               -DUSE_AIRSPY=ON -DUSE_LAPACK_BLAZE=ON -DUSE_FFTW=ON -DUSE_JULIA=OFF -DUSE_DPDK=OFF
               -DWITH_TESTS=ON -DWITH_BOOST_TESTS=OFF
             post_build: |
-              PYTHONPATH=$GITHUB_WORKSPACE/python
+              PYTHONPATH=$GITHUB_WORKSPACE/python:$GITHUB_WORKSPACE
               PYTEST_TIMEOUT=60
               cd $GITHUB_WORKSPACE/tests
               pytest -v -x -rs --durations=0 --timeout="${PYTEST_TIMEOUT}" -m serial
+              if [ -d "$GITHUB_WORKSPACE/test_charts/tests" ]; then
+                pytest -v -x -rs --durations=0 --timeout="${PYTEST_TIMEOUT}" $GITHUB_WORKSPACE/test_charts/tests
+              fi
 
           # Test gcc build + parallel pytests
           - id: test_gcc_parallel_pytests
@@ -269,6 +285,9 @@ jobs:
   kotekan-gpu-tests:
     name: "GPU"
     needs: kotekan-docker
+    if: >-
+      (github.repository == 'kotekan/kotekan' || vars.ENABLE_GPU_CI == 'true') &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     uses: ./.github/workflows/test_kotekan_build.yaml
     with:
       container_image: ${{ needs.kotekan-docker.outputs.docker_gpu_img_name }}
@@ -366,6 +385,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      packages: read
     env:
       SOURCE_BRANCH: ${{ github.event.pull_request.head.ref || github.ref_name }}
       SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
