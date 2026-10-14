@@ -64,7 +64,7 @@ class TestBasebandWriterSuite(unittest.TestCase):
 
         Mathematical Specification:
           \text{Byte} = (r \ \& \ 0x0F) \ | \ ((i \ \& \ 0x0F) \ll 4)
-        where r, i \in [-8, 7] in signed 4-bit two's complement.
+        where r, i \in [-7, 7] (symmetric F-engine range; -8 is never produced).
         """
         # Exact fixture vectors: (real, imag) -> expected_byte
         fixtures = [
@@ -74,7 +74,7 @@ class TestBasebandWriterSuite(unittest.TestCase):
             (7, 7, 0x77),
             (-1, -1, 0xFF),  # -1 & 0xF = 0xF -> 0xF | (0xF << 4) = 0xFF
             (-7, 7, 0x79),  # -7 & 0xF = 0x9, 7 << 4 = 0x70 -> 0x79
-            (-8, -8, 0x88),  # -8 & 0xF = 0x8 -> 0x88
+            (-7, -7, 0x99),  # -7 & 0xF = 0x9 -> 0x99
             (3, -2, 0xE3),  # 3 & 0xF = 0x3, -2 & 0xF = 0xE -> 0xE3
             (-5, 2, 0x2B),  # -5 & 0xF = 0xB, 2 << 4 = 0x20 -> 0x2B
             (5, -5, 0xB5),  # 5 & 0xF = 0x5, -5 & 0xF = 0xB -> 0xB5
@@ -108,6 +108,25 @@ class TestBasebandWriterSuite(unittest.TestCase):
         unpacked = unpack_int4x2(packed)
         np.testing.assert_allclose(unpacked.real, rr, atol=1e-5)
         np.testing.assert_allclose(unpacked.imag, ii, atol=1e-5)
+
+    def test_02b_symmetric_clipping(self):
+        """Out-of-range inputs saturate at +/-7 on both sides; -8 is never packed.
+
+        The F-engine quantizer (Buschmann 2025, section 4), sim.fengine and the
+        generator fast path all clip to [-7, 7]. The decoder still maps the
+        code 0x8 to -8 so that hardware data using the full two's complement
+        range can be read.
+        """
+        vals = np.array([-12.3 - 9.0j, -7.6 + 7.6j, 7.4 - 7.4j, 20.0 + 0.0j],
+                        dtype=np.complex64)
+        unpacked = unpack_int4x2(pack_int4x2(vals))
+        np.testing.assert_array_equal(unpacked.real, [-7, -7, 7, 7])
+        np.testing.assert_array_equal(unpacked.imag, [-7, 7, -7, 0])
+        self.assertGreaterEqual(unpacked.real.min(), -7)
+        self.assertGreaterEqual(unpacked.imag.min(), -7)
+
+        decoded = unpack_int4x2(np.array([0x88], dtype=np.uint8))
+        self.assertEqual(decoded[0], complex(-8, -8))
 
     def test_03_raw_bin_writer_frame_sizing_and_header(self):
         """Verify Kotekan rawFileWrite binary file layout and frame sizes."""

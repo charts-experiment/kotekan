@@ -16,11 +16,6 @@
 
 namespace kotekan {
 
-/**
- * @class cudaDirectBeamTrackerCommand
- * @brief High-throughput Direct Beam Tracker stage in Kotekan with direct complex weight
- * application, precomputed sky grid codebooks, and live REST control.
- */
 class cudaDirectBeamTrackerCommand : public cudaCommand {
 public:
     cudaDirectBeamTrackerCommand(Config& config, const std::string& unique_name,
@@ -33,28 +28,42 @@ public:
 
     static void set_shared_antenna_mask(const std::array<std::uint8_t, MAX_DIRECT_ANTENNAS>& mask,
                                         int n_active = -1);
+    static void set_shared_antenna_mask(
+        const std::array<std::uint8_t, charts::constants::charts_total_antennas>& mask,
+        int n_active = -1);
     static std::array<std::uint8_t, MAX_DIRECT_ANTENNAS> get_shared_antenna_mask();
     static DirectBeamTrackerConfig get_shared_config();
 
 private:
     void allocate_device_buffers();
     void free_device_buffers();
+    void invalidate_cuda_graphs();
     void update_weights_if_needed(cudaStream_t stream);
 
-    int32_t _num_elements;
-    int32_t _num_local_freq;
-    int32_t _samples_per_data_set;
-    float _spacing_m;
-    int32_t _buffer_depth;
-    int32_t _max_beams;
-    std::size_t _time_chunk_size;
-    std::size_t _time_unroll;
+    int32_t _num_elements = 64;
+    int32_t _num_antennas = 64;
+    int32_t _num_pols = 1;
+    DirectPolLayout _pol_layout = DirectPolLayout::INTERLEAVED;
+    int32_t _grid_cols = 8;
+
+    int32_t _num_local_freq = 1;
+    int32_t _samples_per_data_set = 15360;
+    float _spacing_m = 0.5f;
+    int32_t _buffer_depth = 4;
+    int32_t _max_beams = 1;
+    std::size_t _time_chunk_size = 256;
+    std::size_t _time_unroll = 4;
     std::size_t _beam_tile_size = 4;
     std::string _antenna_order = "descending";
 
-    // CUDA Graph state for zero CPU dispatch latency across ring buffer slots
+    // Per-instance generation trackers to support multi-instance Kotekan pipelines
+    std::uint64_t _applied_config_generation = 0;
+    std::uint64_t _applied_mask_generation = 0;
+
+    // CUDA Graph state
     bool _enable_cuda_graph = false;
     std::size_t _last_graph_beams = 0;
+    bool _last_graph_interp = false;
     std::vector<cudaGraph_t> _cuda_graphs;
     std::vector<cudaGraphExec_t> _cuda_graph_execs;
 
@@ -63,10 +72,7 @@ private:
 
     std::vector<double> _frequencies_hz;
 
-    // Subframe phase interpolation
-    bool _enable_subframe_interpolation = true;
-
-    // Persistent GPU buffers allocated once
+    // Contiguous GPU buffer for _d_weights and _d_step_weights
     float2* _d_weights = nullptr;
     float2* _d_step_weights = nullptr;
     DirectDirection3D* _d_directions = nullptr;
@@ -88,7 +94,6 @@ private:
     static std::mutex _global_mutex;
     static DirectBeamTrackerConfig _shared_config;
     static bool _endpoints_registered;
-    static bool _weights_dirty;
 };
 
 } // namespace kotekan
