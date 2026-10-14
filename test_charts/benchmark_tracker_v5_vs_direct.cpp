@@ -351,7 +351,7 @@ int main(int argc, char** argv) {
 
     // Test matrix across array scales and beam configurations
     const std::vector<std::size_t> ant_counts = {32, 64, 128, 256};
-    const std::vector<std::size_t> beam_counts = {1, 2, 4};
+    const std::vector<std::size_t> beam_counts = {1, 2, 4, 8, 12, 16};
     const std::size_t n_freq = 672; // Full local frequency band
 
     std::cout << "Executing Head-to-Head Benchmarks across Matrix (" << iterations
@@ -362,7 +362,7 @@ int main(int argc, char** argv) {
             std::cout << " -> Running N_ant=" << std::setw(3) << n_ant << ", Beams=" << n_beams
                       << ", N_time=" << n_time << ", N_freq=" << n_freq << " ... " << std::flush;
 
-            run_comparison_benchmark(n_ant, n_time, n_freq, n_beams, 4, iterations, results,
+            run_comparison_benchmark(n_ant, n_time, n_freq, n_beams, 16, iterations, results,
                                      stream);
             std::cout << "DONE (Speedup: " << std::fixed << std::setprecision(2)
                       << results.back().speedup_ratio << "x)\n";

@@ -151,7 +151,7 @@ sink:
         """Test GET /beam_tracker/status."""
         status = self.client.get_status()
         self.assertEqual(status["total_elements"], 64)
-        self.assertEqual(status["max_beams_capacity"], 8)
+        self.assertEqual(status["max_beams_capacity"], 16)
         self.assertEqual(status["num_active_beams"], 1)
         self.assertEqual(status["active_antennas"], 64)
         self.assertEqual(status["masked_antennas"], 0)

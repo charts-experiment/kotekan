@@ -70,9 +70,9 @@ class TestKotekanConstants(unittest.TestCase):
         self.assertIn(
             "inline constexpr std::size_t charts_full_band_channels = 672;", content
         )
-        self.assertIn(
-            "inline constexpr std::size_t charts_local_channels = charts_full_band_channels / charts_shard_count;",
+        self.assertRegex(
             content,
+            r"inline constexpr std::size_t charts_local_channels\s*=\s*charts_full_band_channels\s*/\s*charts_shard_count;",
         )
         self.assertIn(
             "inline constexpr double charts_caren_lat_deg = -33.4211146;", content
