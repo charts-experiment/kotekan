@@ -336,18 +336,30 @@ def build_frame_selection_schedule(
         k_dense_end = min(k_end, k_start + dense_frames_count)
         for k in range(k_start, k_dense_end):
             selected_set.add(k)
-            frame_events.setdefault(k, []).append(ev.event_id)
 
         for k in range(k_dense_end, k_end, sparse_step):
             selected_set.add(k)
-            frame_events.setdefault(k, []).append(ev.event_id)
+
+    # 3. Event membership: an event is rendered in every written frame that
+    #    overlaps its time span, not only in the frames selected for it.
+    #    Otherwise frames selected for another event (or for the background)
+    #    omit it and the event appears to switch on and off between frames.
+    sorted_indices = sorted(selected_set)
+    frame_events = {}
+    for ev in events:
+        if ev.is_persistent:
+            continue
+        k_start = max(0, int(math.floor(ev.t_start_s / frame_duration_s)))
+        k_end = min(total_frames, int(math.ceil((ev.t_start_s + ev.duration_s) / frame_duration_s)))
+        for k in sorted_indices:
+            if k_start <= k < k_end:
+                frame_events.setdefault(k, []).append(ev.event_id)
 
     persistent_evs = [ev.event_id for ev in events if ev.is_persistent]
-    for k in selected_set:
+    for k in sorted_indices:
         for p_id in persistent_evs:
             frame_events.setdefault(k, []).append(p_id)
 
-    sorted_indices = sorted(selected_set)
     return sorted_indices, frame_events
 
 
