@@ -49,6 +49,10 @@ class SimulationConfig:
     persistent_rfi_channels: List[int] = field(default_factory=lambda: [94, 133, 147])
     persistent_rfi_freqs: Optional[List[float]] = None
     persistent_rfi_amp: float = 7.0
+    # Signal model of sky sources and RFI: 'gaussian' (independent complex
+    # Gaussian processes, physically correct) or 'tone' (deterministic
+    # phasors, legacy behaviour; all sources mutually coherent).
+    source_model: str = "gaussian"
 
     # Kotekan Pipeline & GPU Buffer Parameters
     max_beams: int = 4
