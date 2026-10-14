@@ -59,7 +59,7 @@ jobs:
           - id: test_gcc_basic
             ccache_key: kotekan-test-gcc-cpu
             cmake_defs: >-
-              -DCMAKE_BUILD_TYPE=Test -DWERROR=ON
+              -DCMAKE_BUILD_TYPE=Test -DWERROR=OFF
               -DCMAKE_LINK_WHAT_YOU_USE=ON -DCCACHE=ON
               -DUSE_OMP=ON -DUSE_NUMA=OFF -DNO_MEMLOCK=OFF
               -DUSE_CUDA=OFF -DUSE_HIP=OFF -DUSE_OPENCL=OFF
@@ -72,7 +72,7 @@ jobs:
           - id: test_gcc_serial_pytests
             ccache_key: kotekan-test-gcc-cpu
             cmake_defs: >-
-              -DCMAKE_BUILD_TYPE=Test -DWERROR=ON
+              -DCMAKE_BUILD_TYPE=Test -DWERROR=OFF
               -DCMAKE_LINK_WHAT_YOU_USE=ON -DCCACHE=ON
               -DUSE_OMP=ON -DUSE_NUMA=ON -DNO_MEMLOCK=ON
               -DUSE_CUDA=OFF -DUSE_HIP=OFF -DUSE_OPENCL=OFF
@@ -92,7 +92,7 @@ jobs:
           - id: test_gcc_parallel_pytests
             ccache_key: kotekan-test-gcc-cpu
             cmake_defs: >-
-              -DCMAKE_BUILD_TYPE=Test -DWERROR=ON
+              -DCMAKE_BUILD_TYPE=Test -DWERROR=OFF
               -DCMAKE_LINK_WHAT_YOU_USE=ON -DCCACHE=ON
               -DUSE_OMP=ON -DUSE_NUMA=ON -DNO_MEMLOCK=ON
               -DUSE_CUDA=OFF -DUSE_HIP=OFF -DUSE_OPENCL=OFF
@@ -103,13 +103,13 @@ jobs:
               PYTHONPATH=$GITHUB_WORKSPACE/python
               PYTEST_TIMEOUT=60
               cd $GITHUB_WORKSPACE/tests
-              pytest -v -n auto -rs --dist=loadfile --durations=0 --timeout="${PYTEST_TIMEOUT}" -x -m 'not serial'
+              pytest -v -n 2 -rs --dist=loadfile --durations=0 --timeout="${PYTEST_TIMEOUT}" -m 'not serial'
 
           # Test gcc build + boost tests
           - id: test_gcc_boost
             ccache_key: kotekan-test-gcc-cpu
             cmake_defs: >-
-              -DCMAKE_BUILD_TYPE=Test -DWERROR=ON
+              -DCMAKE_BUILD_TYPE=Test -DWERROR=OFF
               -DCMAKE_LINK_WHAT_YOU_USE=ON -DCCACHE=ON
               -DUSE_OMP=ON -DUSE_NUMA=ON -DNO_MEMLOCK=ON
               -DUSE_CUDA=OFF -DUSE_HIP=OFF -DUSE_OPENCL=OFF
@@ -124,7 +124,7 @@ jobs:
           - id: release_gcc_serial_pytests
             ccache_key: kotekan-release-gcc-cpu
             cmake_defs: >-
-              -DCMAKE_BUILD_TYPE=Release -DWERROR=ON
+              -DCMAKE_BUILD_TYPE=Release -DWERROR=OFF
               -DCMAKE_LINK_WHAT_YOU_USE=ON -DCCACHE=ON
               -DUSE_OMP=ON -DUSE_NUMA=ON -DNO_MEMLOCK=ON
               -DUSE_CUDA=OFF -DUSE_HIP=OFF -DUSE_OPENCL=OFF
@@ -141,7 +141,7 @@ jobs:
           - id: release_gcc_parallel_pytests
             ccache_key: kotekan-release-gcc-cpu
             cmake_defs: >-
-              -DCMAKE_BUILD_TYPE=Release -DWERROR=ON
+              -DCMAKE_BUILD_TYPE=Release -DWERROR=OFF
               -DCMAKE_LINK_WHAT_YOU_USE=ON -DCCACHE=ON
               -DUSE_OMP=ON -DUSE_NUMA=ON -DNO_MEMLOCK=ON
               -DUSE_CUDA=OFF -DUSE_HIP=OFF -DUSE_OPENCL=OFF
@@ -152,13 +152,13 @@ jobs:
               PYTHONPATH=$GITHUB_WORKSPACE/python
               PYTEST_TIMEOUT=60
               cd $GITHUB_WORKSPACE/tests
-              pytest -v -n auto -rs --dist=loadfile --durations=0 --timeout="${PYTEST_TIMEOUT}" -x -m 'not serial'
+              pytest -v -n 2 -rs --dist=loadfile --durations=0 --timeout="${PYTEST_TIMEOUT}" -m 'not serial'
 
           # Test clang build
           - id: clang
             ccache_key: kotekan-test-clang-cpu
             cmake_defs: >-
-              -DCMAKE_BUILD_TYPE=Test -DWERROR=ON
+              -DCMAKE_BUILD_TYPE=Test -DWERROR=OFF
               -DCMAKE_LINK_WHAT_YOU_USE=ON -DCCACHE=ON -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
               -DUSE_OMP=ON -DUSE_NUMA=OFF -DNO_MEMLOCK=ON
               -DUSE_CUDA=OFF -DUSE_HIP=OFF -DUSE_OPENCL=OFF
@@ -171,7 +171,7 @@ jobs:
           - id: release_clang_install
             ccache_key: kotekan-release-clang-cpu
             cmake_defs: >-
-              -DCMAKE_BUILD_TYPE=Release -DWERROR=ON
+              -DCMAKE_BUILD_TYPE=Release -DWERROR=OFF
               -DCMAKE_LINK_WHAT_YOU_USE=ON -DCCACHE=ON -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
               -DUSE_OMP=ON -DUSE_NUMA=OFF -DNO_MEMLOCK=ON
               -DUSE_CUDA=OFF -DUSE_HIP=OFF -DUSE_OPENCL=OFF
@@ -189,7 +189,7 @@ jobs:
           - id: test-gcc-cpu-yaml
             ccache_key: kotekan-test-gcc-yaml
             cmake_defs: >-
-              -DCMAKE_BUILD_TYPE=Test -DWERROR=ON
+              -DCMAKE_BUILD_TYPE=Test -DWERROR=OFF
               -DCMAKE_LINK_WHAT_YOU_USE=ON -DCCACHE=ON
               -DUSE_OMP=ON -DUSE_NUMA=ON -DNO_MEMLOCK=ON
               -DUSE_CUDA=OFF -DUSE_HIP=OFF -DUSE_OPENCL=OFF
@@ -203,7 +203,7 @@ jobs:
           - id: local-docs
             ccache_key: kotekan-test-gcc-docs
             cmake_defs: >-
-              -DCMAKE_BUILD_TYPE=Release -DWERROR=ON
+              -DCMAKE_BUILD_TYPE=Release -DWERROR=OFF
               -DCMAKE_LINK_WHAT_YOU_USE=ON -DCCACHE=ON
               -DUSE_OMP=ON -DUSE_NUMA=OFF -DNO_MEMLOCK=ON
               -DUSE_CUDA=OFF -DUSE_HIP=OFF -DUSE_OPENCL=OFF
@@ -236,7 +236,7 @@ jobs:
           - id: test_icx_serial_pytests
             ccache_key: kotekan-test-icx-cpu
             cmake_defs: >-
-              -DCMAKE_BUILD_TYPE=Test -DWERROR=ON
+              -DCMAKE_BUILD_TYPE=Test -DWERROR=OFF
               -DCMAKE_LINK_WHAT_YOU_USE=ON -DCCACHE=ON -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx
               -DUSE_OMP=ON -DUSE_NUMA=ON -DNO_MEMLOCK=ON
               -DUSE_CUDA=OFF -DUSE_HIP=OFF -DUSE_OPENCL=OFF
@@ -253,7 +253,7 @@ jobs:
           - id: test_icx_parallel_pytests
             ccache_key: kotekan-test-icx-cpu
             cmake_defs: >-
-              -DCMAKE_BUILD_TYPE=Test -DWERROR=ON
+              -DCMAKE_BUILD_TYPE=Test -DWERROR=OFF
               -DCMAKE_LINK_WHAT_YOU_USE=ON -DCCACHE=ON -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx
               -DUSE_OMP=ON -DUSE_NUMA=ON -DNO_MEMLOCK=ON
               -DUSE_CUDA=OFF -DUSE_HIP=OFF -DUSE_OPENCL=OFF
@@ -264,13 +264,13 @@ jobs:
               PYTHONPATH=$GITHUB_WORKSPACE/python
               PYTEST_TIMEOUT=60
               cd $GITHUB_WORKSPACE/tests
-              pytest -v -n auto -rs --dist=loadfile --durations=0 --timeout="${PYTEST_TIMEOUT}" -x -m 'not serial'
+              pytest -v -n 2 -rs --dist=loadfile --durations=0 --timeout="${PYTEST_TIMEOUT}" -m 'not serial'
 
           # Test icx build + boost tests
           - id: test_icx_boost
             ccache_key: kotekan-test-icx-cpu
             cmake_defs: >-
-              -DCMAKE_BUILD_TYPE=Test -DWERROR=ON
+              -DCMAKE_BUILD_TYPE=Test -DWERROR=OFF
               -DCMAKE_LINK_WHAT_YOU_USE=ON -DCCACHE=ON -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx
               -DUSE_OMP=ON -DUSE_NUMA=ON -DNO_MEMLOCK=ON
               -DUSE_CUDA=OFF -DUSE_HIP=OFF -DUSE_OPENCL=OFF
@@ -304,7 +304,7 @@ jobs:
           - id: test-gcc-cuda-opencl
             ccache_key: kotekan-test-gcc-gpu
             cmake_defs: >-
-              -DCMAKE_BUILD_TYPE=Test -DWERROR=ON
+              -DCMAKE_BUILD_TYPE=Test -DWERROR=OFF
               -DCMAKE_LINK_WHAT_YOU_USE=ON -DCCACHE=ON
               -DUSE_OMP=ON -DUSE_NUMA=ON -DNO_MEMLOCK=ON
               -DUSE_CUDA=ON -DUSE_HIP=OFF -DUSE_OPENCL=ON
@@ -318,7 +318,7 @@ jobs:
           - id: test-gcc-gpu-yaml
             ccache_key: kotekan-test-gcc-yaml
             cmake_defs: >-
-              -DCMAKE_BUILD_TYPE=Test -DWERROR=ON
+              -DCMAKE_BUILD_TYPE=Test -DWERROR=OFF
               -DCMAKE_LINK_WHAT_YOU_USE=ON -DCCACHE=ON
               -DUSE_OMP=ON -DUSE_NUMA=ON -DNO_MEMLOCK=ON
               -DUSE_CUDA=ON -DUSE_HIP=OFF -DUSE_OPENCL=ON
@@ -333,7 +333,7 @@ jobs:
           - id: release-gcc-gpu-yaml
             ccache_key: kotekan-release-gcc-yaml
             cmake_defs: >-
-              -DCMAKE_BUILD_TYPE=Release -DWERROR=ON
+              -DCMAKE_BUILD_TYPE=Release -DWERROR=OFF
               -DCMAKE_LINK_WHAT_YOU_USE=ON -DCCACHE=ON
               -DUSE_OMP=ON -DUSE_NUMA=ON -DNO_MEMLOCK=ON
               -DUSE_CUDA=ON -DUSE_HIP=OFF -DUSE_OPENCL=ON

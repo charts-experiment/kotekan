@@ -53,7 +53,7 @@ zeroSamples::~zeroSamples() {}
 void zeroSamples::main_thread() {
 
     size_t zero_location;
-    int64_t lost_samples;
+    [[maybe_unused]] int64_t lost_samples = 0;
 
     while (!stop_thread) {
 

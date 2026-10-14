@@ -76,11 +76,16 @@ from .verify import (
     verify_transit_lightcurve,
     verify_visibility_phasing,
 )
-from .visualizer import (
-    plot_casm_correlation_matrix,
-    plot_correlator_waterfalls,
-    plot_tracker_waterfall,
-)
+try:
+    from .visualizer import (
+        plot_casm_correlation_matrix,
+        plot_correlator_waterfalls,
+        plot_tracker_waterfall,
+    )
+except ImportError:
+    plot_casm_correlation_matrix = None
+    plot_correlator_waterfalls = None
+    plot_tracker_waterfall = None
 
 __all__ = [
     "C_LIGHT",

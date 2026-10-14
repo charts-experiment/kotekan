@@ -15,12 +15,21 @@ import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import matplotlib
+try:
+    import matplotlib
 
-matplotlib.use("Agg")
-import matplotlib.animation as animation
-from matplotlib.gridspec import GridSpec
-import matplotlib.pyplot as plt
+    matplotlib.use("Agg")
+    import matplotlib.animation as animation
+    from matplotlib.gridspec import GridSpec
+    import matplotlib.pyplot as plt
+
+    HAVE_MATPLOTLIB = True
+except ImportError:
+    matplotlib = None
+    animation = None
+    GridSpec = None
+    plt = None
+    HAVE_MATPLOTLIB = False
 import numpy as np
 
 from .constants import (

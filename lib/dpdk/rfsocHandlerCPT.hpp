@@ -120,7 +120,7 @@ protected:
         out_metadata->event_id = 0; // TODO: Set proper event ID (only testing)
         out_metadata->freq_id = 0;  // TODO: Set proper frequency ID (only testing)
 
-        static uint64_t fpga_seq_counter = 0;
+        [[maybe_unused]] static uint64_t fpga_seq_counter = 0;
         // meta->set_fpga_seq_num(fpga_seq_counter);
         fpga_seq_counter += (packets_written_in_frame * time_sampels_per_packet);
 
