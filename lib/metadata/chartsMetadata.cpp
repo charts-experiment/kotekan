@@ -160,7 +160,7 @@ size_t chartsMetadata::serialize(char* bytes) {
     return sizeof(*fmt);
 }
 
-size_t chartsMetadata::set_from_bytes(const char* bytes, size_t length) {
+size_t chartsMetadata::set_from_bytes(const char* bytes, [[maybe_unused]] size_t length) {
     assert(length >= sizeof(chartsMetadataFormat));
     const auto* fmt = reinterpret_cast<const chartsMetadataFormat*>(bytes);
 
