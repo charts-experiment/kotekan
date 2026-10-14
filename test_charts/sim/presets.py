@@ -53,6 +53,14 @@ class SimulationConfig:
     # Gaussian processes, physically correct) or 'tone' (deterministic
     # phasors, legacy behaviour; all sources mutually coherent).
     source_model: str = "gaussian"
+    # Scenario control. ``seed`` drives the noise, the antenna gain dispersion
+    # and the random event schedule; None keeps the legacy derivation
+    # int(1000 * utc_hour + 42), which does not depend on start_time.
+    # ``events_json`` (format of <window>_events.json) replaces the random event
+    # schedule; num_events, allowed_event_types and the persistent RFI settings
+    # are then not used.
+    seed: Optional[int] = None
+    events_json: Optional[Path] = None
 
     # Kotekan Pipeline & GPU Buffer Parameters
     max_beams: int = 4
@@ -88,6 +96,7 @@ class SimulationConfig:
         res["scratch_dir"] = str(self.scratch_dir)
         res["output_dir"] = str(self.output_dir)
         res["kotekan_bin"] = str(self.kotekan_bin) if self.kotekan_bin else None
+        res["events_json"] = str(self.events_json) if self.events_json else None
         return res
 
     def save_yaml(self, path: Path):
