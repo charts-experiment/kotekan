@@ -13,8 +13,8 @@ num_polarizations: 2
 num_freq_bins: 3 # actual CHIME has 4, but then its 4 bins of 4 freqs each, which is a worse test case
 
 telescope:
-    name: CHORDTelescope
-    num_elements: 2048
+    name: CHIMETelescope
+    require_gps: false
 
 
 pl_mask_downsampling_factor: 2
