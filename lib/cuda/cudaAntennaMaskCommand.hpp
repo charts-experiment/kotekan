@@ -18,8 +18,8 @@ namespace kotekan {
 
 /**
  * @class cudaAntennaMaskCommand
- * @brief High-throughput GPU stage in Kotekan for dead and saturated antenna detection,
- *        debouncing, in-place voltage blanking, and cross-stage mask propagation.
+ * @brief High-throughput GPU stage in Kotekan for dead, saturated, DC-locked, and
+ *        RFI-contaminated antenna detection, in-place blanking, and cross-stage mask propagation.
  */
 class cudaAntennaMaskCommand : public cudaCommand {
 public:
@@ -42,7 +42,10 @@ private:
     void allocate_device_buffers();
     void free_device_buffers();
 
-    int32_t _num_elements = 256;
+    int32_t _num_elements = 64;
+    int32_t _num_antennas = 64;
+    int32_t _num_pols = 1;
+    DirectPolLayout _pol_layout = DirectPolLayout::INTERLEAVED;
     int32_t _num_local_freq = 336;
     int32_t _samples_per_data_set = 3840;
     int32_t _buffer_depth = 3;
@@ -52,26 +55,26 @@ private:
     int32_t _max_alive_antennas = 64;
     std::string _antenna_order = "descending";
 
+    std::uint64_t _applied_mask_generation = 0;
+
     // Device allocations
+    AntennaRawStats* _d_raw_stats = nullptr;
     float* _d_antenna_powers = nullptr;
     std::uint32_t* _d_antenna_clips = nullptr;
     int* _d_bad_antennas = nullptr;
     int* _d_alive_antennas = nullptr;
 
-    // Pinned host memory for low-latency telemetry copy
-    float* _h_antenna_powers = nullptr;
-    std::uint32_t* _h_antenna_clips = nullptr;
+    // Pinned host memory for single-DMA telemetry transfer
+    AntennaRawStats* _h_raw_stats = nullptr;
 
     std::vector<int> _current_bad_indices;
     std::vector<int> _current_alive_indices;
 
-    // Thread-safe shared configuration and metrics state
     static std::mutex _global_mutex;
     static AntennaMaskConfig _shared_config;
     static std::array<AntennaHealthMetrics, MAX_MASK_ANTENNAS> _shared_metrics;
     static std::array<std::uint8_t, MAX_MASK_ANTENNAS> _shared_mask;
     static bool _endpoints_registered;
-    static bool _mask_dirty;
 };
 
 } // namespace kotekan

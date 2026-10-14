@@ -1,111 +1,297 @@
 #include "cudaAntennaMask.hpp"
+#include "cudaUtils.hpp"
+
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
+#include <algorithm>
 
 namespace kotekan {
 
 // ============================================================================
-// Device Helpers
+// Device Helpers (Fast Branchless Bitfield Extraction)
 // ============================================================================
 
-__device__ __forceinline__ void decode_int4x2(uint8_t byte_val, int& re, int& im) {
-    // low 4 bits: sign-extended
-    int r = static_cast<int>(byte_val & 0x0FU);
-    if (r & 0x08) r -= 16;
-    // high 4 bits: sign-extended
-    int i = static_cast<int>((byte_val >> 4U) & 0x0FU);
-    if (i & 0x08) i -= 16;
-    re = r;
-    im = i;
+__device__ __forceinline__ void decode_int4x2_fast(std::uint32_t byte_val, int& re, int& im) {
+#if defined(__CUDA_ARCH__)
+    asm("bfe.s32 %0, %1, 0, 4;" : "=r"(re) : "r"(byte_val));
+    asm("bfe.s32 %0, %1, 4, 4;" : "=r"(im) : "r"(byte_val));
+#else
+    re = (static_cast<int>(byte_val) << 28) >> 28;
+    im = (static_cast<int>(byte_val) << 24) >> 28;
+#endif
 }
 
 // ============================================================================
-// Inspection Kernels
+// Multi-Moment Coalesced Inspection Kernel
 // ============================================================================
 
-__global__ void inspect_antenna_health_kernel(
-    const int4x2_t* __restrict__ voltages,
+template <int BLOCK_ANT, int BLOCK_SPEC>
+__global__ void __launch_bounds__(512, 2)
+inspect_antenna_moments_kernel(
+    const std::uint8_t* __restrict__ raw_bytes,
+    AntennaRawStats* __restrict__ raw_stats,
     float* __restrict__ antenna_powers,
-    uint32_t* __restrict__ antenna_clips,
-    size_t total_spectra,
-    size_t n_ant,
-    size_t sample_stride)
+    std::uint32_t* __restrict__ antenna_clips,
+    std::size_t num_inspected_spectra,
+    std::size_t n_elem,
+    std::size_t sample_stride)
 {
-    size_t ant = threadIdx.x;
-    if (ant >= n_ant) return;
+    const unsigned int ant = threadIdx.x;
+    const unsigned int spec_lane = threadIdx.y;
+    if (ant >= n_elem) return;
 
-    size_t num_inspected_spectra = (total_spectra + sample_stride - 1) / sample_stride;
-    size_t chunk = (num_inspected_spectra + gridDim.x - 1) / gridDim.x;
-    size_t start_s_idx = blockIdx.x * chunk;
-    size_t end_s_idx = (start_s_idx + chunk < num_inspected_spectra) ? (start_s_idx + chunk) : num_inspected_spectra;
+    unsigned long long local_re2 = 0ULL;
+    unsigned long long local_im2 = 0ULL;
+    unsigned long long local_p2  = 0ULL;
+    long long local_re           = 0LL;
+    long long local_im           = 0LL;
+    std::uint32_t local_clips    = 0U;
 
-    float local_power = 0.0f;
-    uint32_t local_clips = 0;
+    const std::size_t global_spec_start =
+        static_cast<std::size_t>(blockIdx.x) * BLOCK_SPEC + spec_lane;
+    const std::size_t global_spec_step =
+        static_cast<std::size_t>(gridDim.x) * BLOCK_SPEC;
 
-    const uint8_t* raw_bytes = reinterpret_cast<const uint8_t*>(voltages);
-
-    for (size_t s_idx = start_s_idx; s_idx < end_s_idx; ++s_idx) {
-        size_t s = s_idx * sample_stride;
-        size_t offset = s * n_ant + ant;
-        uint8_t byte_val = raw_bytes[offset];
+    for (std::size_t s_idx = global_spec_start; s_idx < num_inspected_spectra; s_idx += global_spec_step) {
+        const std::size_t s = s_idx * sample_stride;
+        const std::uint32_t byte_val = __ldg(&raw_bytes[s * n_elem + ant]);
 
         int re, im;
-        decode_int4x2(byte_val, re, im);
+        decode_int4x2_fast(byte_val, re, im);
 
-        local_power += static_cast<float>(re * re + im * im);
-        if (re == 7 || re == -8) {
-            local_clips++;
+        const int r2 = re * re;
+        const int i2 = im * im;
+        const int p  = r2 + i2;
+
+        local_re  += re;
+        local_im  += im;
+        local_re2 += static_cast<unsigned int>(r2);
+        local_im2 += static_cast<unsigned int>(i2);
+        local_p2  += static_cast<unsigned int>(p * p);
+
+        local_clips += static_cast<std::uint32_t>((re == 7) | (re == -8))
+                     + static_cast<std::uint32_t>((im == 7) | (im == -8));
+    }
+
+    // Intra-block reduction across BLOCK_SPEC rows in shared memory
+    if constexpr (BLOCK_SPEC > 1) {
+        __shared__ unsigned long long s_re2[BLOCK_SPEC][BLOCK_ANT];
+        __shared__ unsigned long long s_im2[BLOCK_SPEC][BLOCK_ANT];
+        __shared__ unsigned long long s_p2[BLOCK_SPEC][BLOCK_ANT];
+        __shared__ long long s_re[BLOCK_SPEC][BLOCK_ANT];
+        __shared__ long long s_im[BLOCK_SPEC][BLOCK_ANT];
+        __shared__ std::uint32_t s_clips[BLOCK_SPEC][BLOCK_ANT];
+
+        s_re2[spec_lane][ant]   = local_re2;
+        s_im2[spec_lane][ant]   = local_im2;
+        s_p2[spec_lane][ant]    = local_p2;
+        s_re[spec_lane][ant]    = local_re;
+        s_im[spec_lane][ant]    = local_im;
+        s_clips[spec_lane][ant] = local_clips;
+        __syncthreads();
+
+        if (spec_lane == 0) {
+            #pragma unroll
+            for (int r = 1; r < BLOCK_SPEC; ++r) {
+                local_re2   += s_re2[r][ant];
+                local_im2   += s_im2[r][ant];
+                local_p2    += s_p2[r][ant];
+                local_re    += s_re[r][ant];
+                local_im    += s_im[r][ant];
+                local_clips += s_clips[r][ant];
+            }
         }
-        if (im == 7 || im == -8) {
-            local_clips++;
+    }
+
+    if (spec_lane == 0) {
+        if (raw_stats != nullptr) {
+            atomicAdd(&raw_stats[ant].sum_re2, local_re2);
+            atomicAdd(&raw_stats[ant].sum_im2, local_im2);
+            atomicAdd(&raw_stats[ant].sum_p2,  local_p2);
+            atomicAdd(reinterpret_cast<unsigned long long*>(&raw_stats[ant].sum_re),
+                      static_cast<unsigned long long>(local_re));
+            atomicAdd(reinterpret_cast<unsigned long long*>(&raw_stats[ant].sum_im),
+                      static_cast<unsigned long long>(local_im));
+            atomicAdd(&raw_stats[ant].clips, local_clips);
         }
-    }
-
-    if (local_power > 0.0f) {
-        atomicAdd(&antenna_powers[ant], local_power);
-    }
-    if (local_clips > 0) {
-        atomicAdd(&antenna_clips[ant], local_clips);
-    }
-}
-
-__global__ void normalize_antenna_metrics_kernel(
-    float* __restrict__ antenna_powers,
-    size_t num_inspected_spectra,
-    size_t n_ant)
-{
-    size_t ant = blockIdx.x * blockDim.x + threadIdx.x;
-    if (ant >= n_ant) return;
-    if (num_inspected_spectra > 0) {
-        antenna_powers[ant] /= static_cast<float>(num_inspected_spectra);
+        const unsigned long long total_p = local_re2 + local_im2;
+        if (antenna_powers != nullptr && total_p > 0ULL && num_inspected_spectra > 0) {
+            const float norm_p =
+                static_cast<float>(static_cast<double>(total_p) / static_cast<double>(num_inspected_spectra));
+            atomicAdd(&antenna_powers[ant], norm_p);
+        }
+        if (antenna_clips != nullptr && local_clips > 0U) {
+            atomicAdd(&antenna_clips[ant], local_clips);
+        }
     }
 }
 
 // ============================================================================
-// Blanking Kernels
+// Coalesced Blanking & Extraction Kernels
 // ============================================================================
 
-__global__ void zero_bad_antennas_kernel(
-    int4x2_t* __restrict__ voltages,
+__global__ void zero_bad_antennas_coalesced_kernel(
+    std::uint8_t* __restrict__ raw_bytes,
     const int* __restrict__ bad_antennas,
     int num_bad_antennas,
-    size_t total_spectra,
-    size_t n_ant)
+    std::size_t total_spectra,
+    std::size_t n_ant)
 {
-    size_t s = blockIdx.x * blockDim.x + threadIdx.x;
+    __shared__ int s_bad[MAX_MASK_ANTENNAS];
+    const unsigned int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    const unsigned int block_threads = blockDim.x * blockDim.y;
+
+    for (unsigned int i = tid; i < static_cast<unsigned int>(num_bad_antennas); i += block_threads) {
+        s_bad[i] = bad_antennas[i];
+    }
+    __syncthreads();
+
+    // 2D mapping: threadIdx.x indexes bad antennas, threadIdx.y indexes spectra
+    const std::size_t s = static_cast<std::size_t>(blockIdx.x) * blockDim.y + threadIdx.y;
     if (s >= total_spectra) return;
 
-    size_t base_offset = s * n_ant;
-    uint8_t* raw_bytes = reinterpret_cast<uint8_t*>(voltages);
-    for (int i = 0; i < num_bad_antennas; ++i) {
-        int ant = bad_antennas[i];
-        raw_bytes[base_offset + ant] = 0;
+    std::uint8_t* row_ptr = raw_bytes + s * n_ant;
+    for (int i = static_cast<int>(threadIdx.x); i < num_bad_antennas; i += static_cast<int>(blockDim.x)) {
+        row_ptr[s_bad[i]] = 0U;
+    }
+}
+
+__global__ void extract_alive_antennas_coalesced_kernel(
+    const std::uint8_t* __restrict__ in_bytes,
+    std::uint8_t* __restrict__ out_bytes,
+    const int* __restrict__ alive_antennas,
+    int num_to_extract,
+    int max_alive_antennas,
+    std::size_t total_spectra,
+    std::size_t n_ant)
+{
+    __shared__ int s_alive[MAX_MASK_ANTENNAS];
+    const unsigned int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    const unsigned int block_threads = blockDim.x * blockDim.y;
+
+    for (unsigned int i = tid; i < static_cast<unsigned int>(num_to_extract); i += block_threads) {
+        s_alive[i] = alive_antennas[i];
+    }
+    __syncthreads();
+
+    // One warp (blockDim.x = 32) per spectrum s -> 100% coalesced writes to out_row
+    const std::size_t s = static_cast<std::size_t>(blockIdx.x) * blockDim.y + threadIdx.y;
+    if (s >= total_spectra) return;
+
+    const std::uint8_t* in_row = in_bytes + s * n_ant;
+    std::uint8_t* out_row = out_bytes + s * static_cast<std::size_t>(max_alive_antennas);
+
+    for (int i = static_cast<int>(threadIdx.x); i < max_alive_antennas; i += static_cast<int>(blockDim.x)) {
+        out_row[i] = (i < num_to_extract) ? __ldg(&in_row[s_alive[i]]) : 0U;
+    }
+}
+
+__global__ void inject_faults_coalesced_kernel(
+    std::uint8_t* __restrict__ raw_bytes,
+    const std::uint8_t* __restrict__ fault_types,
+    std::size_t total_spectra,
+    std::size_t n_ant,
+    unsigned int seed)
+{
+    __shared__ std::uint8_t s_faults[MAX_MASK_ANTENNAS];
+    const unsigned int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    const unsigned int block_threads = blockDim.x * blockDim.y;
+
+    for (unsigned int a = tid; a < static_cast<unsigned int>(n_ant); a += block_threads) {
+        s_faults[a] = fault_types[a];
+    }
+    __syncthreads();
+
+    const std::size_t s = static_cast<std::size_t>(blockIdx.x) * blockDim.y + threadIdx.y;
+    if (s >= total_spectra) return;
+
+    std::uint8_t* row_ptr = raw_bytes + s * n_ant;
+    for (std::size_t a = threadIdx.x; a < n_ant; a += blockDim.x) {
+        const std::uint8_t ft = s_faults[a];
+        if (ft == 1U) {
+            // Dead antenna
+            row_ptr[a] = 0U;
+        } else if (ft == 2U) {
+            // Saturated ADC rails (+7 / -8)
+            std::uint32_t h = seed + static_cast<unsigned int>(s) * 31U + static_cast<unsigned int>(a) * 104729U;
+            h = (h ^ (h >> 16U)) * 0x45d9f3bU;
+            const int r = (h & 1U) ? 7 : -8;
+            const int i = (h & 2U) ? 7 : -8;
+            row_ptr[a] = static_cast<std::uint8_t>((r & 0x0FU) | ((i & 0x0FU) << 4U));
+        } else if (ft == 3U) {
+            // Stuck bit / DC lock (constant 3 + 2j -> power = 13, 0 clips)
+            row_ptr[a] = static_cast<std::uint8_t>((3 & 0x0FU) | ((2 & 0x0FU) << 4U));
+        } else if (ft == 4U) {
+            // Impulsive RFI (1% duty-cycle rail bursts -> normal mean power, high kurtosis)
+            if ((s & 127U) == 0U) {
+                row_ptr[a] = static_cast<std::uint8_t>((7 & 0x0FU) | ((7 & 0x0FU) << 4U));
+            }
+        }
     }
 }
 
 // ============================================================================
 // Launch Wrappers
 // ============================================================================
+
+void launch_inspect_antenna_moments(
+    const int4x2_t* __restrict__ d_voltages,
+    AntennaRawStats* __restrict__ d_raw_stats,
+    float* __restrict__ d_antenna_powers,
+    std::uint32_t* __restrict__ d_antenna_clips,
+    std::size_t n_time,
+    std::size_t n_freq,
+    std::size_t n_elem,
+    std::size_t sample_stride,
+    cudaStream_t stream)
+{
+    const std::size_t total_spectra = n_time * n_freq;
+    if (total_spectra == 0 || n_elem == 0) return;
+    if (sample_stride < 1) sample_stride = 1;
+
+    if (d_raw_stats != nullptr) {
+        cudaMemsetAsync(d_raw_stats, 0, n_elem * sizeof(AntennaRawStats), stream);
+    }
+    if (d_antenna_powers != nullptr) {
+        cudaMemsetAsync(d_antenna_powers, 0, n_elem * sizeof(float), stream);
+    }
+    if (d_antenna_clips != nullptr) {
+        cudaMemsetAsync(d_antenna_clips, 0, n_elem * sizeof(std::uint32_t), stream);
+    }
+
+    const std::size_t num_inspected_spectra = (total_spectra + sample_stride - 1) / sample_stride;
+    const auto* raw_bytes = reinterpret_cast<const std::uint8_t*>(d_voltages);
+
+    // 256 blocks provides full wave saturation across all SMs
+    constexpr unsigned int NUM_BLOCKS = 256;
+
+    if (n_elem <= 32) {
+        const dim3 block(32, 8);
+        inspect_antenna_moments_kernel<32, 8><<<NUM_BLOCKS, block, 0, stream>>>(
+            raw_bytes, d_raw_stats, d_antenna_powers, d_antenna_clips,
+            num_inspected_spectra, n_elem, sample_stride);
+    } else if (n_elem <= 64) {
+        const dim3 block(64, 4);
+        inspect_antenna_moments_kernel<64, 4><<<NUM_BLOCKS, block, 0, stream>>>(
+            raw_bytes, d_raw_stats, d_antenna_powers, d_antenna_clips,
+            num_inspected_spectra, n_elem, sample_stride);
+    } else if (n_elem <= 128) {
+        const dim3 block(128, 2);
+        inspect_antenna_moments_kernel<128, 2><<<NUM_BLOCKS, block, 0, stream>>>(
+            raw_bytes, d_raw_stats, d_antenna_powers, d_antenna_clips,
+            num_inspected_spectra, n_elem, sample_stride);
+    } else if (n_elem <= 256) {
+        const dim3 block(256, 1);
+        inspect_antenna_moments_kernel<256, 1><<<NUM_BLOCKS, block, 0, stream>>>(
+            raw_bytes, d_raw_stats, d_antenna_powers, d_antenna_clips,
+            num_inspected_spectra, n_elem, sample_stride);
+    } else {
+        const dim3 block(512, 1);
+        inspect_antenna_moments_kernel<512, 1><<<NUM_BLOCKS, block, 0, stream>>>(
+            raw_bytes, d_raw_stats, d_antenna_powers, d_antenna_clips,
+            num_inspected_spectra, n_elem, sample_stride);
+    }
+}
 
 void launch_inspect_antenna_health(
     const int4x2_t* __restrict__ d_voltages,
@@ -117,25 +303,9 @@ void launch_inspect_antenna_health(
     std::size_t sample_stride,
     cudaStream_t stream)
 {
-    const std::size_t total_spectra = n_time * n_freq;
-    if (sample_stride < 1) sample_stride = 1;
-
-    cudaMemsetAsync(d_antenna_powers, 0, n_ant * sizeof(float), stream);
-    cudaMemsetAsync(d_antenna_clips, 0, n_ant * sizeof(std::uint32_t), stream);
-
-    // Use 128 blocks along time-freq dimension, 256 threads per block (one thread per antenna)
-    const unsigned int num_blocks = 128;
-    const unsigned int threads_per_block = static_cast<unsigned int>(n_ant <= 256 ? 256 : n_ant);
-
-    inspect_antenna_health_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
-        d_voltages, d_antenna_powers, d_antenna_clips, total_spectra, n_ant, sample_stride);
-
-    // Normalize power by inspected count
-    const std::size_t num_inspected_spectra = (total_spectra + sample_stride - 1) / sample_stride;
-    const unsigned int norm_threads = 256;
-    const unsigned int norm_blocks = static_cast<unsigned int>((n_ant + norm_threads - 1) / norm_threads);
-    normalize_antenna_metrics_kernel<<<norm_blocks, norm_threads, 0, stream>>>(
-        d_antenna_powers, num_inspected_spectra, n_ant);
+    launch_inspect_antenna_moments(
+        d_voltages, nullptr, d_antenna_powers, d_antenna_clips,
+        n_time, n_freq, n_ant, sample_stride, stream);
 }
 
 void launch_zero_bad_antennas(
@@ -146,42 +316,22 @@ void launch_zero_bad_antennas(
     std::size_t n_ant,
     cudaStream_t stream)
 {
-    if (num_bad_antennas <= 0) return;
+    if (num_bad_antennas <= 0 || total_spectra == 0) return;
 
     if (static_cast<std::size_t>(num_bad_antennas) >= n_ant) {
-        cudaMemsetAsync(d_voltages, 0, total_spectra * n_ant * sizeof(uint8_t), stream);
+        cudaMemsetAsync(d_voltages, 0, total_spectra * n_ant * sizeof(std::uint8_t), stream);
         return;
     }
 
-    const unsigned int threads_per_block = 256;
-    const unsigned int num_blocks = static_cast<unsigned int>((total_spectra + threads_per_block - 1) / threads_per_block);
+    const unsigned int threads_x = (num_bad_antennas <= 8) ? 8U : ((num_bad_antennas <= 16) ? 16U : 32U);
+    const unsigned int threads_y = 256U / threads_x;
+    const dim3 block(threads_x, threads_y);
+    const unsigned int num_blocks =
+        static_cast<unsigned int>((total_spectra + threads_y - 1) / threads_y);
 
-    zero_bad_antennas_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
-        d_voltages, d_bad_antennas, num_bad_antennas, total_spectra, n_ant);
-}
-
-__global__ void extract_alive_antennas_kernel(
-    const int4x2_t* __restrict__ voltages,
-    int4x2_t* __restrict__ alive_voltages,
-    const int* __restrict__ alive_antennas,
-    int num_to_extract,
-    int max_alive_antennas,
-    size_t total_spectra,
-    size_t n_ant)
-{
-    size_t s = blockIdx.x * blockDim.x + threadIdx.x;
-    if (s >= total_spectra) return;
-
-    const uint8_t* in_bytes = reinterpret_cast<const uint8_t*>(voltages) + s * n_ant;
-    uint8_t* out_bytes = reinterpret_cast<uint8_t*>(alive_voltages) + s * max_alive_antennas;
-
-    for (int i = 0; i < num_to_extract; ++i) {
-        int ant = alive_antennas[i];
-        out_bytes[i] = in_bytes[ant];
-    }
-    for (int i = num_to_extract; i < max_alive_antennas; ++i) {
-        out_bytes[i] = 0;
-    }
+    zero_bad_antennas_coalesced_kernel<<<num_blocks, block, 0, stream>>>(
+        reinterpret_cast<std::uint8_t*>(d_voltages),
+        d_bad_antennas, num_bad_antennas, total_spectra, n_ant);
 }
 
 void launch_extract_alive_antennas(
@@ -195,39 +345,22 @@ void launch_extract_alive_antennas(
     cudaStream_t stream)
 {
     if (max_alive_antennas <= 0 || total_spectra == 0) return;
-
-    const unsigned int threads_per_block = 256;
-    const unsigned int num_blocks = static_cast<unsigned int>((total_spectra + threads_per_block - 1) / threads_per_block);
-
-    extract_alive_antennas_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
-        d_voltages, d_alive_voltages, d_alive_antennas, num_to_extract, max_alive_antennas, total_spectra, n_ant);
-}
-
-__global__ void inject_faults_kernel(
-    int4x2_t* __restrict__ voltages,
-    const uint8_t* __restrict__ fault_types,
-    size_t total_spectra,
-    size_t n_ant,
-    unsigned int seed)
-{
-    size_t s = blockIdx.x * blockDim.x + threadIdx.x;
-    if (s >= total_spectra) return;
-
-    size_t base = s * n_ant;
-    uint8_t* raw = reinterpret_cast<uint8_t*>(voltages);
-
-    for (size_t a = 0; a < n_ant; ++a) {
-        uint8_t ft = fault_types[a];
-        if (ft == 1) {
-            raw[base + a] = 0;
-        } else if (ft == 2) {
-            uint32_t h = (seed + static_cast<unsigned int>(s) * 31U + static_cast<unsigned int>(a) * 104729U);
-            h = (h ^ (h >> 16U)) * 0x45d9f3bU;
-            int r = (h & 1U) ? 7 : -8;
-            int i = (h & 2U) ? 7 : -8;
-            raw[base + a] = static_cast<uint8_t>((r & 0x0FU) | ((i & 0x0FU) << 4U));
-        }
+    if (num_to_extract < 0) num_to_extract = 0;
+    if (num_to_extract > static_cast<int>(MAX_MASK_ANTENNAS)) {
+        num_to_extract = static_cast<int>(MAX_MASK_ANTENNAS);
     }
+
+    // 32 threads (1 warp) per spectrum row -> coalesced reads & writes
+    constexpr unsigned int WARP_SIZE = 32U;
+    constexpr unsigned int SPECTRA_PER_BLOCK = 8U;
+    const dim3 block(WARP_SIZE, SPECTRA_PER_BLOCK);
+    const unsigned int num_blocks =
+        static_cast<unsigned int>((total_spectra + SPECTRA_PER_BLOCK - 1) / SPECTRA_PER_BLOCK);
+
+    extract_alive_antennas_coalesced_kernel<<<num_blocks, block, 0, stream>>>(
+        reinterpret_cast<const std::uint8_t*>(d_voltages),
+        reinterpret_cast<std::uint8_t*>(d_alive_voltages),
+        d_alive_antennas, num_to_extract, max_alive_antennas, total_spectra, n_ant);
 }
 
 void launch_inject_faults(
@@ -238,10 +371,17 @@ void launch_inject_faults(
     unsigned int seed,
     cudaStream_t stream)
 {
-    const unsigned int tpb = 256;
-    const unsigned int nb = static_cast<unsigned int>((total_spectra + tpb - 1) / tpb);
-    inject_faults_kernel<<<nb, tpb, 0, stream>>>(
-        d_voltages, d_fault_types, total_spectra, n_ant, seed);
+    if (total_spectra == 0 || n_ant == 0) return;
+
+    constexpr unsigned int WARP_SIZE = 32U;
+    constexpr unsigned int SPECTRA_PER_BLOCK = 8U;
+    const dim3 block(WARP_SIZE, SPECTRA_PER_BLOCK);
+    const unsigned int num_blocks =
+        static_cast<unsigned int>((total_spectra + SPECTRA_PER_BLOCK - 1) / SPECTRA_PER_BLOCK);
+
+    inject_faults_coalesced_kernel<<<num_blocks, block, 0, stream>>>(
+        reinterpret_cast<std::uint8_t*>(d_voltages),
+        d_fault_types, total_spectra, n_ant, seed);
 }
 
 } // namespace kotekan

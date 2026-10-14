@@ -29,7 +29,21 @@ AntennaMaskConfig cudaAntennaMaskCommand::_shared_config;
 std::array<AntennaHealthMetrics, MAX_MASK_ANTENNAS> cudaAntennaMaskCommand::_shared_metrics{};
 std::array<std::uint8_t, MAX_MASK_ANTENNAS> cudaAntennaMaskCommand::_shared_mask{};
 bool cudaAntennaMaskCommand::_endpoints_registered = false;
-bool cudaAntennaMaskCommand::_mask_dirty = true;
+
+namespace {
+
+float compute_median(std::vector<float>& vals) {
+    if (vals.empty()) return 0.0f;
+    const std::size_t n = vals.size();
+    const std::size_t mid = n / 2;
+    std::nth_element(vals.begin(), vals.begin() + mid, vals.end());
+    const float m1 = vals[mid];
+    if ((n & 1U) != 0U) return m1;
+    std::nth_element(vals.begin(), vals.begin() + (mid - 1), vals.end());
+    return 0.5f * (m1 + vals[mid - 1]);
+}
+
+} // namespace
 
 cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string& unique_name,
                                                bufferContainer& host_buffers,
@@ -37,7 +51,21 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
     cudaCommand(config, unique_name, host_buffers, device, inst, no_cuda_command_state,
                 "cudaAntennaMaskCommand") {
 
-    _num_elements = config.get<int>(unique_name, "num_elements");
+    _num_pols = config.get_default<int>(unique_name, "num_pols", 1);
+    if (config.exists(unique_name, "num_antennas")) {
+        _num_antennas = config.get<int>(unique_name, "num_antennas");
+        _num_elements = config.get_default<int>(unique_name, "num_elements",
+                                                _num_antennas * _num_pols);
+    } else {
+        _num_elements = config.get<int>(unique_name, "num_elements");
+        _num_antennas = _num_elements / std::max(1, _num_pols);
+    }
+
+    const std::string pol_layout_str =
+        config.get_default<std::string>(unique_name, "pol_layout", "interleaved");
+    _pol_layout = (pol_layout_str == "planar") ? DirectPolLayout::PLANAR
+                                               : DirectPolLayout::INTERLEAVED;
+
     _num_local_freq = config.get<int>(unique_name, "num_local_freq");
     _samples_per_data_set = config.get<int>(unique_name, "samples_per_data_set");
     _buffer_depth = config.get<int>(unique_name, "buffer_depth");
@@ -50,6 +78,13 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
 
     {
         std::lock_guard<std::mutex> lock(_global_mutex);
+        _shared_config.num_antennas = static_cast<std::size_t>(_num_antennas);
+        _shared_config.num_pols = static_cast<std::size_t>(_num_pols);
+        _shared_config.pol_layout = _pol_layout;
+        _shared_config.antenna_order = _antenna_order;
+        _shared_config.couple_pol_masks =
+            config.get_default<bool>(unique_name, "couple_pol_masks", false);
+
         _shared_config.auto_detect_enabled =
             config.get_default<bool>(unique_name, "auto_detect_enabled", true);
         _shared_config.blank_voltages_enabled =
@@ -60,27 +95,51 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
             config.get_default<float>(unique_name, "sat_power_threshold", 80.0f);
         _shared_config.clip_fraction_threshold =
             config.get_default<float>(unique_name, "clip_fraction_threshold", 0.15f);
+
+        _shared_config.enable_dc_lock_check =
+            config.get_default<bool>(unique_name, "enable_dc_lock_check", true);
+        _shared_config.max_dc_fraction =
+            config.get_default<float>(unique_name, "max_dc_fraction", 0.35f);
+
+        _shared_config.enable_iq_imbalance_check =
+            config.get_default<bool>(unique_name, "enable_iq_imbalance_check", true);
+        _shared_config.max_iq_imbalance =
+            config.get_default<float>(unique_name, "max_iq_imbalance", 0.50f);
+
+        _shared_config.enable_kurtosis_check =
+            config.get_default<bool>(unique_name, "enable_kurtosis_check", true);
+        _shared_config.min_kurtosis_threshold =
+            config.get_default<float>(unique_name, "min_kurtosis_threshold", 1.15f);
+        _shared_config.max_kurtosis_threshold =
+            config.get_default<float>(unique_name, "max_kurtosis_threshold", 4.50f);
+
+        _shared_config.enable_mad_outlier_check =
+            config.get_default<bool>(unique_name, "enable_mad_outlier_check", true);
+        _shared_config.mad_sigma_threshold =
+            config.get_default<float>(unique_name, "mad_sigma_threshold", 6.0f);
+
         _shared_config.revival_frames =
             static_cast<std::uint16_t>(config.get_default<int>(unique_name, "revival_frames", 5));
         _shared_config.sample_stride =
             static_cast<std::size_t>(config.get_default<int>(unique_name, "sample_stride", 1));
 
-        // Initialize masks
         _shared_mask.fill(1);
         _shared_config.manual_mask.fill(1);
 
-        auto to_raw = [&](int ant) {
-            return (_antenna_order == "descending") ? ((_num_elements - 1) - ant) : ant;
+        auto set_phys_ant = [&](int phys_ant, std::uint8_t state) {
+            for (int r = 0; r < _num_elements && r < static_cast<int>(MAX_MASK_ANTENNAS); ++r) {
+                if (static_cast<int>(_shared_config.raw_elem_to_physical_ant(r)) == phys_ant) {
+                    _shared_config.manual_mask[r] = state;
+                    _shared_mask[r] = state;
+                    _shared_metrics[r].status = (state == 0) ? AntennaHealthStatus::MANUAL_MASK
+                                                             : AntennaHealthStatus::HEALTHY;
+                }
+            }
         };
 
         auto bad_antennas = config.get_default<std::vector<int>>(unique_name, "bad_antennas", {});
         for (int ant : bad_antennas) {
-            int elem = to_raw(ant);
-            if (elem >= 0 && elem < _num_elements && elem < static_cast<int>(MAX_MASK_ANTENNAS)) {
-                _shared_config.manual_mask[elem] = 0;
-                _shared_mask[elem] = 0;
-                _shared_metrics[elem].status = AntennaHealthStatus::MANUAL_MASK;
-            }
+            set_phys_ant(ant, 0);
         }
 
         auto bad_elements = config.get_default<std::vector<int>>(unique_name, "bad_elements", {});
@@ -102,11 +161,7 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
                 _shared_metrics[i].consecutive_healthy = 0;
             }
             for (int ant : active_antennas) {
-                int r = to_raw(ant);
-                if (r >= 0 && r < _num_elements && r < static_cast<int>(MAX_MASK_ANTENNAS)) {
-                    _shared_config.manual_mask[r] = 1;
-                    _shared_mask[r] = 1;
-                }
+                set_phys_ant(ant, 1);
             }
         }
 
@@ -127,7 +182,6 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
             }
         }
 
-        // Initialize metrics
         for (std::size_t i = 0; i < MAX_MASK_ANTENNAS; ++i) {
             if (_shared_mask[i] != 0) {
                 _shared_metrics[i].status = AntennaHealthStatus::HEALTHY;
@@ -135,78 +189,110 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
             }
         }
 
-        _mask_dirty = true;
+        _shared_config.mask_generation++;
+        int n_active_init = 0;
+        for (int i = 0; i < _num_elements && i < static_cast<int>(MAX_MASK_ANTENNAS); ++i) {
+            if (_shared_mask[i] != 0) n_active_init++;
+        }
+        cudaDirectBeamTrackerCommand::set_shared_antenna_mask(_shared_mask, n_active_init);
 
-        // Register REST endpoints once
         if (!_endpoints_registered) {
             auto& rest = restServer::instance();
 
             // 1. GET /antenna_mask/status
-            int num_elements = _num_elements;
-            auto status_cb = [this, num_elements](connectionInstance& conn) {
+            auto status_cb = [](connectionInstance& conn) {
                 nlohmann::json reply;
                 std::lock_guard<std::mutex> lk(_global_mutex);
 
-                reply["version"] = "Kotekan Antenna Masking Stage v1.0";
-                reply["num_elements"] = num_elements;
-                reply["antenna_order"] = _antenna_order;
+                const int n_elem = static_cast<int>(
+                    std::min(_shared_config.total_elements(), MAX_MASK_ANTENNAS));
+
+                reply["version"] = "Kotekan Antenna Masking Stage v2.0 (Multi-Moment & MAD)";
+                reply["num_antennas"] = _shared_config.num_antennas;
+                reply["num_pols"] = _shared_config.num_pols;
+                reply["num_elements"] = n_elem;
+                reply["antenna_order"] = _shared_config.antenna_order;
                 reply["auto_detect_enabled"] = _shared_config.auto_detect_enabled;
                 reply["blank_voltages_enabled"] = _shared_config.blank_voltages_enabled;
+                reply["couple_pol_masks"] = _shared_config.couple_pol_masks;
                 reply["thresholds"] = {
                     {"dead_power_threshold", _shared_config.dead_power_threshold},
                     {"sat_power_threshold", _shared_config.sat_power_threshold},
                     {"clip_fraction_threshold", _shared_config.clip_fraction_threshold},
+                    {"max_dc_fraction", _shared_config.max_dc_fraction},
+                    {"max_iq_imbalance", _shared_config.max_iq_imbalance},
+                    {"min_kurtosis_threshold", _shared_config.min_kurtosis_threshold},
+                    {"max_kurtosis_threshold", _shared_config.max_kurtosis_threshold},
+                    {"mad_sigma_threshold", _shared_config.mad_sigma_threshold},
                     {"revival_frames", _shared_config.revival_frames},
                     {"sample_stride", _shared_config.sample_stride}};
 
                 int active_count = 0;
                 int dead_count = 0;
                 int sat_count = 0;
+                int dc_count = 0;
+                int rfi_count = 0;
+                int iq_count = 0;
+                int outlier_count = 0;
                 int manual_count = 0;
                 nlohmann::json ant_array = nlohmann::json::array();
-
-                auto to_phys = [&](int raw_id) {
-                    return (_antenna_order == "descending") ? ((num_elements - 1) - raw_id)
-                                                            : raw_id;
-                };
-
-                for (int a = 0; a < num_elements; ++a) {
-                    const auto& m = _shared_metrics[a];
-                    const bool active = (_shared_mask[a] != 0);
-                    if (active)
-                        active_count++;
-                    if (m.status == AntennaHealthStatus::DEAD)
-                        dead_count++;
-                    else if (m.status == AntennaHealthStatus::SATURATED)
-                        sat_count++;
-                    else if (m.status == AntennaHealthStatus::MANUAL_MASK)
-                        manual_count++;
-
-                    ant_array.push_back({{"id", a},
-                                         {"raw_id", a},
-                                         {"physical_id", to_phys(a)},
-                                         {"active", active},
-                                         {"status", antenna_health_status_to_string(m.status)},
-                                         {"power", m.power},
-                                         {"clipping_fraction", m.clipping_fraction},
-                                         {"clipped_count", m.clipped_count},
-                                         {"consecutive_healthy", m.consecutive_healthy}});
-                }
-
-                reply["active_antennas"] = active_count;
-                reply["masked_antennas"] = num_elements - active_count;
-                reply["dead_antennas"] = dead_count;
-                reply["saturated_antennas"] = sat_count;
-                reply["manual_masked_antennas"] = manual_count;
-
                 nlohmann::json active_indices = nlohmann::json::array();
                 nlohmann::json active_phys = nlohmann::json::array();
-                for (int a = 0; a < num_elements; ++a) {
-                    if (_shared_mask[a] != 0) {
+
+                for (int a = 0; a < n_elem; ++a) {
+                    const auto& m = _shared_metrics[a];
+                    const bool active = (_shared_mask[a] != 0);
+                    const std::size_t phys_id = _shared_config.raw_elem_to_physical_ant(a);
+                    if (active) {
+                        active_count++;
                         active_indices.push_back(a);
-                        active_phys.push_back(to_phys(a));
+                        active_phys.push_back(phys_id);
                     }
+                    switch (m.status) {
+                        case AntennaHealthStatus::DEAD: dead_count++; break;
+                        case AntennaHealthStatus::SATURATED: sat_count++; break;
+                        case AntennaHealthStatus::DC_LOCKED: dc_count++; break;
+                        case AntennaHealthStatus::RFI_KURTOSIS: rfi_count++; break;
+                        case AntennaHealthStatus::IQ_IMBALANCE: iq_count++; break;
+                        case AntennaHealthStatus::OUTLIER_POWER: outlier_count++; break;
+                        case AntennaHealthStatus::MANUAL_MASK: manual_count++; break;
+                        default: break;
+                    }
+
+                    ant_array.push_back({
+                        {"id", a},
+                        {"raw_id", a},
+                        {"physical_id", phys_id},
+                        {"pol", _shared_config.raw_elem_to_pol(a)},
+                        {"active", active},
+                        {"status", antenna_health_status_to_string(m.status)},
+                        {"power", m.power},
+                        {"ac_variance", m.ac_variance},
+                        {"dc_fraction", m.dc_fraction},
+                        {"clipping_fraction", m.clipping_fraction},
+                        {"kurtosis", m.kurtosis},
+                        {"iq_imbalance", m.iq_imbalance},
+                        {"robust_z_score", m.robust_z_score},
+                        {"clipped_count", m.clipped_count},
+                        {"consecutive_healthy", m.consecutive_healthy}});
                 }
+
+                // Dual keys for complete backwards compatibility
+                reply["active_antennas"] = active_count;
+                reply["active_elements"] = active_count;
+                reply["masked_antennas"] = n_elem - active_count;
+                reply["masked_elements"] = n_elem - active_count;
+                reply["dead_antennas"] = dead_count;
+                reply["dead_elements"] = dead_count;
+                reply["saturated_antennas"] = sat_count;
+                reply["saturated_elements"] = sat_count;
+                reply["dc_locked_elements"] = dc_count;
+                reply["rfi_kurtosis_elements"] = rfi_count;
+                reply["iq_imbalance_elements"] = iq_count;
+                reply["outlier_power_elements"] = outlier_count;
+                reply["manual_masked_antennas"] = manual_count;
+                reply["manual_masked_elements"] = manual_count;
+
                 reply["active_raw_elements"] = active_indices;
                 reply["active_physical_antennas"] = active_phys;
                 reply["antennas"] = ant_array;
@@ -215,147 +301,97 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
             };
             rest.register_get_callback("/antenna_mask/status", status_cb);
 
-            // 2. POST /antenna_mask/mask
-            auto mask_cb = [this, num_elements](connectionInstance& conn, nlohmann::json& j) {
+            // Helper lambda for masking / unmasking via REST
+            auto apply_rest_mask = [](connectionInstance& conn, nlohmann::json& j, bool enable) {
                 try {
+                    std::lock_guard<std::mutex> lk(_global_mutex);
+                    const std::size_t n_elem =
+                        std::min(_shared_config.total_elements(), MAX_MASK_ANTENNAS);
                     bool is_raw = j.value("is_raw", false);
-                    std::size_t raw_id = 0;
-                    std::size_t phys_id = 0;
-                    if (j.contains("physical_id")) {
-                        phys_id = j["physical_id"];
-                        raw_id = (_antenna_order == "descending") ? ((num_elements - 1) - phys_id)
-                                                                  : phys_id;
-                    } else if (j.contains("raw_id")) {
-                        raw_id = j["raw_id"];
-                        phys_id = (_antenna_order == "descending") ? ((num_elements - 1) - raw_id)
-                                                                   : raw_id;
-                    } else if (j.contains("antenna_id")) {
-                        std::size_t ant_id = j["antenna_id"];
-                        if (is_raw) {
-                            raw_id = ant_id;
-                            phys_id = (_antenna_order == "descending")
-                                          ? ((num_elements - 1) - raw_id)
-                                          : raw_id;
-                        } else {
-                            phys_id = ant_id;
-                            raw_id = (_antenna_order == "descending")
-                                         ? ((num_elements - 1) - phys_id)
-                                         : phys_id;
+                    const std::uint8_t val = enable ? 1 : 0;
+
+                    if (j.contains("raw_id") || (j.contains("antenna_id") && is_raw)) {
+                        std::size_t raw_id =
+                            j.contains("raw_id") ? j["raw_id"] : j["antenna_id"];
+                        if (raw_id >= n_elem) {
+                            conn.send_error("raw_id exceeds total elements",
+                                            HTTP_RESPONSE::BAD_REQUEST);
+                            return;
                         }
+                        _shared_config.manual_mask[raw_id] = val;
+                        _shared_mask[raw_id] = val;
+                        _shared_metrics[raw_id].status =
+                            enable ? AntennaHealthStatus::HEALTHY : AntennaHealthStatus::MANUAL_MASK;
+                        _shared_metrics[raw_id].consecutive_healthy =
+                            enable ? _shared_config.revival_frames : 0;
+                        INFO_NON_OO("AntennaMask: Raw element {:d} {:s} applied via REST",
+                                    raw_id, enable ? "UNMASK" : "MANUAL MASK");
+                    } else if (j.contains("physical_id") || j.contains("antenna_id")) {
+                        std::size_t phys_id =
+                            j.contains("physical_id") ? j["physical_id"] : j["antenna_id"];
+                        if (phys_id >= _shared_config.num_antennas) {
+                            conn.send_error("physical_id exceeds num_antennas",
+                                            HTTP_RESPONSE::BAD_REQUEST);
+                            return;
+                        }
+                        for (std::size_t r = 0; r < n_elem; ++r) {
+                            if (_shared_config.raw_elem_to_physical_ant(r) == phys_id) {
+                                _shared_config.manual_mask[r] = val;
+                                _shared_mask[r] = val;
+                                _shared_metrics[r].status = enable
+                                                                ? AntennaHealthStatus::HEALTHY
+                                                                : AntennaHealthStatus::MANUAL_MASK;
+                                _shared_metrics[r].consecutive_healthy =
+                                    enable ? _shared_config.revival_frames : 0;
+                            }
+                        }
+                        INFO_NON_OO("AntennaMask: Physical antenna {:d} {:s} applied via REST",
+                                    phys_id, enable ? "UNMASK" : "MANUAL MASK");
                     } else {
                         conn.send_error("Missing antenna_id, physical_id, or raw_id",
                                         HTTP_RESPONSE::BAD_REQUEST);
                         return;
                     }
 
-                    if (raw_id >= MAX_MASK_ANTENNAS) {
-                        conn.send_error("antenna index exceeds MAX_MASK_ANTENNAS",
-                                        HTTP_RESPONSE::BAD_REQUEST);
-                        return;
-                    }
-                    std::lock_guard<std::mutex> lk(_global_mutex);
-                    _shared_config.manual_mask[raw_id] = 0;
-                    _shared_mask[raw_id] = 0;
-                    _shared_metrics[raw_id].status = AntennaHealthStatus::MANUAL_MASK;
-                    _shared_metrics[raw_id].consecutive_healthy = 0;
-                    _mask_dirty = true;
                     int n_active = 0;
-                    for (int i = 0; i < num_elements; ++i) {
-                        if (_shared_mask[i] != 0)
-                            n_active++;
+                    for (std::size_t i = 0; i < n_elem; ++i) {
+                        if (_shared_mask[i] != 0) n_active++;
                     }
+                    _shared_config.mask_generation++;
                     cudaDirectBeamTrackerCommand::set_shared_antenna_mask(_shared_mask, n_active);
-                    INFO_NON_OO(
-                        "AntennaMask: Physical antenna {:d} (raw element {:d}) MANUAL MASK applied",
-                        phys_id, raw_id);
                     conn.send_text_reply(fmt::format(
-                        "Physical antenna {:d} (raw element {:d}) masked successfully\n", phys_id,
-                        raw_id));
+                        "Mask updated: {:d}/{:d} active elements\n", n_active, n_elem));
                 } catch (const std::exception& e) {
                     conn.send_error(e.what(), HTTP_RESPONSE::BAD_REQUEST);
                 }
             };
-            rest.register_post_callback("/antenna_mask/mask", mask_cb);
 
-            // 3. POST /antenna_mask/unmask
-            auto unmask_cb = [this, num_elements](connectionInstance& conn, nlohmann::json& j) {
-                try {
-                    bool is_raw = j.value("is_raw", false);
-                    std::size_t raw_id = 0;
-                    std::size_t phys_id = 0;
-                    if (j.contains("physical_id")) {
-                        phys_id = j["physical_id"];
-                        raw_id = (_antenna_order == "descending") ? ((num_elements - 1) - phys_id)
-                                                                  : phys_id;
-                    } else if (j.contains("raw_id")) {
-                        raw_id = j["raw_id"];
-                        phys_id = (_antenna_order == "descending") ? ((num_elements - 1) - raw_id)
-                                                                   : raw_id;
-                    } else if (j.contains("antenna_id")) {
-                        std::size_t ant_id = j["antenna_id"];
-                        if (is_raw) {
-                            raw_id = ant_id;
-                            phys_id = (_antenna_order == "descending")
-                                          ? ((num_elements - 1) - raw_id)
-                                          : raw_id;
-                        } else {
-                            phys_id = ant_id;
-                            raw_id = (_antenna_order == "descending")
-                                         ? ((num_elements - 1) - phys_id)
-                                         : phys_id;
-                        }
-                    } else {
-                        conn.send_error("Missing antenna_id, physical_id, or raw_id",
-                                        HTTP_RESPONSE::BAD_REQUEST);
-                        return;
-                    }
-
-                    if (raw_id >= MAX_MASK_ANTENNAS) {
-                        conn.send_error("antenna index exceeds MAX_MASK_ANTENNAS",
-                                        HTTP_RESPONSE::BAD_REQUEST);
-                        return;
-                    }
-                    std::lock_guard<std::mutex> lk(_global_mutex);
-                    _shared_config.manual_mask[raw_id] = 1;
-                    _shared_mask[raw_id] = 1;
-                    _shared_metrics[raw_id].status = AntennaHealthStatus::HEALTHY;
-                    _shared_metrics[raw_id].consecutive_healthy = _shared_config.revival_frames;
-                    _mask_dirty = true;
-                    int n_active = 0;
-                    for (int i = 0; i < num_elements; ++i) {
-                        if (_shared_mask[i] != 0)
-                            n_active++;
-                    }
-                    cudaDirectBeamTrackerCommand::set_shared_antenna_mask(_shared_mask, n_active);
-                    INFO_NON_OO(
-                        "AntennaMask: Physical antenna {:d} (raw element {:d}) UNMASK applied",
-                        phys_id, raw_id);
-                    conn.send_text_reply(fmt::format(
-                        "Physical antenna {:d} (raw element {:d}) unmasked successfully\n", phys_id,
-                        raw_id));
-                } catch (const std::exception& e) {
-                    conn.send_error(e.what(), HTTP_RESPONSE::BAD_REQUEST);
-                }
-            };
-            rest.register_post_callback("/antenna_mask/unmask", unmask_cb);
+            rest.register_post_callback(
+                "/antenna_mask/mask",
+                [apply_rest_mask](connectionInstance& conn, nlohmann::json& j) {
+                    apply_rest_mask(conn, j, false);
+                });
+            rest.register_post_callback(
+                "/antenna_mask/unmask",
+                [apply_rest_mask](connectionInstance& conn, nlohmann::json& j) {
+                    apply_rest_mask(conn, j, true);
+                });
 
             // 4. POST /antenna_mask/reset
-            auto reset_cb = [num_elements](connectionInstance& conn, nlohmann::json& /*j*/) {
+            auto reset_cb = [](connectionInstance& conn, nlohmann::json& /*j*/) {
                 std::lock_guard<std::mutex> lk(_global_mutex);
+                const std::size_t n_elem =
+                    std::min(_shared_config.total_elements(), MAX_MASK_ANTENNAS);
                 _shared_config.manual_mask.fill(1);
                 _shared_mask.fill(1);
                 for (std::size_t i = 0; i < MAX_MASK_ANTENNAS; ++i) {
                     _shared_metrics[i].status = AntennaHealthStatus::HEALTHY;
                     _shared_metrics[i].consecutive_healthy = _shared_config.revival_frames;
                 }
-                _mask_dirty = true;
-                int n_active = 0;
-                for (int i = 0; i < num_elements; ++i) {
-                    if (_shared_mask[i] != 0)
-                        n_active++;
-                }
-                cudaDirectBeamTrackerCommand::set_shared_antenna_mask(_shared_mask, n_active);
-                INFO_NON_OO("AntennaMask: Reset all antenna masks to ACTIVE");
+                _shared_config.mask_generation++;
+                cudaDirectBeamTrackerCommand::set_shared_antenna_mask(
+                    _shared_mask, static_cast<int>(n_elem));
+                INFO_NON_OO("AntennaMask: Reset all antenna masks to ACTIVE via REST");
                 conn.send_text_reply("All antenna masks reset to active\n");
             };
             rest.register_post_callback("/antenna_mask/reset", reset_cb);
@@ -368,16 +404,37 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
                         _shared_config.auto_detect_enabled = j["auto_detect_enabled"];
                     if (j.contains("blank_voltages_enabled"))
                         _shared_config.blank_voltages_enabled = j["blank_voltages_enabled"];
+                    if (j.contains("couple_pol_masks"))
+                        _shared_config.couple_pol_masks = j["couple_pol_masks"];
                     if (j.contains("dead_power_threshold"))
                         _shared_config.dead_power_threshold = j["dead_power_threshold"];
                     if (j.contains("sat_power_threshold"))
                         _shared_config.sat_power_threshold = j["sat_power_threshold"];
                     if (j.contains("clip_fraction_threshold"))
                         _shared_config.clip_fraction_threshold = j["clip_fraction_threshold"];
+                    if (j.contains("enable_dc_lock_check"))
+                        _shared_config.enable_dc_lock_check = j["enable_dc_lock_check"];
+                    if (j.contains("max_dc_fraction"))
+                        _shared_config.max_dc_fraction = j["max_dc_fraction"];
+                    if (j.contains("enable_iq_imbalance_check"))
+                        _shared_config.enable_iq_imbalance_check = j["enable_iq_imbalance_check"];
+                    if (j.contains("max_iq_imbalance"))
+                        _shared_config.max_iq_imbalance = j["max_iq_imbalance"];
+                    if (j.contains("enable_kurtosis_check"))
+                        _shared_config.enable_kurtosis_check = j["enable_kurtosis_check"];
+                    if (j.contains("min_kurtosis_threshold"))
+                        _shared_config.min_kurtosis_threshold = j["min_kurtosis_threshold"];
+                    if (j.contains("max_kurtosis_threshold"))
+                        _shared_config.max_kurtosis_threshold = j["max_kurtosis_threshold"];
+                    if (j.contains("enable_mad_outlier_check"))
+                        _shared_config.enable_mad_outlier_check = j["enable_mad_outlier_check"];
+                    if (j.contains("mad_sigma_threshold"))
+                        _shared_config.mad_sigma_threshold = j["mad_sigma_threshold"];
                     if (j.contains("revival_frames"))
                         _shared_config.revival_frames = j["revival_frames"];
                     if (j.contains("sample_stride"))
                         _shared_config.sample_stride = j["sample_stride"];
+                    _shared_config.mask_generation++;
                     conn.send_text_reply("Antenna mask configuration updated successfully\n");
                 } catch (const std::exception& e) {
                     conn.send_error(e.what(), HTTP_RESPONSE::BAD_REQUEST);
@@ -397,8 +454,8 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
     }
 
     allocate_device_buffers();
-    INFO_NON_OO("Kotekan Antenna Masking Stage initialized for {:d} elements ({:s})", _num_elements,
-                unique_name.c_str());
+    INFO_NON_OO("Kotekan Antenna Masking Stage v2.0 initialized for {:d} elements ({:d} ant x {:d} pol)",
+                _num_elements, _num_antennas, _num_pols);
 }
 
 cudaAntennaMaskCommand::~cudaAntennaMaskCommand() {
@@ -407,18 +464,21 @@ cudaAntennaMaskCommand::~cudaAntennaMaskCommand() {
 
 void cudaAntennaMaskCommand::allocate_device_buffers() {
     device.set_thread_device();
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_raw_stats, _num_elements * sizeof(AntennaRawStats)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_antenna_powers, _num_elements * sizeof(float)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_antenna_clips, _num_elements * sizeof(std::uint32_t)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_bad_antennas, _num_elements * sizeof(int)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_alive_antennas, _num_elements * sizeof(int)));
 
-    CHECK_CUDA_ERROR_NON_OO(cudaMallocHost(&_h_antenna_powers, _num_elements * sizeof(float)));
-    CHECK_CUDA_ERROR_NON_OO(
-        cudaMallocHost(&_h_antenna_clips, _num_elements * sizeof(std::uint32_t)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMallocHost(&_h_raw_stats, _num_elements * sizeof(AntennaRawStats)));
 }
 
 void cudaAntennaMaskCommand::free_device_buffers() {
     device.set_thread_device();
+    if (_d_raw_stats) {
+        cudaFree(_d_raw_stats);
+        _d_raw_stats = nullptr;
+    }
     if (_d_antenna_powers) {
         cudaFree(_d_antenna_powers);
         _d_antenna_powers = nullptr;
@@ -435,14 +495,9 @@ void cudaAntennaMaskCommand::free_device_buffers() {
         cudaFree(_d_alive_antennas);
         _d_alive_antennas = nullptr;
     }
-
-    if (_h_antenna_powers) {
-        cudaFreeHost(_h_antenna_powers);
-        _h_antenna_powers = nullptr;
-    }
-    if (_h_antenna_clips) {
-        cudaFreeHost(_h_antenna_clips);
-        _h_antenna_clips = nullptr;
+    if (_h_raw_stats) {
+        cudaFreeHost(_h_raw_stats);
+        _h_raw_stats = nullptr;
     }
 }
 
@@ -453,8 +508,7 @@ std::array<std::uint8_t, MAX_MASK_ANTENNAS> cudaAntennaMaskCommand::get_current_
 
 AntennaHealthMetrics cudaAntennaMaskCommand::get_antenna_metrics(std::size_t ant_id) {
     std::lock_guard<std::mutex> lk(_global_mutex);
-    if (ant_id < MAX_MASK_ANTENNAS)
-        return _shared_metrics[ant_id];
+    if (ant_id < MAX_MASK_ANTENNAS) return _shared_metrics[ant_id];
     return AntennaHealthMetrics{};
 }
 
@@ -466,8 +520,13 @@ void cudaAntennaMaskCommand::set_manual_mask(std::size_t ant_id, bool enable) {
         _shared_metrics[ant_id].status =
             enable ? AntennaHealthStatus::HEALTHY : AntennaHealthStatus::MANUAL_MASK;
         _shared_metrics[ant_id].consecutive_healthy = enable ? _shared_config.revival_frames : 0;
-        _mask_dirty = true;
-        cudaDirectBeamTrackerCommand::set_shared_antenna_mask(_shared_mask);
+        _shared_config.mask_generation++;
+
+        int n_active = 0;
+        for (std::size_t i = 0; i < _shared_config.total_elements() && i < MAX_MASK_ANTENNAS; ++i) {
+            if (_shared_mask[i] != 0) n_active++;
+        }
+        cudaDirectBeamTrackerCommand::set_shared_antenna_mask(_shared_mask, n_active);
     }
 }
 
@@ -479,14 +538,15 @@ void cudaAntennaMaskCommand::reset_all_masks() {
         _shared_metrics[i].status = AntennaHealthStatus::HEALTHY;
         _shared_metrics[i].consecutive_healthy = _shared_config.revival_frames;
     }
-    _mask_dirty = true;
-    cudaDirectBeamTrackerCommand::set_shared_antenna_mask(_shared_mask);
+    _shared_config.mask_generation++;
+    const int n_active = static_cast<int>(std::min(_shared_config.total_elements(), MAX_MASK_ANTENNAS));
+    cudaDirectBeamTrackerCommand::set_shared_antenna_mask(_shared_mask, n_active);
 }
 
 void cudaAntennaMaskCommand::update_config(const AntennaMaskConfig& cfg) {
     std::lock_guard<std::mutex> lk(_global_mutex);
     _shared_config = cfg;
-    _mask_dirty = true;
+    _shared_config.mask_generation++;
 }
 
 AntennaMaskConfig cudaAntennaMaskCommand::get_config() {
@@ -496,7 +556,6 @@ AntennaMaskConfig cudaAntennaMaskCommand::get_config() {
 
 cudaEvent_t cudaAntennaMaskCommand::execute(cudaPipelineState& /*pipestate*/,
                                             const std::vector<cudaEvent_t>&) {
-
     pre_execute();
 
     const std::size_t input_bytes =
@@ -513,77 +572,148 @@ cudaEvent_t cudaAntennaMaskCommand::execute(cudaPipelineState& /*pipestate*/,
     cudaStream_t stream = device.getStream(cuda_stream_id);
     int4x2_t* d_voltages = reinterpret_cast<int4x2_t*>(input_memory);
 
-    AntennaMaskConfig current_cfg;
-    {
-        std::lock_guard<std::mutex> lk(_global_mutex);
-        current_cfg = _shared_config;
-    }
+    AntennaMaskConfig current_cfg = get_config();
 
     const std::size_t total_spectra =
         static_cast<std::size_t>(_samples_per_data_set) * _num_local_freq;
     const std::size_t inspected_spectra =
         (total_spectra + current_cfg.sample_stride - 1) / current_cfg.sample_stride;
 
-    if (current_cfg.auto_detect_enabled) {
-        // 1. Inspect on GPU
-        launch_inspect_antenna_health(d_voltages, _d_antenna_powers, _d_antenna_clips,
-                                      _samples_per_data_set, _num_local_freq, _num_elements,
-                                      current_cfg.sample_stride, stream);
+    if (current_cfg.auto_detect_enabled && inspected_spectra > 0) {
+        // 1. Single-pass exact integer moment accumulation on GPU
+        launch_inspect_antenna_moments(
+            d_voltages, _d_raw_stats, nullptr, nullptr,
+            _samples_per_data_set, _num_local_freq, _num_elements,
+            current_cfg.sample_stride, stream);
 
-        // 2. Low-latency transfer of metrics (2 KB)
-        CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_h_antenna_powers, _d_antenna_powers,
-                                                _num_elements * sizeof(float),
-                                                cudaMemcpyDeviceToHost, stream));
-        CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_h_antenna_clips, _d_antenna_clips,
-                                                _num_elements * sizeof(std::uint32_t),
-                                                cudaMemcpyDeviceToHost, stream));
+        // Single consolidated DMA transfer of AntennaRawStats
+        CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(
+            _h_raw_stats, _d_raw_stats, _num_elements * sizeof(AntennaRawStats),
+            cudaMemcpyDeviceToHost, stream));
+        CHECK_CUDA_ERROR_NON_OO(cudaStreamSynchronize(stream));
 
-        cudaStreamSynchronize(stream);
+        const double inv_n = 1.0 / static_cast<double>(inspected_spectra);
 
-        // 3. Evaluate health with hysteresis debounce
-        std::lock_guard<std::mutex> lk(_global_mutex);
-        bool mask_changed = false;
-        _current_bad_indices.clear();
-        _current_alive_indices.clear();
+        // Pre-pass: compute per-element moments & gather candidate powers per polarization for MAD
+        std::vector<float> pol_powers[2];
+        pol_powers[0].reserve(_num_elements);
+        pol_powers[1].reserve(_num_elements);
+
+        std::vector<float> elem_power(_num_elements, 0.0f);
+        std::vector<float> elem_ac_var(_num_elements, 0.0f);
+        std::vector<float> elem_dc_frac(_num_elements, 0.0f);
+        std::vector<float> elem_clip_frac(_num_elements, 0.0f);
+        std::vector<float> elem_kurtosis(_num_elements, 2.0f);
+        std::vector<float> elem_iq_imb(_num_elements, 0.0f);
 
         for (int a = 0; a < _num_elements; ++a) {
-            float p = _h_antenna_powers[a];
-            std::uint32_t clips = _h_antenna_clips[a];
-            float clip_frac = (inspected_spectra > 0)
-                                  ? (static_cast<float>(clips) / (2.0f * inspected_spectra))
-                                  : 0.0f;
+            const auto& st = _h_raw_stats[a];
+            const double p_re = static_cast<double>(st.sum_re2) * inv_n;
+            const double p_im = static_cast<double>(st.sum_im2) * inv_n;
+            const double p_tot = p_re + p_im;
+
+            const double mu_re = static_cast<double>(st.sum_re) * inv_n;
+            const double mu_im = static_cast<double>(st.sum_im) * inv_n;
+            const double dc_p  = mu_re * mu_re + mu_im * mu_im;
+            const double ac_v  = std::max(0.0, p_tot - dc_p);
+            const double m4    = static_cast<double>(st.sum_p2) * inv_n;
+
+            elem_power[a]     = static_cast<float>(p_tot);
+            elem_ac_var[a]    = static_cast<float>(ac_v);
+            elem_dc_frac[a]   = (p_tot > 1e-6) ? static_cast<float>(dc_p / p_tot) : 0.0f;
+            elem_clip_frac[a] = static_cast<float>(static_cast<double>(st.clips) * (0.5 * inv_n));
+            elem_kurtosis[a]  = (p_tot > 1e-3) ? static_cast<float>(m4 / (p_tot * p_tot)) : 0.0f;
+            elem_iq_imb[a]    = (p_tot > 1e-6) ? static_cast<float>(std::abs(p_re - p_im) / p_tot) : 0.0f;
+
+            // Include non-dead, non-saturated elements in array median/MAD reference
+            if (current_cfg.manual_mask[a] != 0
+                && ac_v > current_cfg.dead_power_threshold
+                && p_tot < current_cfg.sat_power_threshold) {
+                const std::size_t pol = current_cfg.raw_elem_to_pol(a) & 1U;
+                pol_powers[pol].push_back(elem_power[a]);
+            }
+        }
+
+        // Compute Median and MAD per polarization
+        float med_power[2] = {0.0f, 0.0f};
+        float mad_sigma[2] = {1.0f, 1.0f};
+        for (int p = 0; p < std::min(2, _num_pols); ++p) {
+            if (pol_powers[p].size() >= 4) {
+                med_power[p] = compute_median(pol_powers[p]);
+                std::vector<float> abs_devs(pol_powers[p].size());
+                for (std::size_t i = 0; i < pol_powers[p].size(); ++i) {
+                    abs_devs[i] = std::abs(pol_powers[p][i] - med_power[p]);
+                }
+                // Floor sigma at 5% of median power to avoid false triggers on ultra-uniform synthetic data
+                mad_sigma[p] = std::max(1.4826f * compute_median(abs_devs), 0.05f * med_power[p]);
+            }
+        }
+
+        std::lock_guard<std::mutex> lk(_global_mutex);
+        bool mask_changed = false;
+        std::vector<std::uint8_t> candidate_mask(_num_elements, 1);
+
+        for (int a = 0; a < _num_elements; ++a) {
+            const std::size_t pol = current_cfg.raw_elem_to_pol(a) & 1U;
+            const float z_score = (pol_powers[pol].size() >= 4)
+                                      ? (std::abs(elem_power[a] - med_power[pol]) / mad_sigma[pol])
+                                      : 0.0f;
 
             auto& m = _shared_metrics[a];
-            m.power = p;
-            m.clipping_fraction = clip_frac;
-            m.clipped_count = clips;
+            m.power             = elem_power[a];
+            m.ac_variance       = elem_ac_var[a];
+            m.dc_fraction       = elem_dc_frac[a];
+            m.clipping_fraction = elem_clip_frac[a];
+            m.kurtosis          = elem_kurtosis[a];
+            m.iq_imbalance      = elem_iq_imb[a];
+            m.robust_z_score    = z_score;
+            m.clipped_count     = _h_raw_stats[a].clips;
 
-            uint8_t old_mask_val = _shared_mask[a];
-            uint8_t new_mask_val = 1;
+            const std::uint8_t old_mask_val = _shared_mask[a];
+            std::uint8_t new_mask_val = 1;
 
             if (_shared_config.manual_mask[a] == 0) {
                 m.status = AntennaHealthStatus::MANUAL_MASK;
                 m.consecutive_healthy = 0;
                 new_mask_val = 0;
-            } else if (p <= _shared_config.dead_power_threshold) {
+            } else if (m.ac_variance <= _shared_config.dead_power_threshold
+                       || m.power <= _shared_config.dead_power_threshold) {
                 m.status = AntennaHealthStatus::DEAD;
                 m.consecutive_healthy = 0;
                 new_mask_val = 0;
-            } else if (clip_frac >= _shared_config.clip_fraction_threshold
-                       || p >= _shared_config.sat_power_threshold) {
+            } else if (m.clipping_fraction >= _shared_config.clip_fraction_threshold
+                       || m.power >= _shared_config.sat_power_threshold) {
                 m.status = AntennaHealthStatus::SATURATED;
                 m.consecutive_healthy = 0;
                 new_mask_val = 0;
+            } else if (_shared_config.enable_dc_lock_check
+                       && m.dc_fraction >= _shared_config.max_dc_fraction) {
+                m.status = AntennaHealthStatus::DC_LOCKED;
+                m.consecutive_healthy = 0;
+                new_mask_val = 0;
+            } else if (_shared_config.enable_iq_imbalance_check
+                       && m.iq_imbalance >= _shared_config.max_iq_imbalance) {
+                m.status = AntennaHealthStatus::IQ_IMBALANCE;
+                m.consecutive_healthy = 0;
+                new_mask_val = 0;
+            } else if (_shared_config.enable_kurtosis_check
+                       && (m.kurtosis >= _shared_config.max_kurtosis_threshold
+                           || m.kurtosis <= _shared_config.min_kurtosis_threshold)) {
+                m.status = AntennaHealthStatus::RFI_KURTOSIS;
+                m.consecutive_healthy = 0;
+                new_mask_val = 0;
+            } else if (_shared_config.enable_mad_outlier_check
+                       && z_score >= _shared_config.mad_sigma_threshold) {
+                m.status = AntennaHealthStatus::OUTLIER_POWER;
+                m.consecutive_healthy = 0;
+                new_mask_val = 0;
             } else {
-                // Healthy candidate
                 m.consecutive_healthy++;
                 if (old_mask_val == 0) {
-                    // Requires consecutive healthy frames to revive
                     if (m.consecutive_healthy >= _shared_config.revival_frames) {
                         m.status = AntennaHealthStatus::HEALTHY;
                         new_mask_val = 1;
                     } else {
-                        // Keep masked during recovery debounce
                         new_mask_val = 0;
                     }
                 } else {
@@ -591,27 +721,44 @@ cudaEvent_t cudaAntennaMaskCommand::execute(cudaPipelineState& /*pipestate*/,
                     new_mask_val = 1;
                 }
             }
+            candidate_mask[a] = new_mask_val;
+        }
 
-            if (new_mask_val != old_mask_val) {
-                _shared_mask[a] = new_mask_val;
+        // Optional dual-pol coupling: if one polarization of a physical antenna is bad, mask both
+        if (_shared_config.couple_pol_masks && _num_pols > 1) {
+            for (int a = 0; a < _num_elements; ++a) {
+                if (candidate_mask[a] == 0) {
+                    const std::size_t phys_id = _shared_config.raw_elem_to_physical_ant(a);
+                    for (int b = 0; b < _num_elements; ++b) {
+                        if (_shared_config.raw_elem_to_physical_ant(b) == phys_id) {
+                            candidate_mask[b] = 0;
+                        }
+                    }
+                }
+            }
+        }
+
+        _current_bad_indices.clear();
+        _current_alive_indices.clear();
+        for (int a = 0; a < _num_elements; ++a) {
+            if (_shared_mask[a] != candidate_mask[a]) {
+                _shared_mask[a] = candidate_mask[a];
                 mask_changed = true;
             }
-
-            if (new_mask_val == 0) {
+            if (_shared_mask[a] == 0) {
                 _current_bad_indices.push_back(a);
             } else {
                 _current_alive_indices.push_back(a);
             }
         }
 
-        if (mask_changed || _mask_dirty) {
-            int n_active = 0;
-            for (int i = 0; i < _num_elements; ++i) {
-                if (_shared_mask[i] != 0)
-                    n_active++;
+        if (mask_changed || _applied_mask_generation != _shared_config.mask_generation) {
+            if (mask_changed) {
+                _shared_config.mask_generation++;
             }
+            _applied_mask_generation = _shared_config.mask_generation;
+            const int n_active = static_cast<int>(_current_alive_indices.size());
             cudaDirectBeamTrackerCommand::set_shared_antenna_mask(_shared_mask, n_active);
-            _mask_dirty = false;
         }
     } else {
         std::lock_guard<std::mutex> lk(_global_mutex);
@@ -624,9 +771,14 @@ cudaEvent_t cudaAntennaMaskCommand::execute(cudaPipelineState& /*pipestate*/,
                 _current_alive_indices.push_back(a);
             }
         }
+        if (_applied_mask_generation != _shared_config.mask_generation) {
+            _applied_mask_generation = _shared_config.mask_generation;
+            const int n_active = static_cast<int>(_current_alive_indices.size());
+            cudaDirectBeamTrackerCommand::set_shared_antenna_mask(_shared_mask, n_active);
+        }
     }
 
-    // 4. Level 1: In-Place Voltage Blanking for all bad antennas
+    // 2. Coalesced in-place voltage blanking for bad elements
     if (current_cfg.blank_voltages_enabled && !_current_bad_indices.empty()) {
         CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_d_bad_antennas, _current_bad_indices.data(),
                                                 _current_bad_indices.size() * sizeof(int),
@@ -637,7 +789,7 @@ cudaEvent_t cudaAntennaMaskCommand::execute(cudaPipelineState& /*pipestate*/,
                                  _num_elements, stream);
     }
 
-    // 5. Extract Alive Antennas baseband into compact buffer if requested
+    // 3. Coalesced warp-per-spectrum alive antenna baseband extraction
     if (!_gpu_mem_alive_voltages.empty()) {
         const std::size_t alive_bytes = static_cast<std::size_t>(_max_alive_antennas)
                                         * static_cast<std::size_t>(_num_local_freq)
@@ -646,7 +798,7 @@ cudaEvent_t cudaAntennaMaskCommand::execute(cudaPipelineState& /*pipestate*/,
         void* alive_memory = device.get_gpu_memory_array(_gpu_mem_alive_voltages, gpu_frame_id,
                                                          _gpu_buffer_depth, alive_bytes);
         if (alive_memory) {
-            int num_to_extract = static_cast<int>(std::min(
+            const int num_to_extract = static_cast<int>(std::min(
                 static_cast<std::size_t>(_max_alive_antennas), _current_alive_indices.size()));
             if (num_to_extract > 0) {
                 CHECK_CUDA_ERROR_NON_OO(

@@ -30,28 +30,19 @@ DirectBeamTrackerConfig cudaDirectBeamTrackerCommand::_shared_config;
 bool cudaDirectBeamTrackerCommand::_endpoints_registered = false;
 
 void cudaDirectBeamTrackerCommand::set_shared_antenna_mask(
-    const std::array<std::uint8_t, MAX_DIRECT_ANTENNAS>& mask, int n_active) {
+    const std::array<std::uint8_t, MAX_DIRECT_ANTENNAS>& mask, int /*n_active*/) {
     std::lock_guard<std::mutex> lock(_global_mutex);
-    const std::size_t n_elem = std::min(_shared_config.total_elements(), MAX_DIRECT_ANTENNAS);
-    if (n_active < 0) {
-        n_active = 0;
-        for (std::size_t i = 0; i < n_elem; ++i) {
-            if (mask[i] != 0) {
-                n_active++;
-            }
-        }
-    }
-    if (_shared_config.antenna_mask != mask
-        || _shared_config.num_active_antennas != static_cast<std::size_t>(n_active)) {
+    if (_shared_config.antenna_mask != mask) {
         _shared_config.antenna_mask = mask;
-        _shared_config.num_active_antennas = static_cast<std::size_t>(n_active);
+        // Recomputes L2-normalized taper weights across the surviving unmasked elements
+        _shared_config.recompute_normalized_taper();
         _shared_config.mask_generation++;
         _shared_config.config_generation++;
     }
 }
 
 void cudaDirectBeamTrackerCommand::set_shared_antenna_mask(
-    const std::array<std::uint8_t, charts::constants::charts_total_antennas>& mask, int n_active) {
+    const std::array<std::uint8_t, charts::constants::charts_total_antennas>& mask, int /*n_active*/) {
     std::lock_guard<std::mutex> lock(_global_mutex);
     const std::size_t n_elem = std::min(_shared_config.total_elements(), MAX_DIRECT_ANTENNAS);
     std::array<std::uint8_t, MAX_DIRECT_ANTENNAS> new_mask = _shared_config.antenna_mask;
@@ -59,18 +50,9 @@ void cudaDirectBeamTrackerCommand::set_shared_antenna_mask(
         const std::size_t phys_ant = _shared_config.raw_elem_to_physical_ant(i);
         new_mask[i] = (phys_ant < charts::constants::charts_total_antennas) ? mask[phys_ant] : 0;
     }
-    if (n_active < 0) {
-        n_active = 0;
-        for (std::size_t i = 0; i < n_elem; ++i) {
-            if (new_mask[i] != 0) {
-                n_active++;
-            }
-        }
-    }
-    if (_shared_config.antenna_mask != new_mask
-        || _shared_config.num_active_antennas != static_cast<std::size_t>(n_active)) {
+    if (_shared_config.antenna_mask != new_mask) {
         _shared_config.antenna_mask = new_mask;
-        _shared_config.num_active_antennas = static_cast<std::size_t>(n_active);
+        _shared_config.recompute_normalized_taper();
         _shared_config.mask_generation++;
         _shared_config.config_generation++;
     }
@@ -97,8 +79,8 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
     _num_pols = config.get_default<int>(unique_name, "num_pols", 1);
     if (config.exists(unique_name, "num_antennas")) {
         _num_antennas = config.get<int>(unique_name, "num_antennas");
-        _num_elements =
-            config.get_default<int>(unique_name, "num_elements", _num_antennas * _num_pols);
+        _num_elements = config.get_default<int>(unique_name, "num_elements",
+                                                _num_antennas * _num_pols);
     } else {
         _num_elements = config.get<int>(unique_name, "num_elements");
         _num_antennas = _num_elements / std::max(1, _num_pols);
@@ -106,8 +88,8 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
 
     const std::string pol_layout_str =
         config.get_default<std::string>(unique_name, "pol_layout", "interleaved");
-    _pol_layout =
-        (pol_layout_str == "planar") ? DirectPolLayout::PLANAR : DirectPolLayout::INTERLEAVED;
+    _pol_layout = (pol_layout_str == "planar") ? DirectPolLayout::PLANAR
+                                               : DirectPolLayout::INTERLEAVED;
     _grid_cols = config.get_default<int>(unique_name, "grid_cols", 0);
 
     _num_local_freq = config.get<int>(unique_name, "num_local_freq");
@@ -134,6 +116,15 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
     const bool enable_subframe_interp =
         config.get_default<bool>(unique_name, "enable_subframe_interpolation", true);
 
+    const std::string taper_str =
+        config.get_default<std::string>(unique_name, "taper_type", "cosine_pedestal");
+    const float taper_pedestal =
+        config.get_default<float>(unique_name, "taper_pedestal", 0.25f);
+    const bool enable_weight_bislc =
+        config.get_default<bool>(unique_name, "enable_weight_bislc", false);
+    const float bislc_diag =
+        config.get_default<float>(unique_name, "bislc_diagonal_loading", 1.0e-4f);
+
     _gpu_mem_voltage = config.get_default<std::string>(unique_name, "gpu_mem_voltage", "voltage");
     _gpu_mem_formed_beams =
         config.get_default<std::string>(unique_name, "gpu_mem_formed_beams", "formed_beams");
@@ -159,6 +150,10 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
         _shared_config.enable_grid_mode = _grid_mode_enabled;
         _shared_config.enable_cuda_graph = _enable_cuda_graph;
         _shared_config.enable_subframe_interpolation = enable_subframe_interp;
+        _shared_config.taper_type = parse_taper_type(taper_str);
+        _shared_config.taper_pedestal = taper_pedestal;
+        _shared_config.enable_weight_bislc = enable_weight_bislc;
+        _shared_config.bislc_diagonal_loading = bislc_diag;
         _shared_config.spacing_m = _spacing_m;
         _shared_config.time_chunk_size = _time_chunk_size;
         _shared_config.time_unroll = _time_unroll;
@@ -166,7 +161,6 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
         _shared_config.samples_per_data_set = static_cast<std::size_t>(_samples_per_data_set);
         _shared_config.num_local_freq = static_cast<std::size_t>(_num_local_freq);
 
-        // Initialize beam targets up to _shared_config.max_beams
         for (std::size_t b = 0; b < _shared_config.max_beams; ++b) {
             std::string l0_key = (b == 0) ? "source_l0" : fmt::format("source_l0_{:d}", b);
             std::string m0_key = (b == 0) ? "source_m0" : fmt::format("source_m0_{:d}", b);
@@ -196,34 +190,26 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                             .count();
                     const double d = unix_s / 86400.0 - 10957.5;
                     double gmst_hours = std::fmod(18.697374558 + 24.06570982441908 * d, 24.0);
-                    if (gmst_hours < 0.0)
-                        gmst_hours += 24.0;
+                    if (gmst_hours < 0.0) gmst_hours += 24.0;
                     lst_hours = std::fmod(gmst_hours + site_lon_deg / 15.0, 24.0);
-                    if (lst_hours < 0.0)
-                        lst_hours += 24.0;
+                    if (lst_hours < 0.0) lst_hours += 24.0;
                 }
                 compute_celestial_direction(ra_deg, dec_deg, lst_hours, site_lat_deg,
                                             _shared_config.targets[b].direction);
                 _shared_config.targets[b].celestial.ra_deg = ra_deg;
                 _shared_config.targets[b].celestial.dec_deg = dec_deg;
                 _shared_config.targets[b].celestial.is_set = true;
-                INFO_NON_OO("Direct Beam Tracker: Initialized beam {:d} celestial target "
-                            "RA={:.4f} deg, Dec={:.4f} deg, LST={:.4f}h -> (l0={:.5f}, m0={:.5f})",
-                            b, ra_deg, dec_deg, lst_hours, _shared_config.targets[b].direction.x,
-                            _shared_config.targets[b].direction.y);
             }
         }
 
-        // Configure antenna grid and polarization mapping
         _shared_config.antenna_mask.fill(1);
-        _shared_config.set_antenna_grid(static_cast<std::size_t>(_num_antennas),
-                                        static_cast<std::size_t>(_num_pols), _spacing_m,
-                                        _pol_layout, (_antenna_order == "descending"),
-                                        static_cast<std::size_t>(std::max(0, _grid_cols)));
+        _shared_config.set_antenna_grid(
+            static_cast<std::size_t>(_num_antennas), static_cast<std::size_t>(_num_pols),
+            _spacing_m, _pol_layout, (_antenna_order == "descending"),
+            static_cast<std::size_t>(std::max(0, _grid_cols)));
 
         auto set_phys_ant_mask = [&](int phys_ant, std::uint8_t state) {
-            if (phys_ant < 0 || phys_ant >= _num_antennas)
-                return;
+            if (phys_ant < 0 || phys_ant >= _num_antennas) return;
             for (int r = 0; r < _num_elements && r < static_cast<int>(MAX_DIRECT_ANTENNAS); ++r) {
                 if (static_cast<int>(_shared_config.raw_elem_to_physical_ant(r)) == phys_ant) {
                     _shared_config.antenna_mask[r] = state;
@@ -232,9 +218,7 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
         };
 
         auto bad_antennas = config.get_default<std::vector<int>>(unique_name, "bad_antennas", {});
-        for (int ant : bad_antennas) {
-            set_phys_ant_mask(ant, 0);
-        }
+        for (int ant : bad_antennas) set_phys_ant_mask(ant, 0);
 
         auto bad_elements = config.get_default<std::vector<int>>(unique_name, "bad_elements", {});
         for (int elem : bad_elements) {
@@ -247,9 +231,7 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
             config.get_default<std::vector<int>>(unique_name, "active_antennas", {});
         if (!active_antennas.empty()) {
             _shared_config.antenna_mask.fill(0);
-            for (int ant : active_antennas) {
-                set_phys_ant_mask(ant, 1);
-            }
+            for (int ant : active_antennas) set_phys_ant_mask(ant, 1);
         }
 
         auto active_raw =
@@ -262,14 +244,6 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                 }
             }
         }
-
-        int n_active_init = 0;
-        for (int i = 0; i < _num_elements && i < static_cast<int>(MAX_DIRECT_ANTENNAS); ++i) {
-            if (_shared_config.antenna_mask[i] != 0) {
-                n_active_init++;
-            }
-        }
-        _shared_config.num_active_antennas = static_cast<std::size_t>(n_active_init);
 
         if (config.exists(unique_name, "custom_antenna_positions")) {
             auto custom_pos = config.get<std::vector<std::vector<float>>>(
@@ -287,6 +261,8 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
             }
         }
 
+        // Compute initial L2-normalized 2D spatial taper across active elements
+        _shared_config.recompute_normalized_taper();
         _shared_config.config_generation++;
         _shared_config.mask_generation++;
 
@@ -307,29 +283,21 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                     float lx = _shared_config.targets[beam_id].direction.x;
                     float my = _shared_config.targets[beam_id].direction.y;
 
-                    if (j.contains("l0"))
-                        lx = j["l0"];
-                    else if (j.contains("l"))
-                        lx = j["l"];
+                    if (j.contains("l0")) lx = j["l0"];
+                    else if (j.contains("l")) lx = j["l"];
 
-                    if (j.contains("m0"))
-                        my = j["m0"];
-                    else if (j.contains("m"))
-                        my = j["m"];
+                    if (j.contains("m0")) my = j["m0"];
+                    else if (j.contains("m")) my = j["m"];
 
                     float lx1 = lx;
                     float my1 = my;
-                    if (j.contains("l1"))
-                        lx1 = j["l1"];
-                    if (j.contains("m1"))
-                        my1 = j["m1"];
+                    if (j.contains("l1")) lx1 = j["l1"];
+                    if (j.contains("m1")) my1 = j["m1"];
                     if (j.contains("dl")) {
-                        lx1 =
-                            lx + static_cast<float>(j["dl"]) * _shared_config.samples_per_data_set;
+                        lx1 = lx + static_cast<float>(j["dl"]) * _shared_config.samples_per_data_set;
                     }
                     if (j.contains("dm")) {
-                        my1 =
-                            my + static_cast<float>(j["dm"]) * _shared_config.samples_per_data_set;
+                        my1 = my + static_cast<float>(j["dm"]) * _shared_config.samples_per_data_set;
                     }
 
                     const float tsq = lx * lx + my * my;
@@ -338,17 +306,12 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                     const float nz1 = (tsq1 <= 1.0f) ? std::sqrt(1.0f - tsq1) : 0.0f;
 
                     _shared_config.targets[beam_id].direction = DirectDirection3D{lx, my, nz};
-                    _shared_config.targets[beam_id].direction_end =
-                        DirectDirection3D{lx1, my1, nz1};
+                    _shared_config.targets[beam_id].direction_end = DirectDirection3D{lx1, my1, nz1};
                     _shared_config.targets[beam_id].celestial.is_set = false;
                     _shared_config.targets[beam_id].grid_index = -1;
                     _shared_config.config_generation++;
 
-                    INFO_NON_OO("Direct Beam Tracker: Steered beam {:d} -> (l0={:.5f}, m0={:.5f}) "
-                                "to (l1={:.5f}, m1={:.5f})",
-                                beam_id, lx, my, lx1, my1);
-                    conn.send_text_reply(fmt::format(
-                        "Target updated (Trajectory updated) for beam {:d}\n", beam_id));
+                    conn.send_text_reply(fmt::format("Target updated for beam {:d}\n", beam_id));
                 } catch (const std::exception& e) {
                     conn.send_error(e.what(), HTTP_RESPONSE::BAD_REQUEST);
                 }
@@ -388,11 +351,9 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                         }
                         const double d = unix_s / 86400.0 - 10957.5;
                         double gmst = std::fmod(18.697374558 + 24.06570982441908 * d, 24.0);
-                        if (gmst < 0.0)
-                            gmst += 24.0;
+                        if (gmst < 0.0) gmst += 24.0;
                         lst_hours = std::fmod(gmst + _shared_config.site.lon_deg / 15.0, 24.0);
-                        if (lst_hours < 0.0)
-                            lst_hours += 24.0;
+                        if (lst_hours < 0.0) lst_hours += 24.0;
                     }
 
                     const double frame_duration_s =
@@ -413,11 +374,6 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                     _shared_config.targets[beam_id].grid_index = -1;
                     _shared_config.config_generation++;
 
-                    INFO_NON_OO("Direct Beam Tracker: Celestial target beam {:d} (RA={:.4f} deg, "
-                                "Dec={:.4f} deg) -> l={:.5f}, m={:.5f}",
-                                beam_id, ra_deg, dec_deg,
-                                _shared_config.targets[beam_id].direction.x,
-                                _shared_config.targets[beam_id].direction.y);
                     conn.send_text_reply(
                         fmt::format("Celestial target set for beam {:d}\n", beam_id));
                 } catch (const std::exception& e) {
@@ -427,15 +383,13 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
             rest.register_post_callback("/direct_tracker/set_celestial_target", set_celestial_cb);
             rest.register_post_callback("/beam_tracker/set_celestial_target", set_celestial_cb);
 
-            // 3. Enable Beams (Clamped safely against _shared_config.max_beams)
+            // 3. Enable Beams (Safely clamped against _shared_config.max_beams)
             auto enable_beams_cb = [](connectionInstance& conn, nlohmann::json& j) {
                 try {
                     std::size_t count = j.value("num_active_beams", 1);
                     std::lock_guard<std::mutex> lk(_global_mutex);
                     _shared_config.num_active_beams = std::min(count, _shared_config.max_beams);
                     _shared_config.config_generation++;
-                    INFO_NON_OO("Direct Beam Tracker: Active beams set to {:d} (max_beams={:d})",
-                                _shared_config.num_active_beams, _shared_config.max_beams);
                     conn.send_text_reply(
                         fmt::format("Active beams set to {:d}\n", _shared_config.num_active_beams));
                 } catch (const std::exception& e) {
@@ -453,20 +407,19 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                         std::min(_shared_config.total_elements(), MAX_DIRECT_ANTENNAS);
                     bool is_raw = j.value("is_raw", false);
                     bool enabled = j.value("enabled", false);
-                    std::size_t phys_id = 0;
-                    std::size_t raw_id = 0;
 
                     if (j.contains("raw_id") || (j.contains("antenna_id") && is_raw)) {
-                        raw_id = j.contains("raw_id") ? j["raw_id"] : j["antenna_id"];
+                        std::size_t raw_id =
+                            j.contains("raw_id") ? j["raw_id"] : j["antenna_id"];
                         if (raw_id >= n_elem) {
                             conn.send_error("raw_id exceeds total configured elements",
                                             HTTP_RESPONSE::BAD_REQUEST);
                             return;
                         }
-                        phys_id = _shared_config.raw_elem_to_physical_ant(raw_id);
                         _shared_config.antenna_mask[raw_id] = enabled ? 1 : 0;
                     } else if (j.contains("physical_id") || j.contains("antenna_id")) {
-                        phys_id = j.contains("physical_id") ? j["physical_id"] : j["antenna_id"];
+                        std::size_t phys_id =
+                            j.contains("physical_id") ? j["physical_id"] : j["antenna_id"];
                         if (phys_id >= _shared_config.num_antennas) {
                             conn.send_error("physical_id exceeds num_antennas",
                                             HTTP_RESPONSE::BAD_REQUEST);
@@ -475,7 +428,6 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                         for (std::size_t r = 0; r < n_elem; ++r) {
                             if (_shared_config.raw_elem_to_physical_ant(r) == phys_id) {
                                 _shared_config.antenna_mask[r] = enabled ? 1 : 0;
-                                raw_id = r;
                             }
                         }
                     } else {
@@ -484,18 +436,13 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                         return;
                     }
 
-                    std::size_t n_active = 0;
-                    for (std::size_t i = 0; i < n_elem; ++i) {
-                        if (_shared_config.antenna_mask[i] != 0)
-                            n_active++;
-                    }
-                    _shared_config.num_active_antennas = n_active;
+                    _shared_config.recompute_normalized_taper();
                     _shared_config.mask_generation++;
                     _shared_config.config_generation++;
 
-                    conn.send_text_reply(
-                        fmt::format("Physical antenna {:d} (raw element {:d}) set to {:s}\n",
-                                    phys_id, raw_id, enabled ? "ACTIVE" : "DEAD/MASKED"));
+                    conn.send_text_reply(fmt::format(
+                        "Mask updated: {:d}/{:d} active elements\n",
+                        _shared_config.num_active_antennas, n_elem));
                 } catch (const std::exception& e) {
                     conn.send_error(e.what(), HTTP_RESPONSE::BAD_REQUEST);
                 }
@@ -510,8 +457,6 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                     std::lock_guard<std::mutex> lk(_global_mutex);
                     _shared_config.enable_subframe_interpolation = enabled;
                     _shared_config.config_generation++;
-                    INFO_NON_OO("Direct Beam Tracker: Subframe phase interpolation set to {:s}",
-                                enabled ? "ENABLED" : "DISABLED");
                     conn.send_text_reply(fmt::format("Subframe phase interpolation set to {:s}\n",
                                                      enabled ? "ENABLED" : "DISABLED"));
                 } catch (const std::exception& e) {
@@ -521,20 +466,52 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
             rest.register_post_callback("/direct_tracker/set_interpolation", set_interp_cb);
             rest.register_post_callback("/beam_tracker/set_interpolation", set_interp_cb);
 
-            // 6. Status Telemetry
+            // 6. Live Spatial Taper & Fused Weight-BiSLC Control
+            auto set_taper_cb = [](connectionInstance& conn, nlohmann::json& j) {
+                try {
+                    std::lock_guard<std::mutex> lk(_global_mutex);
+                    if (j.contains("taper_type")) {
+                        _shared_config.taper_type =
+                            parse_taper_type(j["taper_type"].get<std::string>());
+                    }
+                    if (j.contains("taper_pedestal")) {
+                        _shared_config.taper_pedestal = j["taper_pedestal"];
+                    }
+                    if (j.contains("enable_weight_bislc")) {
+                        _shared_config.enable_weight_bislc = j["enable_weight_bislc"];
+                    }
+                    if (j.contains("bislc_diagonal_loading")) {
+                        _shared_config.bislc_diagonal_loading = j["bislc_diagonal_loading"];
+                    }
+                    _shared_config.recompute_normalized_taper();
+                    _shared_config.mask_generation++;
+                    _shared_config.config_generation++;
+                    conn.send_text_reply(fmt::format(
+                        "Taper updated: type={:s}, pedestal={:.2f}, weight_bislc={:s}\n",
+                        taper_type_to_string(_shared_config.taper_type),
+                        _shared_config.taper_pedestal,
+                        _shared_config.enable_weight_bislc ? "ENABLED" : "DISABLED"));
+                } catch (const std::exception& e) {
+                    conn.send_error(e.what(), HTTP_RESPONSE::BAD_REQUEST);
+                }
+            };
+            rest.register_post_callback("/direct_tracker/set_taper", set_taper_cb);
+            rest.register_post_callback("/beam_tracker/set_taper", set_taper_cb);
+
+            // 7. Status Telemetry (No [this] capture to ensure thread-safety across instances)
             auto status_cb = [](connectionInstance& conn) {
                 nlohmann::json reply;
                 std::lock_guard<std::mutex> lk(_global_mutex);
 
-                reply["version"] = "Direct Beam Tracker v2.0 (Blackwell Dual-Pol & Multi-Beam)";
+                reply["version"] =
+                    "Direct Beam Tracker v2.5 (Blackwell Fused 2D Taper + Weight-BiSLC)";
                 reply["num_active_beams"] = _shared_config.num_active_beams;
                 reply["max_beams"] = _shared_config.max_beams;
                 reply["max_beams_capacity"] = _shared_config.max_beams;
                 reply["num_antennas"] = _shared_config.num_antennas;
                 reply["num_pols"] = _shared_config.num_pols;
-                reply["pol_layout"] = (_shared_config.pol_layout == DirectPolLayout::PLANAR)
-                                          ? "planar"
-                                          : "interleaved";
+                reply["pol_layout"] =
+                    (_shared_config.pol_layout == DirectPolLayout::PLANAR) ? "planar" : "interleaved";
                 reply["num_elements"] = _shared_config.total_elements();
                 reply["total_elements"] = _shared_config.total_elements();
                 reply["antenna_order"] = _shared_config.antenna_order;
@@ -542,9 +519,15 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                 reply["samples_per_data_set"] = _shared_config.samples_per_data_set;
                 reply["subframe_interpolation_enabled"] =
                     _shared_config.enable_subframe_interpolation;
+                reply["taper_type"] = taper_type_to_string(_shared_config.taper_type);
+                reply["taper_pedestal"] = _shared_config.taper_pedestal;
+                reply["enable_weight_bislc"] = _shared_config.enable_weight_bislc;
+                reply["bislc_diagonal_loading"] = _shared_config.bislc_diagonal_loading;
                 reply["grid_mode_enabled"] = _shared_config.enable_grid_mode;
                 reply["grid_points"] = _shared_config.num_grid_points;
                 reply["spacing_m"] = _shared_config.spacing_m;
+                reply["active_elements"] = _shared_config.num_active_antennas;
+                reply["active_antennas"] = _shared_config.num_active_antennas;
 
                 reply["site"] = {{"lat_deg", _shared_config.site.lat_deg},
                                  {"lon_deg", _shared_config.site.lon_deg},
@@ -555,11 +538,9 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                     duration_cast<duration<double>>(system_clock::now().time_since_epoch()).count();
                 const double d = unix_s / 86400.0 - 10957.5;
                 double gmst = std::fmod(18.697374558 + 24.06570982441908 * d, 24.0);
-                if (gmst < 0.0)
-                    gmst += 24.0;
+                if (gmst < 0.0) gmst += 24.0;
                 double cur_lst = std::fmod(gmst + _shared_config.site.lon_deg / 15.0, 24.0);
-                if (cur_lst < 0.0)
-                    cur_lst += 24.0;
+                if (cur_lst < 0.0) cur_lst += 24.0;
                 reply["current_utc_timestamp"] = unix_s;
                 reply["current_lst_hours"] = cur_lst;
 
@@ -577,8 +558,6 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                         bad_elems.push_back(a);
                     }
                 }
-                reply["active_antennas"] = _shared_config.num_active_antennas;
-                reply["active_elements"] = _shared_config.num_active_antennas;
                 reply["masked_antennas"] = n_elem - _shared_config.num_active_antennas;
                 reply["active_raw_elements"] = active_raw;
                 reply["active_physical_antennas"] = active_phys;
@@ -669,7 +648,7 @@ void cudaDirectBeamTrackerCommand::allocate_device_buffers() {
                                       * static_cast<std::size_t>(_num_elements);
     const std::size_t weights_bytes = weights_elems * sizeof(float2);
 
-    // Contiguous allocation for _d_weights + _d_step_weights so both reside in Blackwell L2 cache
+    // Single contiguous allocation for _d_weights + _d_step_weights in Blackwell L2 cache
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_weights, 2 * weights_bytes));
     _d_step_weights = _d_weights + weights_elems;
 
@@ -677,7 +656,7 @@ void cudaDirectBeamTrackerCommand::allocate_device_buffers() {
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_directions_end, _max_beams * sizeof(DirectDirection3D)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_wavenumbers, _num_local_freq * sizeof(double)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_antenna_positions, _num_elements * sizeof(float3)));
-    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_antenna_mask, _num_elements * sizeof(std::uint8_t)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_norm_taper, _num_elements * sizeof(float)));
 
     cudaStream_t stream = device.getStream(cuda_stream_id);
     set_l2_persisting_weights_policy(stream, _d_weights, 2 * weights_bytes);
@@ -693,8 +672,8 @@ void cudaDirectBeamTrackerCommand::allocate_device_buffers() {
     DirectBeamTrackerConfig cfg = get_shared_config();
     CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(_d_antenna_positions, cfg.antenna_positions.data(),
                                        _num_elements * sizeof(float3), cudaMemcpyHostToDevice));
-    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(_d_antenna_mask, cfg.antenna_mask.data(),
-                                       _num_elements * sizeof(std::uint8_t),
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(_d_norm_taper, cfg.normalized_taper_weights.data(),
+                                       _num_elements * sizeof(float),
                                        cudaMemcpyHostToDevice));
 
     if (_grid_mode_enabled) {
@@ -715,10 +694,9 @@ void cudaDirectBeamTrackerCommand::allocate_device_buffers() {
                                            _num_grid_points * sizeof(float2),
                                            cudaMemcpyHostToDevice));
 
-        launch_precompute_sky_grid(
-            _d_grid_weights, _d_grid_lms, _d_wavenumbers, _d_antenna_positions, _d_antenna_mask,
-            _d_calibration_gains, _num_grid_points, _num_local_freq, _num_elements,
-            cfg.num_active_antennas, stream, static_cast<std::size_t>(_num_pols));
+        launch_precompute_sky_grid_tapered(
+            _d_grid_weights, _d_grid_lms, _d_wavenumbers, _d_antenna_positions, _d_norm_taper,
+            _d_calibration_gains, _num_grid_points, _num_local_freq, _num_elements, stream);
 
         CHECK_CUDA_ERROR_NON_OO(cudaStreamSynchronize(stream));
         INFO_NON_OO(
@@ -749,9 +727,9 @@ void cudaDirectBeamTrackerCommand::free_device_buffers() {
         cudaFree(_d_antenna_positions);
         _d_antenna_positions = nullptr;
     }
-    if (_d_antenna_mask) {
-        cudaFree(_d_antenna_mask);
-        _d_antenna_mask = nullptr;
+    if (_d_norm_taper) {
+        cudaFree(_d_norm_taper);
+        _d_norm_taper = nullptr;
     }
     if (_d_calibration_gains) {
         cudaFree(_d_calibration_gains);
@@ -837,16 +815,15 @@ void cudaDirectBeamTrackerCommand::update_weights_if_needed(cudaStream_t stream)
     const std::size_t active_beams =
         std::min(cfg.num_active_beams, static_cast<std::size_t>(_max_beams));
 
-    // Only copy antenna mask to device when the mask generation actually changed
+    // Only copy antenna taper weights to device when the mask / taper generation actually changed
     if (mask_changed) {
-        CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_d_antenna_mask, cfg.antenna_mask.data(),
-                                                _num_elements * sizeof(std::uint8_t),
+        CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_d_norm_taper, cfg.normalized_taper_weights.data(),
+                                                _num_elements * sizeof(float),
                                                 cudaMemcpyHostToDevice, stream));
         if (_grid_mode_enabled && _d_grid_weights != nullptr) {
-            launch_precompute_sky_grid(
-                _d_grid_weights, _d_grid_lms, _d_wavenumbers, _d_antenna_positions, _d_antenna_mask,
-                _d_calibration_gains, _num_grid_points, _num_local_freq, _num_elements,
-                cfg.num_active_antennas, stream, static_cast<std::size_t>(_num_pols));
+            launch_precompute_sky_grid_tapered(
+                _d_grid_weights, _d_grid_lms, _d_wavenumbers, _d_antenna_positions, _d_norm_taper,
+                _d_calibration_gains, _num_grid_points, _num_local_freq, _num_elements, stream);
         }
     }
 
@@ -877,11 +854,11 @@ void cudaDirectBeamTrackerCommand::update_weights_if_needed(cudaStream_t stream)
                                                 active_beams * sizeof(DirectDirection3D),
                                                 cudaMemcpyHostToDevice, stream));
 
-        launch_generate_steering_weights(
+        launch_generate_steering_weights_tapered(
             _d_weights, _d_step_weights, _d_directions, _d_directions_end, _d_wavenumbers,
-            _d_antenna_positions, _d_antenna_mask, _d_calibration_gains, active_beams,
+            _d_antenna_positions, _d_norm_taper, _d_calibration_gains, active_beams,
             _num_local_freq, _num_elements, static_cast<std::size_t>(_samples_per_data_set),
-            cfg.num_active_antennas, stream, static_cast<std::size_t>(_num_pols));
+            cfg.enable_weight_bislc, cfg.bislc_diagonal_loading, stream);
     }
 }
 

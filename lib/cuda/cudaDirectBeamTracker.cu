@@ -122,28 +122,26 @@ __device__ __forceinline__ void load_and_unpack_contiguous(
             out[a + 8]  = unpack_int4_byte((packed16.z >> (a * 8)) & 0xFFu);
             out[a + 12] = unpack_int4_byte((packed16.w >> (a * 8)) & 0xFFu);
         }
-    } else {
-        #pragma unroll
-        for (int a = 0; a < ELEM_PER_LANE; ++a) {
-            out[a] = unpack_int4_byte(__ldg(&row_ptr[lane * ELEM_PER_LANE + a]));
-        }
     }
 }
 
-__global__ void generate_steering_weights_kernel(
+// ============================================================================
+// Tapered & Mask-Normalized Weight Generation Kernels
+// ============================================================================
+
+__global__ void generate_steering_weights_tapered_kernel(
     float2* __restrict__ weights,
     float2* __restrict__ step_weights,
     const DirectDirection3D* __restrict__ directions_start,
     const DirectDirection3D* __restrict__ directions_end,
     const double* __restrict__ wavenumbers,
     const float3* __restrict__ antenna_positions,
-    const std::uint8_t* __restrict__ antenna_mask,
+    const float* __restrict__ norm_taper,
     const float2* __restrict__ calibration_gains,
     const std::size_t num_beams,
     const std::size_t n_freq,
     const std::size_t n_elem,
-    const std::size_t n_time,
-    const std::size_t n_active_per_pol) {
+    const std::size_t n_time) {
 
     const std::size_t idx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     const std::size_t total = num_beams * n_freq * n_elem;
@@ -154,7 +152,9 @@ __global__ void generate_steering_weights_kernel(
     const std::size_t freq = rest % n_freq;
     const std::size_t beam = rest / n_freq;
 
-    if (antenna_mask != nullptr && __ldg(&antenna_mask[elem]) == 0) {
+    // norm_taper[elem] is 0.0f if masked, or (t_a / sqrt(sum_{k in pol} t_k^2)) if active
+    const float amp = (norm_taper != nullptr) ? __ldg(&norm_taper[elem]) : 1.0f;
+    if (amp <= 0.0f) {
         weights[idx] = make_float2(0.0f, 0.0f);
         if (step_weights != nullptr) {
             step_weights[idx] = make_float2(1.0f, 0.0f);
@@ -173,9 +173,8 @@ __global__ void generate_steering_weights_kernel(
     float s0, c0;
     __sincosf(phase0, &s0, &c0);
 
-    const float norm = (n_active_per_pol > 0) ? rsqrtf(static_cast<float>(n_active_per_pol)) : 0.0f;
-    float wr = c0 * norm;
-    float wi = s0 * norm;
+    float wr = c0 * amp;
+    float wi = s0 * amp;
 
     if (calibration_gains != nullptr) {
         const float2 g = __ldg(&calibration_gains[freq * n_elem + elem]);
@@ -205,17 +204,163 @@ __global__ void generate_steering_weights_kernel(
     }
 }
 
-__global__ void precompute_sky_grid_kernel(
+/**
+ * @brief Fused Weight-Space BiSLC Kernel:
+ *        Computes A_{i,j}(f) = sum_a (norm_taper[a]^2 * exp(+j * k(f) * x_a . (s_i - s_j))),
+ *        inverts M(f) = (A(f) + eps*I)^-1 in shared memory, and updates W(f) <- M(f) * W(f).
+ *        Eliminates intra-block race conditions via s_factors staging.
+ */
+template <int MAX_B>
+__global__ void __launch_bounds__(256)
+fuse_weight_space_bislc_kernel(
+    float2* __restrict__ weights,
+    const DirectDirection3D* __restrict__ directions,
+    const double* __restrict__ wavenumbers,
+    const float3* __restrict__ antenna_positions,
+    const float* __restrict__ norm_taper,
+    const std::size_t B,
+    const std::size_t n_freq,
+    const std::size_t n_elem,
+    const float diag_loading) {
+
+    const std::size_t f = blockIdx.x;
+    if (f >= n_freq || B <= 1 || B > MAX_B) return;
+
+    const unsigned int tid = threadIdx.x;
+    const double k = __ldg(&wavenumbers[f]);
+
+    __shared__ float2 s_aug[MAX_B][2 * MAX_B];
+    __shared__ std::size_t s_pivot_row;
+    __shared__ float2 s_pivot_val;
+    __shared__ bool s_singular;
+    __shared__ float2 s_factors[MAX_B];
+
+    if (tid == 0) s_singular = false;
+    __syncthreads();
+
+    const std::size_t total_pairs = B * B;
+    for (std::size_t idx = tid; idx < total_pairs; idx += blockDim.x) {
+        const std::size_t i = idx / B;
+        const std::size_t j = idx % B;
+
+        float2 a_val = make_float2(1.0f, 0.0f);
+        if (i != j) {
+            const DirectDirection3D di = directions[i];
+            const DirectDirection3D dj = directions[j];
+            const double dl = static_cast<double>(di.x - dj.x);
+            const double dm = static_cast<double>(di.y - dj.y);
+            const double dn = static_cast<double>(di.z - dj.z);
+
+            float sum_r = 0.0f;
+            float sum_i = 0.0f;
+            for (std::size_t a = 0; a < n_elem; ++a) {
+                const float t_a = (norm_taper != nullptr) ? __ldg(&norm_taper[a]) : 0.0f;
+                if (t_a <= 0.0f) continue;
+                const float w_pow = t_a * t_a;
+                const float3 pos = antenna_positions[a];
+                const double delay_m = static_cast<double>(pos.x) * dl +
+                                       static_cast<double>(pos.y) * dm +
+                                       static_cast<double>(pos.z) * dn;
+                const float phase = static_cast<float>(k * delay_m);
+                float s, c;
+                __sincosf(phase, &s, &c);
+                sum_r = fmaf(w_pow, c, sum_r);
+                sum_i = fmaf(w_pow, s, sum_i);
+            }
+            a_val = make_float2(sum_r, sum_i);
+        }
+        s_aug[i][j] = (i == j) ? make_float2(a_val.x + diag_loading, a_val.y) : a_val;
+        s_aug[i][B + j] = (i == j) ? make_float2(1.0f, 0.0f) : make_float2(0.0f, 0.0f);
+    }
+    __syncthreads();
+
+    for (std::size_t col = 0; col < B; ++col) {
+        if (tid == 0) {
+            std::size_t best_r = col;
+            float max_norm = s_aug[col][col].x * s_aug[col][col].x +
+                             s_aug[col][col].y * s_aug[col][col].y;
+            for (std::size_t r = col + 1; r < B; ++r) {
+                const float2 v = s_aug[r][col];
+                const float n_sq = v.x * v.x + v.y * v.y;
+                if (n_sq > max_norm) {
+                    max_norm = n_sq;
+                    best_r = r;
+                }
+            }
+            s_pivot_row = best_r;
+            if (max_norm < 1.0e-14f) s_singular = true;
+        }
+        __syncthreads();
+        if (s_singular) return;
+
+        if (s_pivot_row != col && tid < 2 * B) {
+            const float2 tmp = s_aug[col][tid];
+            s_aug[col][tid] = s_aug[s_pivot_row][tid];
+            s_aug[s_pivot_row][tid] = tmp;
+        }
+        __syncthreads();
+
+        if (tid == 0) s_pivot_val = s_aug[col][col];
+        __syncthreads();
+
+        if (tid < 2 * B) {
+            const float2 num = s_aug[col][tid];
+            const float inv_den =
+                1.0f / (s_pivot_val.x * s_pivot_val.x + s_pivot_val.y * s_pivot_val.y);
+            s_aug[col][tid] = make_float2(
+                (num.x * s_pivot_val.x + num.y * s_pivot_val.y) * inv_den,
+                (num.y * s_pivot_val.x - num.x * s_pivot_val.y) * inv_den);
+        }
+        __syncthreads();
+
+        if (tid < B) {
+            s_factors[tid] = s_aug[tid][col];
+        }
+        __syncthreads();
+
+        for (std::size_t idx = tid; idx < B * (2 * B); idx += blockDim.x) {
+            const std::size_t r = idx / (2 * B);
+            const std::size_t c = idx % (2 * B);
+            if (r != col && c >= col) {
+                const float2 factor = s_factors[r];
+                const float2 p_val = s_aug[col][c];
+                s_aug[r][c].x -= (factor.x * p_val.x - factor.y * p_val.y);
+                s_aug[r][c].y -= (factor.x * p_val.y + factor.y * p_val.x);
+            }
+        }
+        __syncthreads();
+    }
+
+    const std::size_t fe_stride = n_freq * n_elem;
+    for (std::size_t a = tid; a < n_elem; a += blockDim.x) {
+        float2 w_orig[MAX_B];
+        for (std::size_t b = 0; b < B; ++b) {
+            w_orig[b] = weights[b * fe_stride + f * n_elem + a];
+        }
+        for (std::size_t i = 0; i < B; ++i) {
+            float sr = 0.0f;
+            float si = 0.0f;
+            for (std::size_t j = 0; j < B; ++j) {
+                const float2 mij = s_aug[i][B + j];
+                const float2 wj = w_orig[j];
+                sr = fmaf(mij.x, wj.x, fmaf(-mij.y, wj.y, sr));
+                si = fmaf(mij.x, wj.y, fmaf(mij.y, wj.x, si));
+            }
+            weights[i * fe_stride + f * n_elem + a] = make_float2(sr, si);
+        }
+    }
+}
+
+__global__ void precompute_sky_grid_tapered_kernel(
     float2* __restrict__ grid_weights,
     const float2* __restrict__ grid_lms,
     const double* __restrict__ wavenumbers,
     const float3* __restrict__ antenna_positions,
-    const std::uint8_t* __restrict__ antenna_mask,
+    const float* __restrict__ norm_taper,
     const float2* __restrict__ calibration_gains,
     const std::size_t num_grid_points,
     const std::size_t n_freq,
-    const std::size_t n_elem,
-    const std::size_t n_active_per_pol) {
+    const std::size_t n_elem) {
 
     const std::size_t idx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     const std::size_t total = num_grid_points * n_freq * n_elem;
@@ -226,7 +371,8 @@ __global__ void precompute_sky_grid_kernel(
     const std::size_t freq = rest % n_freq;
     const std::size_t grid_pt = rest / n_freq;
 
-    if (antenna_mask != nullptr && __ldg(&antenna_mask[elem]) == 0) {
+    const float amp = (norm_taper != nullptr) ? __ldg(&norm_taper[elem]) : 1.0f;
+    if (amp <= 0.0f) {
         grid_weights[idx] = make_float2(0.0f, 0.0f);
         return;
     }
@@ -247,9 +393,8 @@ __global__ void precompute_sky_grid_kernel(
     float s, c;
     __sincosf(phase, &s, &c);
 
-    const float norm = (n_active_per_pol > 0) ? rsqrtf(static_cast<float>(n_active_per_pol)) : 0.0f;
-    float wr = c * norm;
-    float wi = s * norm;
+    float wr = c * amp;
+    float wi = s * amp;
 
     if (calibration_gains != nullptr) {
         const float2 g = __ldg(&calibration_gains[freq * n_elem + elem]);
@@ -262,6 +407,82 @@ __global__ void precompute_sky_grid_kernel(
     grid_weights[idx] = make_float2(wr, wi);
 }
 
+// Legacy untapered kernels for backwards compatibility
+__global__ void generate_steering_weights_legacy_kernel(
+    float2* __restrict__ weights,
+    float2* __restrict__ step_weights,
+    const DirectDirection3D* __restrict__ directions_start,
+    const DirectDirection3D* __restrict__ directions_end,
+    const double* __restrict__ wavenumbers,
+    const float3* __restrict__ antenna_positions,
+    const std::uint8_t* __restrict__ antenna_mask,
+    const float2* __restrict__ calibration_gains,
+    const std::size_t num_beams,
+    const std::size_t n_freq,
+    const std::size_t n_elem,
+    const std::size_t n_time,
+    const std::size_t n_active_per_pol) {
+
+    const std::size_t idx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const std::size_t total = num_beams * n_freq * n_elem;
+    if (idx >= total) return;
+
+    const std::size_t elem = idx % n_elem;
+    const std::size_t rest = idx / n_elem;
+    const std::size_t freq = rest % n_freq;
+    const std::size_t beam = rest / n_freq;
+
+    if (antenna_mask != nullptr && __ldg(&antenna_mask[elem]) == 0) {
+        weights[idx] = make_float2(0.0f, 0.0f);
+        if (step_weights != nullptr) step_weights[idx] = make_float2(1.0f, 0.0f);
+        return;
+    }
+
+    const DirectDirection3D dir0 = directions_start[beam];
+    const float3 pos = antenna_positions[elem];
+    const double wave_num = __ldg(&wavenumbers[freq]);
+
+    const double delay_m0 = static_cast<double>(pos.x) * dir0.x +
+                            static_cast<double>(pos.y) * dir0.y +
+                            static_cast<double>(pos.z) * dir0.z;
+    const float phase0 = static_cast<float>(wave_num * delay_m0);
+    float s0, c0;
+    __sincosf(phase0, &s0, &c0);
+
+    const float norm = (n_active_per_pol > 0) ? rsqrtf(static_cast<float>(n_active_per_pol)) : 0.0f;
+    float wr = c0 * norm;
+    float wi = s0 * norm;
+
+    if (calibration_gains != nullptr) {
+        const float2 g = __ldg(&calibration_gains[freq * n_elem + elem]);
+        const float cal_r = fmaf(-wi, g.y, wr * g.x);
+        const float cal_i = fmaf(wr, g.y, wi * g.x);
+        wr = cal_r;
+        wi = cal_i;
+    }
+    weights[idx] = make_float2(wr, wi);
+
+    if (step_weights != nullptr) {
+        if (directions_end != nullptr && n_time > 0) {
+            const DirectDirection3D dir1 = directions_end[beam];
+            const double delay_m1 = static_cast<double>(pos.x) * dir1.x +
+                                    static_cast<double>(pos.y) * dir1.y +
+                                    static_cast<double>(pos.z) * dir1.z;
+            const float delta_phase =
+                static_cast<float>((wave_num * (delay_m1 - delay_m0)) / static_cast<double>(n_time));
+            float sd, cd;
+            __sincosf(delta_phase, &sd, &cd);
+            step_weights[idx] = make_float2(cd, sd);
+        } else {
+            step_weights[idx] = make_float2(1.0f, 0.0f);
+        }
+    }
+}
+
+// ============================================================================
+// Blackwell Multi-Beam & Dual-Pol Voltage Beamformer Kernel
+// ============================================================================
+
 template <
     int N_ELEM,
     int N_POL,
@@ -270,7 +491,7 @@ template <
     int TIME_UNROLL,
     bool INTERPOLATE,
     bool COOPERATIVE_SMEM>
-__global__ void __launch_bounds__(128)
+__global__ void __launch_bounds__(128, 4)
 direct_beamformer_blackwell_kernel(
     float2* __restrict__ voltages,
     const float2* __restrict__ weights,
@@ -725,6 +946,63 @@ void launch_direct_beamformer(
     CHECK_CUDA_ERROR_NON_OO(cudaGetLastError());
 }
 
+void launch_generate_steering_weights_tapered(
+    float2* d_weights,
+    float2* d_step_weights,
+    const DirectDirection3D* d_directions_start,
+    const DirectDirection3D* d_directions_end,
+    const double* d_wavenumbers,
+    const float3* d_antenna_positions,
+    const float* d_norm_taper,
+    const float2* d_calibration_gains,
+    std::size_t num_beams,
+    std::size_t n_freq,
+    std::size_t n_elem,
+    std::size_t n_time,
+    bool enable_weight_bislc,
+    float bislc_diag_loading,
+    cudaStream_t stream) {
+
+    const std::size_t total_weights = num_beams * n_freq * n_elem;
+    if (total_weights == 0) return;
+
+    constexpr int BLOCK_SIZE = 256;
+    const unsigned int grid_size =
+        static_cast<unsigned int>((total_weights + BLOCK_SIZE - 1) / BLOCK_SIZE);
+
+    generate_steering_weights_tapered_kernel<<<grid_size, BLOCK_SIZE, 0, stream>>>(
+        d_weights,
+        d_step_weights,
+        d_directions_start,
+        d_directions_end,
+        d_wavenumbers,
+        d_antenna_positions,
+        d_norm_taper,
+        d_calibration_gains,
+        num_beams,
+        n_freq,
+        n_elem,
+        n_time);
+
+    // Optional Fused Weight-Space BiSLC (zero-cost cross-beam sidelobe nulling)
+    if (enable_weight_bislc && num_beams > 1 && num_beams <= 32) {
+        const unsigned int f_grid = static_cast<unsigned int>(n_freq);
+        if (num_beams <= 8) {
+            fuse_weight_space_bislc_kernel<8><<<f_grid, 256, 0, stream>>>(
+                d_weights, d_directions_start, d_wavenumbers,
+                d_antenna_positions, d_norm_taper, num_beams, n_freq, n_elem, bislc_diag_loading);
+        } else if (num_beams <= 16) {
+            fuse_weight_space_bislc_kernel<16><<<f_grid, 256, 0, stream>>>(
+                d_weights, d_directions_start, d_wavenumbers,
+                d_antenna_positions, d_norm_taper, num_beams, n_freq, n_elem, bislc_diag_loading);
+        } else {
+            fuse_weight_space_bislc_kernel<32><<<f_grid, 256, 0, stream>>>(
+                d_weights, d_directions_start, d_wavenumbers,
+                d_antenna_positions, d_norm_taper, num_beams, n_freq, n_elem, bislc_diag_loading);
+        }
+    }
+}
+
 void launch_generate_steering_weights(
     float2* d_weights,
     float2* d_step_weights,
@@ -745,9 +1023,7 @@ void launch_generate_steering_weights(
     const std::size_t total_weights = num_beams * n_freq * n_elem;
     if (total_weights == 0) return;
 
-    if (n_active == 0) {
-        n_active = n_elem;
-    }
+    if (n_active == 0) n_active = n_elem;
     const std::size_t n_active_per_pol =
         std::max<std::size_t>(1, n_active / std::max<std::size_t>(1, n_pol));
 
@@ -755,20 +1031,34 @@ void launch_generate_steering_weights(
     const unsigned int grid_size =
         static_cast<unsigned int>((total_weights + BLOCK_SIZE - 1) / BLOCK_SIZE);
 
-    generate_steering_weights_kernel<<<grid_size, BLOCK_SIZE, 0, stream>>>(
-        d_weights,
-        d_step_weights,
-        d_directions_start,
-        d_directions_end,
-        d_wavenumbers,
-        d_antenna_positions,
-        d_antenna_mask,
-        d_calibration_gains,
-        num_beams,
-        n_freq,
-        n_elem,
-        n_time,
-        n_active_per_pol);
+    generate_steering_weights_legacy_kernel<<<grid_size, BLOCK_SIZE, 0, stream>>>(
+        d_weights, d_step_weights, d_directions_start, d_directions_end,
+        d_wavenumbers, d_antenna_positions, d_antenna_mask, d_calibration_gains,
+        num_beams, n_freq, n_elem, n_time, n_active_per_pol);
+}
+
+void launch_precompute_sky_grid_tapered(
+    float2* d_grid_weights,
+    const float2* d_grid_lms,
+    const double* d_wavenumbers,
+    const float3* d_antenna_positions,
+    const float* d_norm_taper,
+    const float2* d_calibration_gains,
+    std::size_t num_grid_points,
+    std::size_t n_freq,
+    std::size_t n_elem,
+    cudaStream_t stream) {
+
+    const std::size_t total_weights = num_grid_points * n_freq * n_elem;
+    if (total_weights == 0) return;
+
+    constexpr int BLOCK_SIZE = 256;
+    const unsigned int grid_size =
+        static_cast<unsigned int>((total_weights + BLOCK_SIZE - 1) / BLOCK_SIZE);
+
+    precompute_sky_grid_tapered_kernel<<<grid_size, BLOCK_SIZE, 0, stream>>>(
+        d_grid_weights, d_grid_lms, d_wavenumbers, d_antenna_positions,
+        d_norm_taper, d_calibration_gains, num_grid_points, n_freq, n_elem);
 }
 
 void launch_precompute_sky_grid(
@@ -776,39 +1066,18 @@ void launch_precompute_sky_grid(
     const float2* d_grid_lms,
     const double* d_wavenumbers,
     const float3* d_antenna_positions,
-    const std::uint8_t* d_antenna_mask,
+    const std::uint8_t* /*d_antenna_mask*/,
     const float2* d_calibration_gains,
     std::size_t num_grid_points,
     std::size_t n_freq,
     std::size_t n_elem,
-    std::size_t n_active,
+    std::size_t /*n_active*/,
     cudaStream_t stream,
-    std::size_t n_pol) {
+    std::size_t /*n_pol*/) {
 
-    const std::size_t total_weights = num_grid_points * n_freq * n_elem;
-    if (total_weights == 0) return;
-
-    if (n_active == 0) {
-        n_active = n_elem;
-    }
-    const std::size_t n_active_per_pol =
-        std::max<std::size_t>(1, n_active / std::max<std::size_t>(1, n_pol));
-
-    constexpr int BLOCK_SIZE = 256;
-    const unsigned int grid_size =
-        static_cast<unsigned int>((total_weights + BLOCK_SIZE - 1) / BLOCK_SIZE);
-
-    precompute_sky_grid_kernel<<<grid_size, BLOCK_SIZE, 0, stream>>>(
-        d_grid_weights,
-        d_grid_lms,
-        d_wavenumbers,
-        d_antenna_positions,
-        d_antenna_mask,
-        d_calibration_gains,
-        num_grid_points,
-        n_freq,
-        n_elem,
-        n_active_per_pol);
+    launch_precompute_sky_grid_tapered(
+        d_grid_weights, d_grid_lms, d_wavenumbers, d_antenna_positions,
+        nullptr, d_calibration_gains, num_grid_points, n_freq, n_elem, stream);
 }
 
 } // namespace kotekan

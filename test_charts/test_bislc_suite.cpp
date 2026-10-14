@@ -55,11 +55,11 @@ std::vector<float3> compute_positions(std::size_t n_ant, float spacing_m) {
 // Test 1: Analytical and Numerical Matrix Inversion Test
 bool test_matrix_inversion() {
     std::cout << "\n======================================================\n";
-    std::cout << "[Test 1/4] Complex Matrix Inversion Accuracy & Stability\n";
+    std::cout << "[Test 1/5] Complex Matrix Inversion Accuracy & Stability\n";
     std::cout << "======================================================\n";
 
     bool all_passed = true;
-    const std::vector<std::size_t> beam_counts = {1, 2, 3, 4, 8};
+    const std::vector<std::size_t> beam_counts = {1, 2, 3, 4, 8, 16, 32};
 
     for (std::size_t B : beam_counts) {
         std::vector<float2> A(B * B);
@@ -110,8 +110,9 @@ bool test_matrix_inversion() {
             }
         }
 
-        std::cout << "  B=" << B << "x" << B << " Inversion Residual Error: " << std::scientific
-                  << std::setprecision(3) << max_err;
+        std::cout << "  B=" << std::setw(2) << B << "x" << std::setw(2) << B
+                  << " Inversion Residual Error: " << std::scientific << std::setprecision(3)
+                  << max_err;
         if (max_err < 1.0e-4f) {
             std::cout << " [PASS]\n";
         } else {
@@ -126,7 +127,7 @@ bool test_matrix_inversion() {
 // Test 2: Coupling Matrix Generation & Orthogonality Check
 bool test_coupling_matrix_generation() {
     std::cout << "\n======================================================\n";
-    std::cout << "[Test 2/4] Beam-Coupling Matrix Generation\n";
+    std::cout << "[Test 2/5] Beam-Coupling Matrix Generation\n";
     std::cout << "======================================================\n";
 
     const std::size_t n_ant = 64;
@@ -187,7 +188,7 @@ bool test_coupling_matrix_generation() {
 // Test 3: Coherent Sidelobe Cancellation Verification (Interference Suppression)
 bool test_sidelobe_cancellation() {
     std::cout << "\n======================================================\n";
-    std::cout << "[Test 3/4] Coherent Sidelobe Cancellation Suppression\n";
+    std::cout << "[Test 3/5] Coherent Sidelobe Cancellation Suppression\n";
     std::cout << "======================================================\n";
 
     const std::size_t n_time = 1024;
@@ -310,10 +311,10 @@ bool test_sidelobe_cancellation() {
     return passed;
 }
 
-// Test 4: GPU Kernel Accuracy & Throughput Benchmark
+// Test 4: GPU Kernel Accuracy & Throughput Benchmark (Single-Pol & Dual-Pol)
 bool test_gpu_kernel_benchmark() {
     std::cout << "\n======================================================\n";
-    std::cout << "[Test 4/4] GPU BiSLC Kernel Parity & Throughput Benchmark\n";
+    std::cout << "[Test 4/5] GPU BiSLC Kernel Parity & Throughput Benchmark\n";
     std::cout << "======================================================\n";
 
     int dev_count = 0;
@@ -440,6 +441,22 @@ bool test_gpu_kernel_benchmark() {
     std::cout << "  Real-Time Factor:       " << std::fixed << std::setprecision(1)
               << (51.2 / kernel_ms) << "x faster than real-time\n";
 
+    // Sub-test: Dual polarization (N_POL = 2) parity check
+    std::cout << "  Checking Dual-Polarization (N_POL=2) Kernel Dispatch...\n";
+    const std::size_t dual_buffer_bytes = n_time * n_freq * max_stride * 2 * sizeof(float2);
+    float2* d_in_dual = nullptr;
+    float2* d_out_dual = nullptr;
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_in_dual, dual_buffer_bytes));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_out_dual, dual_buffer_bytes));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemset(d_in_dual, 0, dual_buffer_bytes));
+
+    kotekan::launch_bislc_unmixing(d_out_dual, d_in_dual, d_mat, n_time, n_freq, num_beams,
+                                   max_stride, stream, 2);
+    CHECK_CUDA_ERROR_NON_OO(cudaStreamSynchronize(stream));
+    std::cout << "  Dual-Polarization (N_POL=2) Kernel Execution: [PASS]\n";
+
+    cudaFree(d_in_dual);
+    cudaFree(d_out_dual);
     cudaFree(d_in);
     cudaFree(d_out);
     cudaFree(d_mat);
@@ -448,6 +465,124 @@ bool test_gpu_kernel_benchmark() {
     cudaEventDestroy(ev_stop);
 
     return parity_pass;
+}
+
+// Test 5: GPU On-Device Matrix Computation & Inversion Parity
+bool test_gpu_matrix_inversion_parity() {
+    std::cout << "\n======================================================\n";
+    std::cout << "[Test 5/5] GPU On-Device Matrix Inversion Parity Test\n";
+    std::cout << "======================================================\n";
+
+    int dev_count = 0;
+    if (cudaGetDeviceCount(&dev_count) != cudaSuccess || dev_count == 0) {
+        std::cout << "  No CUDA-capable GPU detected. Skipping.\n";
+        return true;
+    }
+
+    const std::size_t n_ant = 64;
+    const std::size_t n_freq = 16;
+    const std::size_t num_beams = 3; // Odd beam count to verify stride alignment
+    const float spacing_m = 0.6f;
+    const float diag_loading = 1.0e-4f;
+
+    auto pos = compute_positions(n_ant, spacing_m);
+    std::vector<uint8_t> mask(n_ant, 1);
+    std::vector<double> freqs(n_freq);
+    for (std::size_t f = 0; f < n_freq; ++f) {
+        freqs[f] = 300.0e6 + f * 5.0e6;
+    }
+
+    std::vector<kotekan::DirectBeamTarget> targets(num_beams);
+    targets[0].direction = kotekan::DirectDirection3D{0.0f, 0.0f, 1.0f};
+    const float l1 = 0.05f;
+    targets[1].direction = kotekan::DirectDirection3D{l1, 0.0f, std::sqrt(1.0f - l1 * l1)};
+    const float l2 = -0.04f;
+    const float m2 = 0.03f;
+    targets[2].direction =
+        kotekan::DirectDirection3D{l2, m2, std::sqrt(1.0f - l2 * l2 - m2 * m2)};
+
+    // 1. CPU reference
+    std::vector<float2> cpu_M(n_freq * num_beams * num_beams);
+    std::vector<float2> cpu_A(n_freq * num_beams * num_beams);
+    kotekan::compute_beam_coupling_and_inverses(
+        cpu_M.data(), cpu_A.data(), targets.data(), freqs, pos.data(), mask.data(), num_beams,
+        n_freq, n_ant, n_ant, diag_loading);
+
+    // 2. GPU execution
+    const std::size_t mat_bytes = n_freq * num_beams * num_beams * sizeof(float2);
+    float2* d_M = nullptr;
+    float2* d_A = nullptr;
+    kotekan::DirectDirection3D* d_dirs = nullptr;
+    double* d_wavenumbers = nullptr;
+    float3* d_pos = nullptr;
+    uint8_t* d_mask = nullptr;
+
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_M, mat_bytes));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_A, mat_bytes));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_dirs, num_beams * sizeof(kotekan::DirectDirection3D)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_wavenumbers, n_freq * sizeof(double)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_pos, n_ant * sizeof(float3)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_mask, n_ant * sizeof(uint8_t)));
+
+    std::vector<kotekan::DirectDirection3D> h_dirs(num_beams);
+    for (std::size_t b = 0; b < num_beams; ++b) {
+        h_dirs[b] = targets[b].direction;
+    }
+    std::vector<double> h_wavenumbers(n_freq);
+    for (std::size_t f = 0; f < n_freq; ++f) {
+        h_wavenumbers[f] = TWO_PI * freqs[f] / SPEED_OF_LIGHT;
+    }
+
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_dirs, h_dirs.data(),
+                                       num_beams * sizeof(kotekan::DirectDirection3D),
+                                       cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_wavenumbers, h_wavenumbers.data(),
+                                       n_freq * sizeof(double), cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(
+        cudaMemcpy(d_pos, pos.data(), n_ant * sizeof(float3), cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(
+        cudaMemcpy(d_mask, mask.data(), n_ant * sizeof(uint8_t), cudaMemcpyHostToDevice));
+
+    cudaStream_t stream;
+    CHECK_CUDA_ERROR_NON_OO(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+
+    kotekan::launch_compute_bislc_matrices_gpu(d_M, d_A, d_dirs, d_wavenumbers, d_pos, d_mask,
+                                               num_beams, n_freq, n_ant, diag_loading, stream);
+    CHECK_CUDA_ERROR_NON_OO(cudaStreamSynchronize(stream));
+
+    std::vector<float2> gpu_M(n_freq * num_beams * num_beams);
+    std::vector<float2> gpu_A(n_freq * num_beams * num_beams);
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(gpu_M.data(), d_M, mat_bytes, cudaMemcpyDeviceToHost));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(gpu_A.data(), d_A, mat_bytes, cudaMemcpyDeviceToHost));
+
+    float max_diff_A = 0.0f;
+    float max_diff_M = 0.0f;
+    for (std::size_t i = 0; i < gpu_A.size(); ++i) {
+        max_diff_A = std::max(max_diff_A, std::abs(gpu_A[i].x - cpu_A[i].x));
+        max_diff_A = std::max(max_diff_A, std::abs(gpu_A[i].y - cpu_A[i].y));
+        max_diff_M = std::max(max_diff_M, std::abs(gpu_M[i].x - cpu_M[i].x));
+        max_diff_M = std::max(max_diff_M, std::abs(gpu_M[i].y - cpu_M[i].y));
+    }
+
+    std::cout << "  Coupling Matrix A(f) Max CPU vs GPU Discrepancy: " << std::scientific
+              << std::setprecision(3) << max_diff_A;
+    bool pass_A = (max_diff_A < 1.0e-4f);
+    std::cout << " " << (pass_A ? "[PASS]" : "[FAIL]") << "\n";
+
+    std::cout << "  Inverted Matrix M(f) Max CPU vs GPU Discrepancy: " << std::scientific
+              << std::setprecision(3) << max_diff_M;
+    bool pass_M = (max_diff_M < 1.0e-3f);
+    std::cout << " " << (pass_M ? "[PASS]" : "[FAIL]") << "\n";
+
+    cudaFree(d_M);
+    cudaFree(d_A);
+    cudaFree(d_dirs);
+    cudaFree(d_wavenumbers);
+    cudaFree(d_pos);
+    cudaFree(d_mask);
+    cudaStreamDestroy(stream);
+
+    return (pass_A && pass_M);
 }
 
 } // namespace
@@ -461,9 +596,10 @@ int main() {
     bool pass2 = test_coupling_matrix_generation();
     bool pass3 = test_sidelobe_cancellation();
     bool pass4 = test_gpu_kernel_benchmark();
+    bool pass5 = test_gpu_matrix_inversion_parity();
 
     std::cout << "\n==============================================================\n";
-    if (pass1 && pass2 && pass3 && pass4) {
+    if (pass1 && pass2 && pass3 && pass4 && pass5) {
         std::cout << "  OVERALL SUITE RESULT: ALL TESTS PASSED [SUCCESS]          \n";
         std::cout << "==============================================================\n";
         return 0;

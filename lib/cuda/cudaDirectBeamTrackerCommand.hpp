@@ -48,15 +48,15 @@ private:
 
     int32_t _num_local_freq = 1;
     int32_t _samples_per_data_set = 15360;
-    float _spacing_m = 0.5f;
-    int32_t _buffer_depth = 4;
-    int32_t _max_beams = 1;
+    float _spacing_m = 0.6f;
+    int32_t _buffer_depth = 3;
+    int32_t _max_beams = 2;
     std::size_t _time_chunk_size = 256;
     std::size_t _time_unroll = 4;
     std::size_t _beam_tile_size = 4;
     std::string _antenna_order = "descending";
 
-    // Per-instance generation trackers to support multi-instance Kotekan pipelines
+    // Per-instance generation trackers for multi-stream synchronization
     std::uint64_t _applied_config_generation = 0;
     std::uint64_t _applied_mask_generation = 0;
 
@@ -72,14 +72,14 @@ private:
 
     std::vector<double> _frequencies_hz;
 
-    // Contiguous GPU buffer for _d_weights and _d_step_weights
+    // Persistent GPU buffers
     float2* _d_weights = nullptr;
     float2* _d_step_weights = nullptr;
     DirectDirection3D* _d_directions = nullptr;
     DirectDirection3D* _d_directions_end = nullptr;
     double* _d_wavenumbers = nullptr;
     float3* _d_antenna_positions = nullptr;
-    std::uint8_t* _d_antenna_mask = nullptr;
+    float* _d_norm_taper = nullptr;
     float2* _d_calibration_gains = nullptr;
 
     // Sky grid support
@@ -90,7 +90,6 @@ private:
     float2* _d_grid_weights = nullptr;
     float2* _d_grid_lms = nullptr;
 
-    // Thread-safe shared configuration for live dynamic updates
     static std::mutex _global_mutex;
     static DirectBeamTrackerConfig _shared_config;
     static bool _endpoints_registered;
