@@ -79,6 +79,10 @@ class SimulatedEvent:
         return asdict(self)
 
 
+# Maximum number of contiguous channels occupied by a simulated LEO downlink.
+LEO_MAX_CHANNELS = 3
+
+
 def schedule_random_events(
     duration_s: float = 60.0,
     num_events: int = 3,
@@ -271,6 +275,12 @@ def schedule_random_events(
             dm = float(drift_speed * math.sin(drift_ang))
             l0 = float(rng.uniform(-0.1, 0.1))
             m0 = float(rng.uniform(-0.1, 0.1))
+            # Satellite downlinks are narrowband (kHz to a few hundred kHz):
+            # a contiguous block of LEO_MAX_CHANNELS channels at most.
+            leo_rng = np.random.default_rng([seed, idx, 0x4C454F])
+            n_leo = int(leo_rng.integers(1, min(LEO_MAX_CHANNELS, num_freq) + 1))
+            c_start = int(leo_rng.integers(0, num_freq - n_leo + 1))
+            chans = list(range(c_start, c_start + n_leo))
 
             events.append(
                 SimulatedEvent(
@@ -283,7 +293,8 @@ def schedule_random_events(
                     m0=m0,
                     drift_dl=dl,
                     drift_dm=dm,
-                    description=f"LEO Satellite RFI sweep (amp={amp:.1f} LSB, dur={duration:.1f} s, drift={drift_speed:.3f}/s)",
+                    channels=chans,
+                    description=f"LEO Satellite RFI sweep on channels {chans} (amp={amp:.1f} LSB, dur={duration:.1f} s, drift={drift_speed:.3f}/s)",
                 )
             )
 
@@ -559,7 +570,18 @@ def render_and_write_frame(job: Dict[str, Any]) -> Tuple[int, int, float, float,
                     )
 
             elif ev_type == "rfi_leo":
-                _add_source(v_real, v_imag, ev_amp, tot_phase, w_ev)
+                leo_chans = ev.get("channels")
+                if not leo_chans:
+                    _add_source(v_real, v_imag, ev_amp, tot_phase, w_ev)
+                else:
+                    for ch in (c for c in leo_chans if c < num_freq):
+                        _add_source(
+                            v_real[:, ch : ch + 1, :],
+                            v_imag[:, ch : ch + 1, :],
+                            ev_amp,
+                            tot_phase[:, ch : ch + 1, :],
+                            None if w_ev is None else w_ev[:, ch : ch + 1],
+                        )
 
         pwr_chunk = v_real**2 + v_imag**2
         total_power_sum += float(np.sum(pwr_chunk))
@@ -646,8 +668,9 @@ def compute_analytic_lightcurve(
                 p_total[mask] += amp_sq * frac_chans
 
         elif ev.event_type == "rfi_leo":
+            frac_chans = len(ev.channels) / len(freqs_hz) if ev.channels else 1.0
             mask = (t_points >= t0) & (t_points <= t0 + dur)
-            p_total[mask] += amp_sq
+            p_total[mask] += amp_sq * frac_chans
 
     return t_points, p_total
 
