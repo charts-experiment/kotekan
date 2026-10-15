@@ -50,8 +50,8 @@ cudaBiSLCCommand::cudaBiSLCCommand(Config& config, const std::string& unique_nam
     _num_pols = config.get_default<int>(unique_name, "num_pols", 1);
     if (config.exists(unique_name, "num_antennas")) {
         _num_antennas = config.get<int>(unique_name, "num_antennas");
-        _num_elements = config.get_default<int>(unique_name, "num_elements",
-                                                _num_antennas * _num_pols);
+        _num_elements =
+            config.get_default<int>(unique_name, "num_elements", _num_antennas * _num_pols);
     } else {
         _num_elements = config.get<int>(unique_name, "num_elements");
         _num_antennas = _num_elements / std::max(1, _num_pols);
@@ -200,10 +200,8 @@ cudaBiSLCCommand::~cudaBiSLCCommand() {
 }
 
 void cudaBiSLCCommand::allocate_device_buffers() {
-    const std::size_t max_b =
-        std::min(static_cast<std::size_t>(_max_beams), MAX_BISLC_BEAMS);
-    const std::size_t matrix_elems =
-        static_cast<std::size_t>(_num_local_freq) * max_b * max_b;
+    const std::size_t max_b = std::min(static_cast<std::size_t>(_max_beams), MAX_BISLC_BEAMS);
+    const std::size_t matrix_elems = static_cast<std::size_t>(_num_local_freq) * max_b * max_b;
     const std::size_t matrix_bytes = matrix_elems * sizeof(float2);
 
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_unmix_matrices, matrix_bytes));
@@ -270,8 +268,7 @@ void cudaBiSLCCommand::free_device_buffers() {
 
 void cudaBiSLCCommand::update_matrices_if_needed(cudaStream_t stream) {
     // Poll Direct Beam Tracker state first so beam count, targets, and masks are always fresh
-    const DirectBeamTrackerConfig tracker_cfg =
-        cudaDirectBeamTrackerCommand::get_shared_config();
+    const DirectBeamTrackerConfig tracker_cfg = cudaDirectBeamTrackerCommand::get_shared_config();
 
     BiSLCConfig current_cfg;
     bool needs_update = false;
@@ -306,12 +303,13 @@ void cudaBiSLCCommand::update_matrices_if_needed(cudaStream_t stream) {
         }
     }
 
-    if (!needs_update) return;
+    if (!needs_update)
+        return;
 
-    const std::size_t B = std::min({current_cfg.num_active_beams,
-                                    static_cast<std::size_t>(_max_beams),
-                                    MAX_BISLC_BEAMS});
-    if (B <= 1) return;
+    const std::size_t B = std::min(
+        {current_cfg.num_active_beams, static_cast<std::size_t>(_max_beams), MAX_BISLC_BEAMS});
+    if (B <= 1)
+        return;
 
     for (std::size_t b = 0; b < B; ++b) {
         _h_directions[b] = current_cfg.targets[b].direction;
@@ -322,11 +320,11 @@ void cudaBiSLCCommand::update_matrices_if_needed(cudaStream_t stream) {
     }
 
     CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_d_directions, _h_directions,
-                                            B * sizeof(DirectDirection3D),
-                                            cudaMemcpyHostToDevice, stream));
+                                            B * sizeof(DirectDirection3D), cudaMemcpyHostToDevice,
+                                            stream));
     CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_d_antenna_positions, _h_antenna_positions,
-                                            _num_elements * sizeof(float3),
-                                            cudaMemcpyHostToDevice, stream));
+                                            _num_elements * sizeof(float3), cudaMemcpyHostToDevice,
+                                            stream));
     CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_d_antenna_mask, _h_antenna_mask,
                                             _num_elements * sizeof(std::uint8_t),
                                             cudaMemcpyHostToDevice, stream));
@@ -334,21 +332,18 @@ void cudaBiSLCCommand::update_matrices_if_needed(cudaStream_t stream) {
     // Compute A(f) and M(f) = (A(f) + eps*I)^-1 directly on the GPU in-stream
     launch_compute_bislc_matrices_gpu(
         _d_unmix_matrices, _d_coupling_matrices, _d_directions, _d_wavenumbers,
-        _d_antenna_positions, _d_antenna_mask, B,
-        static_cast<std::size_t>(_num_local_freq),
-        static_cast<std::size_t>(_num_elements),
-        current_cfg.diagonal_loading, stream);
+        _d_antenna_positions, _d_antenna_mask, B, static_cast<std::size_t>(_num_local_freq),
+        static_cast<std::size_t>(_num_elements), current_cfg.diagonal_loading, stream);
 }
 
 cudaEvent_t cudaBiSLCCommand::execute(cudaPipelineState& /*pipestate*/,
                                       const std::vector<cudaEvent_t>&) {
     pre_execute();
 
-    const std::size_t buffer_bytes =
-        static_cast<std::size_t>(_num_local_freq)
-        * static_cast<std::size_t>(_samples_per_data_set)
-        * static_cast<std::size_t>(_max_beams)
-        * static_cast<std::size_t>(_num_pols) * sizeof(float2);
+    const std::size_t buffer_bytes = static_cast<std::size_t>(_num_local_freq)
+                                     * static_cast<std::size_t>(_samples_per_data_set)
+                                     * static_cast<std::size_t>(_max_beams)
+                                     * static_cast<std::size_t>(_num_pols) * sizeof(float2);
 
     void* input_memory = device.get_gpu_memory_array(_gpu_mem_formed_beams, gpu_frame_id,
                                                      _gpu_buffer_depth, buffer_bytes);
@@ -376,9 +371,8 @@ cudaEvent_t cudaBiSLCCommand::execute(cudaPipelineState& /*pipestate*/,
     update_matrices_if_needed(stream);
 
     const BiSLCConfig current_config = get_shared_config();
-    const std::size_t active_beams = std::min({current_config.num_active_beams,
-                                               static_cast<std::size_t>(_max_beams),
-                                               MAX_BISLC_BEAMS});
+    const std::size_t active_beams = std::min(
+        {current_config.num_active_beams, static_cast<std::size_t>(_max_beams), MAX_BISLC_BEAMS});
 
     if (!current_config.enabled || active_beams <= 1) {
         if (output_memory != input_memory) {
@@ -389,15 +383,10 @@ cudaEvent_t cudaBiSLCCommand::execute(cudaPipelineState& /*pipestate*/,
     }
 
     launch_bislc_unmixing(
-        reinterpret_cast<float2*>(output_memory),
-        reinterpret_cast<const float2*>(input_memory),
-        _d_unmix_matrices,
-        static_cast<std::size_t>(_samples_per_data_set),
-        static_cast<std::size_t>(_num_local_freq),
-        active_beams,
-        static_cast<std::size_t>(_max_beams),
-        stream,
-        static_cast<std::size_t>(_num_pols));
+        reinterpret_cast<float2*>(output_memory), reinterpret_cast<const float2*>(input_memory),
+        _d_unmix_matrices, static_cast<std::size_t>(_samples_per_data_set),
+        static_cast<std::size_t>(_num_local_freq), active_beams,
+        static_cast<std::size_t>(_max_beams), stream, static_cast<std::size_t>(_num_pols));
 
     return record_end_event();
 }

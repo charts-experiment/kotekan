@@ -58,7 +58,8 @@ struct BiSLCConfig {
 };
 
 /**
- * @brief Invert a B x B complex matrix using Gauss-Jordan elimination with partial pivoting in double precision.
+ * @brief Invert a B x B complex matrix using Gauss-Jordan elimination with partial pivoting in
+ * double precision.
  *
  * @param A_in          Input B x B complex matrix [B * B] (row-major: A[i * B + j])
  * @param M_out         Output inverted B x B complex matrix [B * B] (row-major)
@@ -68,7 +69,8 @@ struct BiSLCConfig {
  */
 inline bool invert_complex_matrix(const float2* A_in, float2* M_out, std::size_t B,
                                   float diag_loading = 1.0e-4f) {
-    if (B == 0) return true;
+    if (B == 0)
+        return true;
     if (B == 1) {
         const float ar = A_in[0].x + diag_loading;
         const float ai = A_in[0].y;
@@ -81,7 +83,8 @@ inline bool invert_complex_matrix(const float2* A_in, float2* M_out, std::size_t
         return true;
     }
 
-    if (B > MAX_BISLC_BEAMS) return false;
+    if (B > MAX_BISLC_BEAMS)
+        return false;
 
     std::complex<double> aug[MAX_BISLC_BEAMS][2 * MAX_BISLC_BEAMS];
 
@@ -91,8 +94,8 @@ inline bool invert_complex_matrix(const float2* A_in, float2* M_out, std::size_t
             if (i == j) {
                 aug[i][j] += std::complex<double>(diag_loading, 0.0);
             }
-            aug[i][B + j] = (i == j) ? std::complex<double>(1.0, 0.0)
-                                     : std::complex<double>(0.0, 0.0);
+            aug[i][B + j] =
+                (i == j) ? std::complex<double>(1.0, 0.0) : std::complex<double>(0.0, 0.0);
         }
     }
 
@@ -111,8 +114,7 @@ inline bool invert_complex_matrix(const float2* A_in, float2* M_out, std::size_t
         if (max_norm_sq < 1.0e-18) {
             for (std::size_t i = 0; i < B; ++i) {
                 for (std::size_t j = 0; j < B; ++j) {
-                    M_out[i * B + j] = (i == j) ? make_float2(1.0f, 0.0f)
-                                                : make_float2(0.0f, 0.0f);
+                    M_out[i * B + j] = (i == j) ? make_float2(1.0f, 0.0f) : make_float2(0.0f, 0.0f);
                 }
             }
             return false;
@@ -141,9 +143,8 @@ inline bool invert_complex_matrix(const float2* A_in, float2* M_out, std::size_t
 
     for (std::size_t i = 0; i < B; ++i) {
         for (std::size_t j = 0; j < B; ++j) {
-            M_out[i * B + j] = make_float2(
-                static_cast<float>(aug[i][B + j].real()),
-                static_cast<float>(aug[i][B + j].imag()));
+            M_out[i * B + j] = make_float2(static_cast<float>(aug[i][B + j].real()),
+                                           static_cast<float>(aug[i][B + j].imag()));
         }
     }
     return true;
@@ -152,62 +153,42 @@ inline bool invert_complex_matrix(const float2* A_in, float2* M_out, std::size_t
 /**
  * @brief Host helper: Compute the B x B complex beam coupling matrix A(f) and its inverse M(f).
  */
-void compute_beam_coupling_and_inverses(
-    float2* M_out,
-    float2* A_out,
-    const DirectBeamTarget* targets,
-    const std::vector<double>& frequencies_hz,
-    const float3* antenna_positions,
-    const std::uint8_t* antenna_mask,
-    std::size_t num_beams,
-    std::size_t n_freq,
-    std::size_t n_elem,
-    std::size_t n_active,
-    float diag_loading = 1.0e-4f);
+void compute_beam_coupling_and_inverses(float2* M_out, float2* A_out,
+                                        const DirectBeamTarget* targets,
+                                        const std::vector<double>& frequencies_hz,
+                                        const float3* antenna_positions,
+                                        const std::uint8_t* antenna_mask, std::size_t num_beams,
+                                        std::size_t n_freq, std::size_t n_elem,
+                                        std::size_t n_active, float diag_loading = 1.0e-4f);
 
 /**
- * @brief GPU-accelerated computation of coupling matrices A(f) and unmixing inverses M(f) = (A(f) + eps*I)^-1.
- *        Executes in-stream on device without stalling host CPU or PCIe bus.
+ * @brief GPU-accelerated computation of coupling matrices A(f) and unmixing inverses M(f) = (A(f) +
+ * eps*I)^-1. Executes in-stream on device without stalling host CPU or PCIe bus.
  */
-void launch_compute_bislc_matrices_gpu(
-    float2* d_unmix_matrices,
-    float2* d_coupling_matrices,
-    const DirectDirection3D* d_directions,
-    const double* d_wavenumbers,
-    const float3* d_antenna_positions,
-    const std::uint8_t* d_antenna_mask,
-    std::size_t num_beams,
-    std::size_t n_freq,
-    std::size_t n_elem,
-    float diag_loading,
-    cudaStream_t stream = nullptr);
+void launch_compute_bislc_matrices_gpu(float2* d_unmix_matrices, float2* d_coupling_matrices,
+                                       const DirectDirection3D* d_directions,
+                                       const double* d_wavenumbers,
+                                       const float3* d_antenna_positions,
+                                       const std::uint8_t* d_antenna_mask, std::size_t num_beams,
+                                       std::size_t n_freq, std::size_t n_elem, float diag_loading,
+                                       cudaStream_t stream = nullptr);
 
 /**
  * @brief Launch bank-conflict-free Blackwell BiSLC (Joint Matrix Unmixing) kernel.
  *        Supports n_pol = 1 or 2 and arbitrary active beams up to MAX_BISLC_BEAMS.
  */
-void launch_bislc_unmixing(
-    float2* d_cleaned_voltages,
-    const float2* d_formed_voltages,
-    const float2* d_unmix_matrices,
-    std::size_t n_time,
-    std::size_t n_freq,
-    std::size_t num_active_beams,
-    std::size_t max_beams_stride,
-    cudaStream_t stream = nullptr,
-    std::size_t n_pol = 1);
+void launch_bislc_unmixing(float2* d_cleaned_voltages, const float2* d_formed_voltages,
+                           const float2* d_unmix_matrices, std::size_t n_time, std::size_t n_freq,
+                           std::size_t num_active_beams, std::size_t max_beams_stride,
+                           cudaStream_t stream = nullptr, std::size_t n_pol = 1);
 
 /**
  * @brief Optional Weight-Space Sidelobe Cancellation:
  *        Pre-multiplies steering weights W_clean(f) = M(f) * W(f) directly on GPU.
  */
-void launch_apply_bislc_to_weights(
-    float2* d_weights_inout,
-    const float2* d_unmix_matrices,
-    std::size_t num_active_beams,
-    std::size_t n_freq,
-    std::size_t n_elem,
-    cudaStream_t stream = nullptr);
+void launch_apply_bislc_to_weights(float2* d_weights_inout, const float2* d_unmix_matrices,
+                                   std::size_t num_active_beams, std::size_t n_freq,
+                                   std::size_t n_elem, cudaStream_t stream = nullptr);
 
 } // namespace kotekan
 
