@@ -84,8 +84,8 @@ generate_rfsoc_data(std::size_t n_time, std::size_t n_freq, std::size_t n_ant,
                 const float r_float = amp * static_cast<float>(std::cos(phase));
                 const float i_float = amp * static_cast<float>(std::sin(phase));
 
-                const int r_val = std::max(-8, std::min(7, static_cast<int>(std::round(r_float))));
-                const int i_val = std::max(-8, std::min(7, static_cast<int>(std::round(i_float))));
+                const int r_val = std::max(-7, std::min(7, static_cast<int>(std::round(r_float))));
+                const int i_val = std::max(-7, std::min(7, static_cast<int>(std::round(i_float))));
                 buffer[idx].val = static_cast<uint8_t>((r_val & 0x0F) | ((i_val & 0x0F) << 4));
             }
         }

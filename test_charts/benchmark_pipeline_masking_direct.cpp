@@ -69,8 +69,8 @@ void generate_test_frame(std::vector<kotekan::int4x2_t>& data, std::size_t n_tim
                     const float val_r = sig_re + noise_dist(rng);
                     const float val_i = sig_im + noise_dist(rng);
 
-                    const int cl_r = std::max(-8, std::min(7, static_cast<int>(std::round(val_r))));
-                    const int cl_i = std::max(-8, std::min(7, static_cast<int>(std::round(val_i))));
+                    const int cl_r = std::max(-7, std::min(7, static_cast<int>(std::round(val_r))));
+                    const int cl_i = std::max(-7, std::min(7, static_cast<int>(std::round(val_i))));
 
                     data[s * n_ant + a].val =
                         static_cast<uint8_t>((cl_r & 0x0F) | ((cl_i & 0x0F) << 4));
