@@ -50,7 +50,7 @@ from sim.constants import (
     CHARTS_LONGITUDE_DEG,
     DEFAULT_FREQUENCY_START_MHZ,
 )
-from sim.generator import generate_simulation_window
+from sim.generator import SOURCE_MODELS, generate_simulation_window
 from sim.inspector import (
     inspect_correlator_matrix,
     inspect_tracker_dump,
@@ -78,6 +78,42 @@ from sim.visualizer import (
     plot_correlator_waterfalls,
     plot_tracker_waterfall,
 )
+
+
+def add_scenario_arguments(parser: argparse.ArgumentParser) -> None:
+    """Adds the scenario-control options shared by 'generate' and 'pipeline'."""
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Window seed (noise, antenna gains, random events). Default: legacy "
+        "int(1000 * utc_hour + 42), independent of --start-time",
+    )
+    parser.add_argument(
+        "--events-json",
+        type=str,
+        default=None,
+        help="Load events from a file in the <window>_events.json format instead of "
+        "scheduling them at random (--num-events is then ignored)",
+    )
+    parser.add_argument(
+        "--source-model",
+        type=str,
+        default=None,
+        choices=list(SOURCE_MODELS),
+        help="Signal model of sky sources and RFI (default: gaussian)",
+    )
+
+
+def apply_scenario_args(cfg: SimulationConfig, args: argparse.Namespace) -> SimulationConfig:
+    """Copies the scenario-control options from parsed arguments into cfg."""
+    if getattr(args, "seed", None) is not None:
+        cfg.seed = args.seed
+    if getattr(args, "events_json", None):
+        cfg.events_json = Path(args.events_json)
+    if getattr(args, "source_model", None):
+        cfg.source_model = args.source_model
+    return cfg
 
 
 def run_pipeline(cfg: SimulationConfig) -> int:
@@ -387,6 +423,7 @@ def main():
         action="store_true",
         help="Generate configs and simulate without running Kotekan binary",
     )
+    add_scenario_arguments(pipe_parser)
 
     # 2. Generate subcommand
     gen_parser = subparsers.add_parser(
@@ -447,6 +484,7 @@ def main():
         default="./scratch_charts_sim",
         help="Target output directory",
     )
+    add_scenario_arguments(gen_parser)
 
     # Catalog subcommand
     subparsers.add_parser(
@@ -632,6 +670,7 @@ def main():
                 cfg.workers = args.workers
             cfg.skip_tracker = args.skip_tracker
             cfg.dry_run = args.dry_run
+            apply_scenario_args(cfg, args)
 
             ret = run_pipeline(cfg)
             if ret != 0:
@@ -650,6 +689,7 @@ def main():
             cfg.num_events = args.num_events
             cfg.scratch_dir = Path(args.scratch_dir)
             cfg.window_name = f"charts_sim_{ant}ant"
+            apply_scenario_args(cfg, args)
             if args.transit_target:
                 cfg.start_time = f"transit:{args.transit_target}"
                 dt = resolve_window_start(cfg.start_time, duration_s=cfg.duration_s)

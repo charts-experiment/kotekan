@@ -17,7 +17,7 @@ import datetime
 import json
 import math
 import multiprocessing as mp
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -81,6 +81,54 @@ class SimulatedEvent:
 
 # Maximum number of contiguous channels occupied by a simulated LEO downlink.
 LEO_MAX_CHANNELS = 3
+
+
+EVENT_TYPES = ("frb", "pulsar", "rfi_narrow", "rfi_leo")
+_EVENT_REQUIRED = ("event_id", "event_type", "t_start_s", "duration_s")
+
+
+def resolve_seed(config: SimulationConfig) -> int:
+    """Window seed: config.seed if set, else the legacy int(1000 * utc_hour + 42)."""
+    if getattr(config, "seed", None) is not None:
+        return int(config.seed)
+    return int(1000 * config.utc_hour + 42)
+
+
+def load_events_json(path: Any) -> List[SimulatedEvent]:
+    """Loads an event list in the format written to <window>_events.json.
+
+    Each entry must have event_id, event_type, t_start_s and duration_s; the
+    other SimulatedEvent fields are optional and take their defaults. Unknown
+    keys, unknown event types and duplicated event_id values are rejected, so a
+    typo cannot silently change the scenario. A file written by the generator
+    reproduces its window exactly (same seed and configuration).
+    """
+    path = Path(path)
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, list):
+        raise ValueError(f"{path}: expected a JSON list of events")
+    known = {fld.name for fld in fields(SimulatedEvent)}
+    events: List[SimulatedEvent] = []
+    for i, entry in enumerate(data):
+        if not isinstance(entry, dict):
+            raise ValueError(f"{path}: event {i} is not an object")
+        unknown = sorted(set(entry) - known)
+        if unknown:
+            raise ValueError(f"{path}: event {i} has unknown keys {unknown}")
+        missing = [k for k in _EVENT_REQUIRED if k not in entry]
+        if missing:
+            raise ValueError(f"{path}: event {i} misses required keys {missing}")
+        if entry["event_type"] not in EVENT_TYPES:
+            raise ValueError(
+                f"{path}: event {i} has event_type {entry['event_type']!r}, "
+                f"expected one of {EVENT_TYPES}"
+            )
+        events.append(SimulatedEvent(**entry))
+    ids = [ev.event_id for ev in events]
+    if len(set(ids)) != len(ids):
+        raise ValueError(f"{path}: duplicated event_id values")
+    return events
 
 
 def schedule_random_events(
@@ -727,7 +775,7 @@ def generate_simulation_window(
     ) * 1e6
     pos_x, pos_y = get_antenna_positions(num_antennas=config.antennas)
 
-    seed = int(1000 * config.utc_hour + 42)
+    seed = resolve_seed(config)
     noise_model = ChartsNoiseModel()
     sigma_ant_base = noise_model.generate_antenna_gain_dispersion(
         num_antennas=config.antennas, seed=seed
@@ -802,16 +850,20 @@ def generate_simulation_window(
         ]
     rfi_channels = [ch for ch in rfi_channels if 0 <= ch < config.num_freq]
 
-    events = schedule_random_events(
-        duration_s=config.duration_s,
-        num_events=config.num_events,
-        seed=seed + 77,
-        persistent_rfi_channels=rfi_channels,
-        persistent_rfi_amp=config.persistent_rfi_amp,
-        allowed_types=getattr(config, "allowed_event_types", None),
-        num_freq=config.num_freq,
-        obs_time=obs_time_val,
-    )
+    events_json = getattr(config, "events_json", None)
+    if events_json:
+        events = load_events_json(events_json)
+    else:
+        events = schedule_random_events(
+            duration_s=config.duration_s,
+            num_events=config.num_events,
+            seed=seed + 77,
+            persistent_rfi_channels=rfi_channels,
+            persistent_rfi_amp=config.persistent_rfi_amp,
+            allowed_types=getattr(config, "allowed_event_types", None),
+            num_freq=config.num_freq,
+            obs_time=obs_time_val,
+        )
 
     written_indices, frame_events_map = build_frame_selection_schedule(
         total_frames=total_window_frames,
@@ -847,6 +899,10 @@ def generate_simulation_window(
         f" Sun Elevation           : {sun_el:+.2f} deg ({'UP' if sun_is_up else 'DOWN'})"
     )
     print(f" Active Events Scheduled : {len(events)}")
+    print(
+        f" Events Source           : {events_json if events_json else 'random schedule'}"
+    )
+    print(f" Seed                    : {seed}")
     print(f" Source Model            : {getattr(config, 'source_model', 'gaussian')}")
     print(f" Workers                 : {config.workers}")
     print("=" * 76)
