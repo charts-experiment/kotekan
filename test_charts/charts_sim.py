@@ -105,7 +105,9 @@ def add_scenario_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def apply_scenario_args(cfg: SimulationConfig, args: argparse.Namespace) -> SimulationConfig:
+def apply_scenario_args(
+    cfg: SimulationConfig, args: argparse.Namespace
+) -> SimulationConfig:
     """Copies the scenario-control options from parsed arguments into cfg."""
     if getattr(args, "seed", None) is not None:
         cfg.seed = args.seed
