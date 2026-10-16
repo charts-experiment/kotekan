@@ -31,8 +31,8 @@ std::vector<kotekan::int4x2_t> generate_synthetic_data(std::size_t n_time, std::
                 const double phase = two_pi * (0.01 * t + 0.05 * f + 0.1 * a);
                 const int real_val = static_cast<int>(std::round(3.5 * std::cos(phase)));
                 const int imag_val = static_cast<int>(std::round(3.5 * std::sin(phase)));
-                const int clamped_r = std::max(-8, std::min(7, real_val));
-                const int clamped_i = std::max(-8, std::min(7, imag_val));
+                const int clamped_r = std::max(-7, std::min(7, real_val));
+                const int clamped_i = std::max(-7, std::min(7, imag_val));
                 const uint8_t byte_val =
                     static_cast<uint8_t>((clamped_r & 0x0F) | ((clamped_i & 0x0F) << 4));
                 data[(t * n_freq + f) * n_ant + a].val = byte_val;

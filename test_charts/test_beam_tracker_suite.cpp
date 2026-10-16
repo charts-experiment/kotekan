@@ -164,9 +164,9 @@ std::vector<kotekan::int4x2_t> simulate_rfsoc_ingest_and_shuffle(
                         const std::size_t src_idx = (t * n_freq + global_f) * n_ant + global_a;
 
                         const int r_val = std::max(
-                            -8, std::min(7, static_cast<int>(std::round(time_real[src_idx]))));
+                            -7, std::min(7, static_cast<int>(std::round(time_real[src_idx]))));
                         const int i_val = std::max(
-                            -8, std::min(7, static_cast<int>(std::round(time_imag[src_idx]))));
+                            -7, std::min(7, static_cast<int>(std::round(time_imag[src_idx]))));
                         const uint8_t byte_val =
                             static_cast<uint8_t>((r_val & 0x0F) | ((i_val & 0x0F) << 4));
 
