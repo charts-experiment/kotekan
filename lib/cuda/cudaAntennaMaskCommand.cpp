@@ -29,6 +29,8 @@ AntennaMaskConfig cudaAntennaMaskCommand::_shared_config;
 std::array<AntennaHealthMetrics, MAX_MASK_ANTENNAS> cudaAntennaMaskCommand::_shared_metrics{};
 std::array<std::uint8_t, MAX_MASK_ANTENNAS> cudaAntennaMaskCommand::_shared_mask{};
 bool cudaAntennaMaskCommand::_endpoints_registered = false;
+std::mutex cudaAntennaMaskCommand::_registry_mutex;
+std::vector<cudaAntennaMaskCommand*> cudaAntennaMaskCommand::_instances;
 
 namespace {
 
@@ -77,6 +79,17 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
         config.get_default<std::string>(unique_name, "gpu_mem_alive_voltages", "");
     _max_alive_antennas = config.get_default<int>(unique_name, "max_alive_antennas", _num_elements);
     _antenna_order = config.get_default<std::string>(unique_name, "antenna_order", "descending");
+    _freq_start_hz = config.get_default<double>(unique_name, "freq_start_hz", 300.0e6);
+    _subband_id = config.get_default<int>(unique_name, "subband", (_freq_start_hz > 350.0e6 ? 1 : 0));
+
+    _last_active_mask.resize(_num_elements, 1);
+    _last_power_rms.resize(_num_elements, 0.0f);
+    _last_clip_fraction.resize(_num_elements, 0.0f);
+
+    {
+        std::lock_guard<std::mutex> lk(_registry_mutex);
+        _instances.push_back(this);
+    }
 
     {
         std::lock_guard<std::mutex> lock(_global_mutex);
@@ -230,6 +243,67 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
                     {"revival_frames", _shared_config.revival_frames},
                     {"sample_stride", _shared_config.sample_stride}};
 
+                reply["manual_mask"] = nlohmann::json::array();
+                for (int a = 0; a < n_elem; ++a) {
+                    reply["manual_mask"].push_back(_shared_config.manual_mask[a] != 0 ? 1 : 0);
+                }
+
+                // Subband telemetry aggregation
+                nlohmann::json subbands_json = nlohmann::json::array();
+                std::vector<cudaAntennaMaskCommand*> sorted_instances;
+                {
+                    std::lock_guard<std::mutex> reg_lk(_registry_mutex);
+                    sorted_instances = _instances;
+                }
+                std::sort(sorted_instances.begin(), sorted_instances.end(),
+                          [](const cudaAntennaMaskCommand* a, const cudaAntennaMaskCommand* b) {
+                              return a->get_freq_start_hz() < b->get_freq_start_hz();
+                          });
+
+                if (!sorted_instances.empty()) {
+                    for (std::size_t s = 0; s < sorted_instances.size(); ++s) {
+                        auto* inst = sorted_instances[s];
+                        nlohmann::json sub;
+                        sub["subband"] = inst->get_subband_id();
+                        sub["freq_start_hz"] = inst->get_freq_start_hz();
+
+                        nlohmann::json act_mask = nlohmann::json::array();
+                        nlohmann::json pwr_rms = nlohmann::json::array();
+                        nlohmann::json clp_frac = nlohmann::json::array();
+
+                        const auto m_mask = inst->get_last_active_mask();
+                        const auto m_pwr = inst->get_last_power_rms();
+                        const auto m_clp = inst->get_last_clip_fraction();
+
+                        for (int a = 0; a < n_elem; ++a) {
+                            act_mask.push_back((a < static_cast<int>(m_mask.size())) ? m_mask[a] : 1);
+                            pwr_rms.push_back((a < static_cast<int>(m_pwr.size())) ? m_pwr[a] : 0.0f);
+                            clp_frac.push_back((a < static_cast<int>(m_clp.size())) ? m_clp[a] : 0.0f);
+                        }
+                        sub["active_mask"] = act_mask;
+                        sub["power_rms"] = pwr_rms;
+                        sub["clip_fraction"] = clp_frac;
+                        subbands_json.push_back(sub);
+                    }
+                } else {
+                    nlohmann::json sub;
+                    sub["subband"] = 0;
+                    sub["freq_start_hz"] = 300.0e6;
+                    nlohmann::json act_mask = nlohmann::json::array();
+                    nlohmann::json pwr_rms = nlohmann::json::array();
+                    nlohmann::json clp_frac = nlohmann::json::array();
+                    for (int a = 0; a < n_elem; ++a) {
+                        act_mask.push_back(_shared_mask[a] != 0 ? 1 : 0);
+                        pwr_rms.push_back(_shared_metrics[a].power);
+                        clp_frac.push_back(_shared_metrics[a].clipping_fraction);
+                    }
+                    sub["active_mask"] = act_mask;
+                    sub["power_rms"] = pwr_rms;
+                    sub["clip_fraction"] = clp_frac;
+                    subbands_json.push_back(sub);
+                }
+                reply["subbands"] = subbands_json;
+
                 int active_count = 0;
                 int dead_count = 0;
                 int sat_count = 0;
@@ -278,15 +352,19 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
                     }
 
                     ant_array.push_back({{"id", a},
+                                         {"antenna_id", a},
                                          {"raw_id", a},
                                          {"physical_id", phys_id},
                                          {"pol", _shared_config.raw_elem_to_pol(a)},
                                          {"active", active},
+                                         {"enabled", active},
                                          {"status", antenna_health_status_to_string(m.status)},
                                          {"power", m.power},
+                                         {"power_rms", m.power},
                                          {"ac_variance", m.ac_variance},
                                          {"dc_fraction", m.dc_fraction},
                                          {"clipping_fraction", m.clipping_fraction},
+                                         {"clip_fraction", m.clipping_fraction},
                                          {"kurtosis", m.kurtosis},
                                          {"iq_imbalance", m.iq_imbalance},
                                          {"robust_z_score", m.robust_z_score},
@@ -393,6 +471,12 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
                 [apply_rest_mask](connectionInstance& conn, nlohmann::json& j) {
                     apply_rest_mask(conn, j, true);
                 });
+            rest.register_post_callback(
+                "/antenna_mask/mask_antenna",
+                [apply_rest_mask](connectionInstance& conn, nlohmann::json& j) {
+                    bool enabled = j.value("enabled", false);
+                    apply_rest_mask(conn, j, enabled);
+                });
 
             // 4. POST /antenna_mask/reset
             auto reset_cb = [](connectionInstance& conn, nlohmann::json& /*j*/) {
@@ -477,6 +561,10 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
 }
 
 cudaAntennaMaskCommand::~cudaAntennaMaskCommand() {
+    {
+        std::lock_guard<std::mutex> lk(_registry_mutex);
+        _instances.erase(std::remove(_instances.begin(), _instances.end(), this), _instances.end());
+    }
     free_device_buffers();
 }
 
@@ -781,6 +869,18 @@ cudaEvent_t cudaAntennaMaskCommand::execute(cudaPipelineState& /*pipestate*/,
             const int n_active = static_cast<int>(_current_alive_indices.size());
             cudaDirectBeamTrackerCommand::set_shared_antenna_mask(_shared_mask, n_active);
         }
+
+        {
+            std::lock_guard<std::mutex> mlk(_metric_mutex);
+            _last_power_rms.resize(_num_elements);
+            _last_clip_fraction.resize(_num_elements);
+            _last_active_mask.resize(_num_elements);
+            for (int a = 0; a < _num_elements; ++a) {
+                _last_power_rms[a] = elem_power[a];
+                _last_clip_fraction[a] = elem_clip_frac[a];
+                _last_active_mask[a] = candidate_mask[a];
+            }
+        }
     } else {
         std::lock_guard<std::mutex> lk(_global_mutex);
         _current_bad_indices.clear();
@@ -796,6 +896,16 @@ cudaEvent_t cudaAntennaMaskCommand::execute(cudaPipelineState& /*pipestate*/,
             _applied_mask_generation = _shared_config.mask_generation;
             const int n_active = static_cast<int>(_current_alive_indices.size());
             cudaDirectBeamTrackerCommand::set_shared_antenna_mask(_shared_mask, n_active);
+        }
+
+        {
+            std::lock_guard<std::mutex> mlk(_metric_mutex);
+            _last_power_rms.assign(_num_elements, 0.0f);
+            _last_clip_fraction.assign(_num_elements, 0.0f);
+            _last_active_mask.resize(_num_elements);
+            for (int a = 0; a < _num_elements; ++a) {
+                _last_active_mask[a] = _shared_mask[a];
+            }
         }
     }
 

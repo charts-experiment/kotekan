@@ -38,9 +38,35 @@ public:
     static void update_config(const AntennaMaskConfig& cfg);
     static AntennaMaskConfig get_config();
 
+    // Accessors for multi-subband telemetry aggregation
+    int get_subband_id() const {
+        return _subband_id;
+    }
+    double get_freq_start_hz() const {
+        return _freq_start_hz;
+    }
+    int32_t get_num_elements() const {
+        return _num_elements;
+    }
+    std::vector<std::uint8_t> get_last_active_mask() const {
+        std::lock_guard<std::mutex> lk(_metric_mutex);
+        return _last_active_mask;
+    }
+    std::vector<float> get_last_power_rms() const {
+        std::lock_guard<std::mutex> lk(_metric_mutex);
+        return _last_power_rms;
+    }
+    std::vector<float> get_last_clip_fraction() const {
+        std::lock_guard<std::mutex> lk(_metric_mutex);
+        return _last_clip_fraction;
+    }
+
 private:
     void allocate_device_buffers();
     void free_device_buffers();
+
+    int _subband_id = 0;
+    double _freq_start_hz = 300.0e6;
 
     int32_t _num_elements = 64;
     int32_t _num_antennas = 64;
@@ -57,6 +83,12 @@ private:
 
     std::uint64_t _applied_mask_generation = 0;
 
+    // Per-subband telemetry
+    mutable std::mutex _metric_mutex;
+    std::vector<std::uint8_t> _last_active_mask;
+    std::vector<float> _last_power_rms;
+    std::vector<float> _last_clip_fraction;
+
     // Device allocations
     AntennaRawStats* _d_raw_stats = nullptr;
     float* _d_antenna_powers = nullptr;
@@ -69,6 +101,9 @@ private:
 
     std::vector<int> _current_bad_indices;
     std::vector<int> _current_alive_indices;
+
+    static std::mutex _registry_mutex;
+    static std::vector<cudaAntennaMaskCommand*> _instances;
 
     static std::mutex _global_mutex;
     static AntennaMaskConfig _shared_config;

@@ -1,0 +1,472 @@
+---
+# ==============================================================================
+# CHARTS 64-Antenna Dual-NIC 100GbE DPDK Tri-Engine Pipeline (Zero-Disk Mode)
+# ==============================================================================
+# Target: Production deployment on RFSoC node (Intel Xeon w5-3525 + RTX 5090)
+# DSP Engines (Concurrent on GPU 0):
+#   0. In-Place GPU Antenna Health Inspection & Blanking (cudaAntennaMaskCommand)
+#   1. CHARTS Direct Astrometric Multi-Beam Tracker (cudaDirectBeamTrackerCommand, 4 beams)
+#   2. CHARTS 64-Antenna 2D Sky Grid Camera (cudaDirectBeamTrackerCommand, 16 beams)
+#   3. Astron WMMA Tensor Core Correlator (cudaShuffleAstron + cudaCorrelatorAstron)
+# Ingestion: Dual 100GbE Intel E810-C NICs via DPDK (rfsocHandlerShuffle)
+# Zero-Disk: Direct & Grid beams remain in VRAM; only integrated visibilities (5.68 MB) transfer D2H
+# ==============================================================================
+
+type: config
+log_level: info
+
+# CPU Affinity: Pins Kotekan pipeline worker threads to cores [6, 7, 8, 9]
+# Isolates host execution away from DPDK worker lcores [3, 5], main lcore 4, and OS core 0
+cpu_affinity: [6, 7, 8, 9]
+
+# ------------------------------------------------------------------------------
+# Array Dimensions & Real-Time Sampling Parameters
+# ------------------------------------------------------------------------------
+num_elements: 64                  # 64 Antennas (8x8 physical grid, dx=dy=0.6m)
+n_channels_per_packet: 168        # RFSoC packet channel packing
+local_subbands_per_packet: 2      # 2 subbands per NIC port
+num_local_freq: 336               # 168 * 2 = 336 coarse channels per NIC stream (672 total)
+spacing_m: 0.6                    # Physical antenna spacing in meters
+
+# Timing & Frame Arrival (RFSoC 300 kSPS PFB -> sample_period = 10/3 us)
+sample_period_s: 3.333333333333e-6
+samples_per_data_set: 15360       # 51.2 ms per frame
+frame_arrival_period: 0.0512
+bytes_per_dataset: n_channels_per_packet * local_subbands_per_packet * samples_per_data_set
+capture_n_frames: 1687500         # 24-hour continuous streaming
+
+# Memory Queues
+buffer_depth: 20                  # Host RAM frame queue depth (~6.6 GB per NIC)
+gpu_buffer_depth: 3               # GPU VRAM queue depth (~1.0 GB per subband stream)
+integration_frames: 20            # 20 frames = 1.024s integration for visibilities
+
+# Correlator Parameters (Astron WMMA N^2 Engine)
+num_data_sets: 1
+block_size: 2
+num_blocks: 528                   # (64/2) * (64/2 + 1) / 2 = 528 blocks (2,080 baselines)
+elements_per_thread_block: 32
+sizeof_int: 4
+data_format: "cuda_wmma"
+
+# Beamformer Parameters
+max_direct_beams: 4               # Engine 1: 4 astrometric tracked beams
+initial_active_direct_beams: 2    # Sgr A* and Vela Pulsar active on start
+max_grid_beams: 16                # Engine 2: 16-beam sky grid camera (4x4)
+initial_active_grid_beams: 16
+grid_step_rad: 0.02               # ~1.15 deg beam separation
+sizeof_complex_float: 8
+
+# ------------------------------------------------------------------------------
+# Metadata Pool
+# ------------------------------------------------------------------------------
+main_pool:
+    kotekan_metadata_pool: chartsMetadata
+    num_metadata_objects: buffer_depth * 15
+
+# ------------------------------------------------------------------------------
+# Host Buffers
+# ------------------------------------------------------------------------------
+# Raw voltage capture buffers from DPDK (NIC 0 and NIC 1)
+network_capture_buf_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: bytes_per_dataset * num_elements # ~330.3 MB per frame
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+mask_buffer_zeros_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set
+    numa_node: 0
+    metadata_pool: main_pool
+
+network_capture_buf_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: bytes_per_dataset * num_elements # ~330.3 MB per frame
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+mask_buffer_zeros_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set
+    numa_node: 0
+    metadata_pool: main_pool
+
+# Raw unintegrated visibility buffers (D2H transfer sink, 5.68 MB per frame)
+host_correlation_buffer_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: num_local_freq * num_blocks * (block_size * block_size) * 2 * num_data_sets * sizeof_int
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+host_correlation_buffer_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: num_local_freq * num_blocks * (block_size * block_size) * 2 * num_data_sets * sizeof_int
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+# Integrated visibility buffers (Output of chartsAccumulate, 5.68 MB per accumulated frame)
+integrated_correlation_buffer_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: num_local_freq * num_blocks * (block_size * block_size) * 2 * num_data_sets * sizeof_int
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+integrated_correlation_buffer_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: num_local_freq * num_blocks * (block_size * block_size) * 2 * num_data_sets * sizeof_int
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+# ------------------------------------------------------------------------------
+# DPDK Ingestion Stage: Dual 100GbE Ports (Intel E810-C vfio-pci)
+# ------------------------------------------------------------------------------
+dpdk:
+    kotekan_stage: dpdkCore
+    lcore_cpu_map: [3, 5]          # Worker lcores 3 and 5 for ports 0 and 1
+    main_lcore_cpu: 4              # Main coordinator lcore
+    lcore_port_map:
+        - [0]                      # lcore 3 handles NIC port 0
+        - [1]                      # lcore 5 handles NIC port 1
+    max_rx_pkt_len: 9000
+    num_mbufs: 9600
+    mbuf_data_size: 9216
+
+    handlers:
+        - dpdk_handler: rfsocHandlerShuffle
+          out_buffer: network_capture_buf_0
+          alignment: 15360
+          mask_buf: mask_buffer_zeros_0
+          first_subband: 0
+          coarse_freq_start: 0
+          num_local_freq: 336
+
+        - dpdk_handler: rfsocHandlerShuffle
+          out_buffer: network_capture_buf_1
+          alignment: 15360
+          mask_buf: mask_buffer_zeros_1
+          first_subband: 2
+          coarse_freq_start: 336
+          num_local_freq: 336
+
+# ------------------------------------------------------------------------------
+# Packet Loss Zeroing Stages
+# ------------------------------------------------------------------------------
+zero_samples_0:
+    kotekan_stage: zeroSamples
+    out_buf: network_capture_buf_0
+    lost_samples_buf: mask_buffer_zeros_0
+    zero_value: 0
+    sample_size: 21504             # 64 elements * 336 channels
+
+zero_samples_1:
+    kotekan_stage: zeroSamples
+    out_buf: network_capture_buf_1
+    lost_samples_buf: mask_buffer_zeros_1
+    zero_value: 0
+    sample_size: 21504             # 64 elements * 336 channels
+
+# ------------------------------------------------------------------------------
+# GPU Tri-Engine Processing Stages (NVIDIA RTX 5090 GPU 0)
+# ------------------------------------------------------------------------------
+gpu:
+    profiling: false
+    kernel_path: "lib/cuda/kernels"
+    frame_arrival_period: 0.0512
+
+    # Pipeline for Stream 0 (Subband 0: Frequencies 0..335, 300.0 - 400.5 MHz)
+    commands_0: &command_list_0
+        - name: cudaInputData
+          in_buf: host_voltage
+          gpu_mem: voltage_0
+
+        - name: cudaSyncInput
+
+        # Engine 0: In-Place Antenna Health Inspection & Blanking
+        - name: cudaAntennaMaskCommand
+          gpu_mem_voltage: voltage_0
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          buffer_depth: 3
+          antenna_order: "descending"
+          active_antennas: [0, 4, 5, 6, 32]
+          auto_detect_enabled: true
+          blank_voltages_enabled: true
+          dead_power_threshold: 5.0
+          sat_power_threshold: 80.0
+          clip_fraction_threshold: 0.15
+          revival_frames: 5
+          subband: 0
+          freq_start_hz: 300000000.0
+
+        # Engine 1: CHARTS Direct Astrometric Multi-Beam Tracker (4 Beams)
+        - name: cudaDirectBeamTrackerCommand
+          gpu_mem_voltage: voltage_0
+          gpu_mem_formed_beams: direct_beams_0
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          spacing_m: 0.6
+          antenna_order: "descending"
+          active_antennas: [0, 4, 5, 6, 32]
+          max_beams: 4
+          initial_active_beams: 2
+          buffer_depth: 3
+          time_chunk_size: 256
+          time_unroll: 4
+          beam_tile_size: 4
+          enable_cuda_graph: false
+          enable_grid_mode: false
+          site_lat_deg: -33.4211146
+          site_lon_deg: -70.8634710
+          site_alt_m: 458.0
+          freq_start_hz: 300000000.0
+          freq_step_hz: 300000.0
+          rest_prefix: "/direct_tracker"
+          # Target 0: Sgr A*
+          source_ra_deg: 266.4168
+          source_dec_deg: -29.0078
+          # Target 1: Vela Pulsar
+          source_ra_deg_1: 128.8361
+          source_dec_deg_1: -45.1764
+
+        # Engine 2: CHARTS 16-Beam 2D Sky Grid Camera (4x4 Grid)
+        - name: cudaDirectBeamTrackerCommand
+          gpu_mem_voltage: voltage_0
+          gpu_mem_formed_beams: grid_beams_0
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          spacing_m: 0.6
+          antenna_order: "descending"
+          active_antennas: [0, 4, 5, 6, 32]
+          max_beams: 16
+          initial_active_beams: 16
+          buffer_depth: 3
+          time_chunk_size: 256
+          time_unroll: 4
+          beam_tile_size: 4
+          enable_cuda_graph: false
+          enable_grid_mode: true
+          grid_step: 0.02
+          site_lat_deg: -33.4211146
+          site_lon_deg: -70.8634710
+          site_alt_m: 458.0
+          freq_start_hz: 300000000.0
+          freq_step_hz: 300000.0
+          rest_prefix: "/grid_tracker"
+
+        # Engine 3: Astron WMMA Correlator (2,080 Baselines)
+        - name: cudaShuffleAstron
+          gpu_mem_voltage: voltage_0
+          gpu_mem_ordered_voltage: ordered_voltage_0
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          num_data_sets: 1
+          block_size: 2
+          num_blocks: 528
+          buffer_depth: 3
+
+        - name: cudaCorrelatorAstron
+          gpu_mem_voltage: ordered_voltage_0
+          gpu_mem_correlation_matrix: correlation_matrix_0
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          num_data_sets: 1
+          block_size: 2
+          num_blocks: 528
+          elements_per_thread_block: 32
+          buffer_depth: 3
+
+        - name: cudaSyncOutput
+
+        # ZERO-DISK: direct_beams_0 and grid_beams_0 remain in VRAM
+        # Only correlation visibilities (5.68 MB) transferred D2H
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: correlation_matrix_0
+          out_buf: host_correlation
+
+    # Pipeline for Stream 1 (Subband 1: Frequencies 336..671, 400.8 - 501.3 MHz)
+    commands_1: &command_list_1
+        - name: cudaInputData
+          in_buf: host_voltage
+          gpu_mem: voltage_1
+
+        - name: cudaSyncInput
+
+        # Engine 0: In-Place Antenna Health Inspection & Blanking
+        - name: cudaAntennaMaskCommand
+          gpu_mem_voltage: voltage_1
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          buffer_depth: 3
+          antenna_order: "descending"
+          active_antennas: [0, 4, 5, 6, 32]
+          auto_detect_enabled: true
+          blank_voltages_enabled: true
+          dead_power_threshold: 5.0
+          sat_power_threshold: 80.0
+          clip_fraction_threshold: 0.15
+          revival_frames: 5
+          subband: 1
+          freq_start_hz: 400800000.0
+
+        # Engine 1: CHARTS Direct Astrometric Multi-Beam Tracker (4 Beams)
+        - name: cudaDirectBeamTrackerCommand
+          gpu_mem_voltage: voltage_1
+          gpu_mem_formed_beams: direct_beams_1
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          spacing_m: 0.6
+          antenna_order: "descending"
+          active_antennas: [0, 4, 5, 6, 32]
+          max_beams: 4
+          initial_active_beams: 2
+          buffer_depth: 3
+          time_chunk_size: 256
+          time_unroll: 4
+          beam_tile_size: 4
+          enable_cuda_graph: false
+          enable_grid_mode: false
+          site_lat_deg: -33.4211146
+          site_lon_deg: -70.8634710
+          site_alt_m: 458.0
+          freq_start_hz: 400800000.0
+          freq_step_hz: 300000.0
+          rest_prefix: "/direct_tracker"
+          # Target 0: Sgr A*
+          source_ra_deg: 266.4168
+          source_dec_deg: -29.0078
+          # Target 1: Vela Pulsar
+          source_ra_deg_1: 128.8361
+          source_dec_deg_1: -45.1764
+
+        # Engine 2: CHARTS 16-Beam 2D Sky Grid Camera (4x4 Grid)
+        - name: cudaDirectBeamTrackerCommand
+          gpu_mem_voltage: voltage_1
+          gpu_mem_formed_beams: grid_beams_1
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          spacing_m: 0.6
+          antenna_order: "descending"
+          active_antennas: [0, 4, 5, 6, 32]
+          max_beams: 16
+          initial_active_beams: 16
+          buffer_depth: 3
+          time_chunk_size: 256
+          time_unroll: 4
+          beam_tile_size: 4
+          enable_cuda_graph: false
+          enable_grid_mode: true
+          grid_step: 0.02
+          site_lat_deg: -33.4211146
+          site_lon_deg: -70.8634710
+          site_alt_m: 458.0
+          freq_start_hz: 400800000.0
+          freq_step_hz: 300000.0
+          rest_prefix: "/grid_tracker"
+
+        # Engine 3: Astron WMMA Correlator (2,080 Baselines)
+        - name: cudaShuffleAstron
+          gpu_mem_voltage: voltage_1
+          gpu_mem_ordered_voltage: ordered_voltage_1
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          num_data_sets: 1
+          block_size: 2
+          num_blocks: 528
+          buffer_depth: 3
+
+        - name: cudaCorrelatorAstron
+          gpu_mem_voltage: ordered_voltage_1
+          gpu_mem_correlation_matrix: correlation_matrix_1
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          num_data_sets: 1
+          block_size: 2
+          num_blocks: 528
+          elements_per_thread_block: 32
+          buffer_depth: 3
+
+        - name: cudaSyncOutput
+
+        # ZERO-DISK: direct_beams_1 and grid_beams_1 remain in VRAM
+        # Only correlation visibilities (5.68 MB) transferred D2H
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: correlation_matrix_1
+          out_buf: host_correlation
+
+    gpu_0:
+        kotekan_stage: cudaProcess
+        gpu_id: 0
+        buffer_depth: 3
+        commands: *command_list_0
+        in_buffers:
+            host_voltage: network_capture_buf_0
+        out_buffers:
+            host_correlation: host_correlation_buffer_0
+
+    gpu_1:
+        kotekan_stage: cudaProcess
+        gpu_id: 0
+        buffer_depth: 3
+        commands: *command_list_1
+        in_buffers:
+            host_voltage: network_capture_buf_1
+        out_buffers:
+            host_correlation: host_correlation_buffer_1
+
+# ------------------------------------------------------------------------------
+# Host Accumulation Stages
+# ------------------------------------------------------------------------------
+charts_accumulate_0:
+    kotekan_stage: chartsAccumulate
+    in_buf: host_correlation_buffer_0
+    out_buf: integrated_correlation_buffer_0
+    num_frames_to_accumulate: integration_frames
+
+charts_accumulate_1:
+    kotekan_stage: chartsAccumulate
+    in_buf: host_correlation_buffer_1
+    out_buf: integrated_correlation_buffer_1
+    num_frames_to_accumulate: integration_frames
+
+# ------------------------------------------------------------------------------
+# Zero-Disk Telemetry Inspection Sinks (5.68 MB raw visibilities)
+# ------------------------------------------------------------------------------
+inspect_frame_0:
+    kotekan_stage: restInspectFrame
+    in_buf: integrated_correlation_buffer_0
+
+inspect_frame_1:
+    kotekan_stage: restInspectFrame
+    in_buf: integrated_correlation_buffer_1

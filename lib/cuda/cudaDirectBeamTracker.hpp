@@ -127,6 +127,7 @@ struct DirectBeamTrackerConfig {
     std::size_t time_unroll = 4;
     std::size_t beam_tile_size = 4;
     bool enable_grid_mode = false;
+    float grid_step = 0.02f;
     bool enable_cuda_graph = false;
     bool enable_subframe_interpolation = true;
 
@@ -415,6 +416,16 @@ inline void launch_precompute_sky_grid(float2* d_grid_weights, const float2* d_g
                                d_antenna_mask, d_calibration_gains, num_grid_points, n_freq, n_elem,
                                0, stream, 1);
 }
+
+void launch_reduce_beam_power(
+    const float2* d_voltages,
+    float* d_power,
+    std::size_t n_time,
+    std::size_t n_freq,
+    std::size_t active_beams,
+    std::size_t max_beams_stride,
+    cudaStream_t stream = nullptr,
+    std::size_t n_pol = 1);
 
 } // namespace kotekan
 

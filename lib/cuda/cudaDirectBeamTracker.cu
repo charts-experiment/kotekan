@@ -1,4 +1,5 @@
 #include "cudaDirectBeamTracker.hpp"
+#include "cudaDirectBeamTracker.cuh"
 #include "cudaUtils.hpp"
 
 #include <cuda_runtime.h>
@@ -1078,6 +1079,90 @@ void launch_precompute_sky_grid(
     launch_precompute_sky_grid_tapered(
         d_grid_weights, d_grid_lms, d_wavenumbers, d_antenna_positions,
         nullptr, d_calibration_gains, num_grid_points, n_freq, n_elem, stream);
+}
+
+template <int BLOCK_THREADS = 256>
+__global__ void reduce_beam_power_kernel(
+    const float2* __restrict__ voltages,
+    float* __restrict__ power,
+    std::size_t n_time,
+    std::size_t n_freq,
+    std::size_t active_beams,
+    std::size_t max_beams_stride,
+    std::size_t n_pol)
+{
+    const std::size_t b = blockIdx.x; // Beam index: 0 .. max_beams_stride - 1
+    const std::size_t f = blockIdx.y; // Frequency index: 0 .. n_freq - 1
+    if (b >= max_beams_stride || f >= n_freq) return;
+
+    if (b >= active_beams) {
+        if (threadIdx.x == 0) {
+            power[b * n_freq + f] = 0.0f;
+        }
+        return;
+    }
+
+    const std::size_t beam_pol_stride = max_beams_stride * n_pol;
+    const std::size_t tf_base = f * beam_pol_stride + b * n_pol;
+    const std::size_t t_stride = n_freq * beam_pol_stride;
+
+    float thread_sum = 0.0f;
+    for (std::size_t t = threadIdx.x; t < n_time; t += blockDim.x) {
+        const float2* v_ptr = voltages + t * t_stride + tf_base;
+        #pragma unroll
+        for (std::size_t p = 0; p < n_pol; ++p) {
+            float2 v = v_ptr[p];
+            thread_sum = fmaf(v.x, v.x, fmaf(v.y, v.y, thread_sum));
+        }
+    }
+
+    // 1. Warp shuffle down reduction across 32 threads in warp
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        thread_sum += __shfl_down_sync(0xffffffff, thread_sum, offset);
+    }
+
+    // 2. Shared memory reduction across warps (256 threads / 32 = 8 warps)
+    constexpr int NUM_WARPS = BLOCK_THREADS / 32;
+    __shared__ float s_warp_sums[NUM_WARPS];
+
+    const int lane = threadIdx.x & 31;
+    const int warp_id = threadIdx.x >> 5;
+
+    if (lane == 0) {
+        s_warp_sums[warp_id] = thread_sum;
+    }
+    __syncthreads();
+
+    // 3. First warp sums the 8 warp totals
+    if (warp_id == 0) {
+        float block_sum = (lane < NUM_WARPS) ? s_warp_sums[lane] : 0.0f;
+        #pragma unroll
+        for (int offset = NUM_WARPS / 2; offset > 0; offset >>= 1) {
+            block_sum += __shfl_down_sync(0xffffffff, block_sum, offset);
+        }
+        if (lane == 0) {
+            const float inv_time = (n_time > 0) ? (1.0f / static_cast<float>(n_time)) : 0.0f;
+            power[b * n_freq + f] = block_sum * inv_time;
+        }
+    }
+}
+
+void launch_reduce_beam_power(
+    const float2* d_voltages,
+    float* d_power,
+    std::size_t n_time,
+    std::size_t n_freq,
+    std::size_t active_beams,
+    std::size_t max_beams_stride,
+    cudaStream_t stream,
+    std::size_t n_pol)
+{
+    if (max_beams_stride == 0 || n_freq == 0 || d_voltages == nullptr || d_power == nullptr) return;
+    const dim3 grid(static_cast<unsigned int>(max_beams_stride), static_cast<unsigned int>(n_freq));
+    constexpr int BLOCK_THREADS = 256;
+    reduce_beam_power_kernel<BLOCK_THREADS><<<grid, BLOCK_THREADS, 0, stream>>>(
+        d_voltages, d_power, n_time, n_freq, active_beams, max_beams_stride, n_pol);
 }
 
 } // namespace kotekan

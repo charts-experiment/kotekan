@@ -3,18 +3,31 @@
 
 #include "Config.hpp"
 #include "bufferContainer.hpp"
+#include "chartsConstants.hpp"
 #include "cudaCommand.hpp"
 #include "cudaDeviceInterface.hpp"
 #include "cudaDirectBeamTracker.hpp"
 #include "driver_types.h"
 
+#include <atomic>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
 namespace kotekan {
+
+class cudaDirectBeamTrackerCommand;
+
+struct TrackerGroup {
+    std::string rest_prefix;
+    std::mutex group_mutex;
+    DirectBeamTrackerConfig config;
+    std::vector<cudaDirectBeamTrackerCommand*> instances;
+    bool endpoints_registered = false;
+};
 
 class cudaDirectBeamTrackerCommand : public cudaCommand {
 public:
@@ -34,11 +47,41 @@ public:
     static std::array<std::uint8_t, MAX_DIRECT_ANTENNAS> get_shared_antenna_mask();
     static DirectBeamTrackerConfig get_shared_config();
 
+    // Accessors for group subband stitching
+    std::string get_rest_prefix() const {
+        return _rest_prefix;
+    }
+    double get_freq_start_hz() const {
+        return _freq_start_hz;
+    }
+    double get_freq_step_hz() const {
+        return _freq_step_hz;
+    }
+    int32_t get_num_local_freq() const {
+        return _num_local_freq;
+    }
+    int32_t get_max_beams() const {
+        return _max_beams;
+    }
+    const float* get_host_beam_power() const {
+        return _h_beam_power;
+    }
+    std::uint64_t get_last_frame_id() const {
+        return _last_frame_id.load(std::memory_order_relaxed);
+    }
+    double get_last_timestamp_utc() const {
+        return _last_timestamp_utc.load(std::memory_order_relaxed);
+    }
+
 private:
     void allocate_device_buffers();
     void free_device_buffers();
     void invalidate_cuda_graphs();
-    void update_weights_if_needed(cudaStream_t stream);
+    void update_weights_if_needed(const DirectBeamTrackerConfig& cfg, cudaStream_t stream);
+
+    std::string _rest_prefix = "/direct_tracker";
+    double _freq_start_hz = 300.0e6;
+    double _freq_step_hz = 300.0e3;
 
     int32_t _num_elements = 64;
     int32_t _num_antennas = 64;
@@ -55,6 +98,13 @@ private:
     std::size_t _time_unroll = 4;
     std::size_t _beam_tile_size = 4;
     std::string _antenna_order = "descending";
+
+    // Timing and frame tracking
+    std::atomic<std::uint64_t> _last_frame_id{0};
+    std::atomic<double> _last_timestamp_utc{0.0};
+    double _initial_utc_start_time = -1.0;
+    double _sample_period_s = charts::constants::fpga_time_resolution_s;
+    std::uint64_t _frame_counter = 0;
 
     // Per-instance generation trackers for multi-stream synchronization
     std::uint64_t _applied_config_generation = 0;
@@ -82,6 +132,10 @@ private:
     float* _d_norm_taper = nullptr;
     float2* _d_calibration_gains = nullptr;
 
+    // Power reduction buffers
+    float* _d_beam_power = nullptr;
+    float* _h_beam_power = nullptr;
+
     // Sky grid support
     bool _grid_mode_enabled = false;
     float _grid_step = 0.02f;
@@ -90,9 +144,10 @@ private:
     float2* _d_grid_weights = nullptr;
     float2* _d_grid_lms = nullptr;
 
-    static std::mutex _global_mutex;
-    static DirectBeamTrackerConfig _shared_config;
-    static bool _endpoints_registered;
+    // Static TrackerGroup registry keyed by rest_prefix
+    static std::mutex _registry_mutex;
+    static std::map<std::string, std::shared_ptr<TrackerGroup>> _tracker_groups;
+    static DirectBeamTrackerConfig _default_shared_config;
 };
 
 } // namespace kotekan
