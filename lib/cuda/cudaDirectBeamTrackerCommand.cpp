@@ -74,7 +74,8 @@ void cudaDirectBeamTrackerCommand::set_shared_antenna_mask(
         std::array<std::uint8_t, MAX_DIRECT_ANTENNAS> gnew_mask = group->config.antenna_mask;
         for (std::size_t i = 0; i < gn_elem; ++i) {
             const std::size_t phys_ant = group->config.raw_elem_to_physical_ant(i);
-            gnew_mask[i] = (phys_ant < charts::constants::charts_total_antennas) ? mask[phys_ant] : 0;
+            gnew_mask[i] =
+                (phys_ant < charts::constants::charts_total_antennas) ? mask[phys_ant] : 0;
         }
         if (group->config.antenna_mask != gnew_mask) {
             group->config.antenna_mask = gnew_mask;
@@ -260,8 +261,8 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
 
         group->config.antenna_mask.fill(1);
         group->config.set_antenna_grid(static_cast<std::size_t>(_num_antennas),
-                                       static_cast<std::size_t>(_num_pols), _spacing_m,
-                                       _pol_layout, (_antenna_order == "descending"),
+                                       static_cast<std::size_t>(_num_pols), _spacing_m, _pol_layout,
+                                       (_antenna_order == "descending"),
                                        static_cast<std::size_t>(std::max(0, _grid_cols)));
 
         auto set_phys_ant_mask = [&](int phys_ant, std::uint8_t state) {
@@ -362,14 +363,10 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                     if (j.contains("m1"))
                         my1 = j["m1"];
                     if (j.contains("dl")) {
-                        lx1 = lx
-                              + static_cast<float>(j["dl"])
-                                    * group->config.samples_per_data_set;
+                        lx1 = lx + static_cast<float>(j["dl"]) * group->config.samples_per_data_set;
                     }
                     if (j.contains("dm")) {
-                        my1 = my
-                              + static_cast<float>(j["dm"])
-                                    * group->config.samples_per_data_set;
+                        my1 = my + static_cast<float>(j["dm"]) * group->config.samples_per_data_set;
                     }
 
                     const float tsq = lx * lx + my * my;
@@ -470,8 +467,8 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                     std::lock_guard<std::mutex> lk(group->group_mutex);
                     group->config.num_active_beams = std::min(count, group->config.max_beams);
                     group->config.config_generation++;
-                    conn.send_text_reply(fmt::format("Active beams set to {:d}\n",
-                                                     group->config.num_active_beams));
+                    conn.send_text_reply(
+                        fmt::format("Active beams set to {:d}\n", group->config.num_active_beams));
                 } catch (const std::exception& e) {
                     conn.send_error(e.what(), HTTP_RESPONSE::BAD_REQUEST);
                 }
@@ -521,9 +518,8 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                     group->config.mask_generation++;
                     group->config.config_generation++;
 
-                    conn.send_text_reply(
-                        fmt::format("Mask updated: {:d}/{:d} active elements\n",
-                                    group->config.num_active_antennas, n_elem));
+                    conn.send_text_reply(fmt::format("Mask updated: {:d}/{:d} active elements\n",
+                                                     group->config.num_active_antennas, n_elem));
                 } catch (const std::exception& e) {
                     conn.send_error(e.what(), HTTP_RESPONSE::BAD_REQUEST);
                 }
@@ -957,7 +953,7 @@ void cudaDirectBeamTrackerCommand::free_device_buffers() {
 }
 
 void cudaDirectBeamTrackerCommand::update_weights_if_needed(const DirectBeamTrackerConfig& in_cfg,
-                                                           cudaStream_t stream) {
+                                                            cudaStream_t stream) {
     std::shared_ptr<TrackerGroup> group;
     {
         std::lock_guard<std::mutex> reg_lock(_registry_mutex);
@@ -1147,8 +1143,8 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
             }
             if (_initial_utc_start_time <= 0.0 && charts_meta->has_first_packet_recv_time()) {
                 timeval tv = charts_meta->get_first_packet_recv_time();
-                _initial_utc_start_time = static_cast<double>(tv.tv_sec)
-                                          + static_cast<double>(tv.tv_usec) * 1e-6;
+                _initial_utc_start_time =
+                    static_cast<double>(tv.tv_sec) + static_cast<double>(tv.tv_usec) * 1e-6;
             }
         }
     }
@@ -1161,7 +1157,7 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
 
     frame_timestamp_utc = _initial_utc_start_time
                           + static_cast<double>(current_frame)
-                            * static_cast<double>(_samples_per_data_set) * _sample_period_s;
+                                * static_cast<double>(_samples_per_data_set) * _sample_period_s;
 
     _last_frame_id.store(static_cast<std::uint64_t>(current_frame), std::memory_order_relaxed);
     _last_timestamp_utc.store(frame_timestamp_utc, std::memory_order_relaxed);
@@ -1214,22 +1210,17 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
 
     // Launch reduction kernel & copy to pinned host buffer
     if (_d_beam_power && _h_beam_power) {
-        launch_reduce_beam_power(
-            reinterpret_cast<const float2*>(output_memory),
-            _d_beam_power,
-            static_cast<std::size_t>(_samples_per_data_set),
-            static_cast<std::size_t>(_num_local_freq),
-            active_beams,
-            static_cast<std::size_t>(_max_beams),
-            stream,
-            static_cast<std::size_t>(_num_pols));
+        launch_reduce_beam_power(reinterpret_cast<const float2*>(output_memory), _d_beam_power,
+                                 static_cast<std::size_t>(_samples_per_data_set),
+                                 static_cast<std::size_t>(_num_local_freq), active_beams,
+                                 static_cast<std::size_t>(_max_beams), stream,
+                                 static_cast<std::size_t>(_num_pols));
 
-        CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(
-            _h_beam_power,
-            _d_beam_power,
-            static_cast<std::size_t>(_max_beams) * static_cast<std::size_t>(_num_local_freq) * sizeof(float),
-            cudaMemcpyDeviceToHost,
-            stream));
+        CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_h_beam_power, _d_beam_power,
+                                                static_cast<std::size_t>(_max_beams)
+                                                    * static_cast<std::size_t>(_num_local_freq)
+                                                    * sizeof(float),
+                                                cudaMemcpyDeviceToHost, stream));
     }
 
     return record_end_event();

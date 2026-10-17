@@ -80,7 +80,8 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
     _max_alive_antennas = config.get_default<int>(unique_name, "max_alive_antennas", _num_elements);
     _antenna_order = config.get_default<std::string>(unique_name, "antenna_order", "descending");
     _freq_start_hz = config.get_default<double>(unique_name, "freq_start_hz", 300.0e6);
-    _subband_id = config.get_default<int>(unique_name, "subband", (_freq_start_hz > 350.0e6 ? 1 : 0));
+    _subband_id =
+        config.get_default<int>(unique_name, "subband", (_freq_start_hz > 350.0e6 ? 1 : 0));
 
     _last_active_mask.resize(_num_elements, 1);
     _last_power_rms.resize(_num_elements, 0.0f);
@@ -276,9 +277,12 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
                         const auto m_clp = inst->get_last_clip_fraction();
 
                         for (int a = 0; a < n_elem; ++a) {
-                            act_mask.push_back((a < static_cast<int>(m_mask.size())) ? m_mask[a] : 1);
-                            pwr_rms.push_back((a < static_cast<int>(m_pwr.size())) ? m_pwr[a] : 0.0f);
-                            clp_frac.push_back((a < static_cast<int>(m_clp.size())) ? m_clp[a] : 0.0f);
+                            act_mask.push_back((a < static_cast<int>(m_mask.size())) ? m_mask[a]
+                                                                                     : 1);
+                            pwr_rms.push_back((a < static_cast<int>(m_pwr.size())) ? m_pwr[a]
+                                                                                   : 0.0f);
+                            clp_frac.push_back((a < static_cast<int>(m_clp.size())) ? m_clp[a]
+                                                                                    : 0.0f);
                         }
                         sub["active_mask"] = act_mask;
                         sub["power_rms"] = pwr_rms;
