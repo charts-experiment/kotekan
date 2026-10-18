@@ -47,14 +47,14 @@ def calculate_theoretical_metrics(
     bytes_correlation = n_freq * 528 * 4 * 2 * 4  # 5.68 MB
 
     # VRAM with buffer depth 3
-    vram_voltage_mb = (bytes_voltage * 3) / (1024**2)
-    vram_direct_mb = (bytes_direct_beams * 3) / (1024**2)
-    vram_grid_mb = (bytes_grid_beams * 3) / (1024**2)
-    vram_corr_mb = (bytes_correlation * 3) / (1024**2)
+    vram_voltage_mb = (bytes_voltage * 3) / (1024 ** 2)
+    vram_direct_mb = (bytes_direct_beams * 3) / (1024 ** 2)
+    vram_grid_mb = (bytes_grid_beams * 3) / (1024 ** 2)
+    vram_corr_mb = (bytes_correlation * 3) / (1024 ** 2)
     vram_total_mb = vram_voltage_mb + vram_direct_mb + vram_grid_mb + vram_corr_mb
 
     # Ingestion Bandwidth
-    h2d_bandwidth_gb_s = (bytes_voltage / (1024**3)) / (frame_budget_ms / 1000.0)
+    h2d_bandwidth_gb_s = (bytes_voltage / (1024 ** 3)) / (frame_budget_ms / 1000.0)
 
     # Computational Complexity (FLOPs per frame)
     # Direct Tracker: 8 FLOPs per (sample * freq * ant * beam)
@@ -72,7 +72,7 @@ def calculate_theoretical_metrics(
         "n_freq": n_freq,
         "n_time": n_time,
         "n_baselines": n_baselines,
-        "bytes_voltage_mb": bytes_voltage / (1024**2),
+        "bytes_voltage_mb": bytes_voltage / (1024 ** 2),
         "vram_total_mb": vram_total_mb,
         "vram_total_gb": vram_total_mb / 1024.0,
         "h2d_bandwidth_gb_s": h2d_bandwidth_gb_s,
@@ -90,36 +90,64 @@ def print_theoretical_audit(metrics: dict, target_gpu: str = "NVIDIA RTX 5090 (3
     print(f" Target Hardware : {target_gpu} | Host RAM: 512 GB")
     print("=" * 82)
     print(f"  * Antenna Elements   : {metrics['n_ant']} (8x8 Uniform Grid, dx=dy=0.6m)")
-    print(f"  * Frequency Channels : {metrics['n_freq']} (300.0 - 400.8 MHz, 300 kHz/ch)")
+    print(
+        f"  * Frequency Channels : {metrics['n_freq']} (300.0 - 400.8 MHz, 300 kHz/ch)"
+    )
     print(f"  * Time Samples/Frame : {metrics['n_time']} (Sample rate: 300 kSPS)")
-    print(f"  * Frame Arrival Time : {metrics['frame_budget_ms']:.2f} ms (Real-Time Budget)")
-    print(f"  * Interferometer     : {metrics['n_baselines']} Baselines (Full N^2 Triangle)")
+    print(
+        f"  * Frame Arrival Time : {metrics['frame_budget_ms']:.2f} ms (Real-Time Budget)"
+    )
+    print(
+        f"  * Interferometer     : {metrics['n_baselines']} Baselines (Full N^2 Triangle)"
+    )
     print("-" * 82)
     print(" MEMORY FOOTPRINT & BANDWIDTH:")
     print(f"  * Input Voltage Frame: {metrics['bytes_voltage_mb']:.2f} MB / frame")
-    print(f"  * H2D Stream Rate    : {metrics['h2d_bandwidth_gb_s']:.2f} GB/s (PCIe 4.0/5.0 x16 headroom > 4x)")
-    print(f"  * Total Active VRAM  : {metrics['vram_total_gb']:.2f} GB / 32.0 GB ({metrics['vram_total_gb']/32.0*100:.1f}% capacity)")
+    print(
+        f"  * H2D Stream Rate    : {metrics['h2d_bandwidth_gb_s']:.2f} GB/s (PCIe 4.0/5.0 x16 headroom > 4x)"
+    )
+    print(
+        f"  * Total Active VRAM  : {metrics['vram_total_gb']:.2f} GB / 32.0 GB ({metrics['vram_total_gb']/32.0*100:.1f}% capacity)"
+    )
     print(f"  * Host RAM Queue (4x): ~1.32 GB / 512.0 GB (0.26% capacity)")
     print("-" * 82)
     print(" COMPUTATIONAL COMPLEXITY (GFLOPs per 51.2 ms frame):")
-    print(f"  * Engine 1 (Direct Beam Tracker) : {metrics['flops_direct_giga']:.2f} GFLOPs")
-    print(f"  * Engine 2 (Sky Grid Beamformer) : {metrics['flops_grid_giga']:.2f} GFLOPs")
-    print(f"  * Engine 3 (Astron WMMA Correlator): {metrics['flops_corr_giga']:.2f} GFLOPs")
-    print(f"  * Total Tri-Engine Workload     : {metrics['total_gflops']:.2f} GFLOPs per frame")
+    print(
+        f"  * Engine 1 (Direct Beam Tracker) : {metrics['flops_direct_giga']:.2f} GFLOPs"
+    )
+    print(
+        f"  * Engine 2 (Sky Grid Beamformer) : {metrics['flops_grid_giga']:.2f} GFLOPs"
+    )
+    print(
+        f"  * Engine 3 (Astron WMMA Correlator): {metrics['flops_corr_giga']:.2f} GFLOPs"
+    )
+    print(
+        f"  * Total Tri-Engine Workload     : {metrics['total_gflops']:.2f} GFLOPs per frame"
+    )
     print("-" * 82)
     print(" ESTIMATED LATENCIES ON RTX 5090 (Blackwell SM120 @ 1.8 TB/s):")
     t_direct = 0.95  # ms
-    t_grid = 1.10    # ms
-    t_corr = 1.35    # ms
+    t_grid = 1.10  # ms
+    t_corr = 1.35  # ms
     t_total = t_direct + t_grid + t_corr
-    rtf = metrics['frame_budget_ms'] / t_total
-    duty_cycle = (t_total / metrics['frame_budget_ms']) * 100.0
+    rtf = metrics["frame_budget_ms"] / t_total
+    duty_cycle = (t_total / metrics["frame_budget_ms"]) * 100.0
 
-    print(f"  * Engine 1 Kernel Time: ~{t_direct:.2f} ms ({t_direct/metrics['frame_budget_ms']*100:.1f}% budget)")
-    print(f"  * Engine 2 Kernel Time: ~{t_grid:.2f} ms ({t_grid/metrics['frame_budget_ms']*100:.1f}% budget)")
-    print(f"  * Engine 3 Kernel Time: ~{t_corr:.2f} ms ({t_corr/metrics['frame_budget_ms']*100:.1f}% budget)")
-    print(f"  --> Combined GPU Time : ~{t_total:.2f} ms / {metrics['frame_budget_ms']:.2f} ms")
-    print(f"  --> Real-Time Factor  : {rtf:.1f}x (Runs {rtf:.1f}x faster than physical stream!)")
+    print(
+        f"  * Engine 1 Kernel Time: ~{t_direct:.2f} ms ({t_direct/metrics['frame_budget_ms']*100:.1f}% budget)"
+    )
+    print(
+        f"  * Engine 2 Kernel Time: ~{t_grid:.2f} ms ({t_grid/metrics['frame_budget_ms']*100:.1f}% budget)"
+    )
+    print(
+        f"  * Engine 3 Kernel Time: ~{t_corr:.2f} ms ({t_corr/metrics['frame_budget_ms']*100:.1f}% budget)"
+    )
+    print(
+        f"  --> Combined GPU Time : ~{t_total:.2f} ms / {metrics['frame_budget_ms']:.2f} ms"
+    )
+    print(
+        f"  --> Real-Time Factor  : {rtf:.1f}x (Runs {rtf:.1f}x faster than physical stream!)"
+    )
     print(f"  --> GPU Duty Cycle    : {duty_cycle:.1f}% of SM120 resources")
     print("=" * 82)
 
@@ -154,7 +182,9 @@ def run_benchmark(yaml_file: Path, kotekan_bin: str | None = None):
         t0 = time.perf_counter()
         res = subprocess.run(cmd, cwd=str(_kotekan_root))
         t1 = time.perf_counter()
-        print(f"\n[INFO] Kotekan execution completed with code {res.returncode} in {t1 - t0:.3f} s.")
+        print(
+            f"\n[INFO] Kotekan execution completed with code {res.returncode} in {t1 - t0:.3f} s."
+        )
     else:
         print("\n[NOTE] Compiled kotekan binary not found in local development path.")
         print("To run live execution on the GPU node or Trillium cluster, execute:")
@@ -162,8 +192,15 @@ def run_benchmark(yaml_file: Path, kotekan_bin: str | None = None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run CHARTS 64-Antenna Tri-Engine Real-Time Benchmark")
-    parser.add_argument("--yaml", type=Path, default=DEFAULT_YAML, help="Path to tri-engine benchmark YAML")
+    parser = argparse.ArgumentParser(
+        description="Run CHARTS 64-Antenna Tri-Engine Real-Time Benchmark"
+    )
+    parser.add_argument(
+        "--yaml",
+        type=Path,
+        default=DEFAULT_YAML,
+        help="Path to tri-engine benchmark YAML",
+    )
     parser.add_argument("--bin", type=str, default=None, help="Path to kotekan binary")
     args = parser.parse_args()
 
