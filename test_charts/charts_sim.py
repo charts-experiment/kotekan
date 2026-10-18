@@ -103,6 +103,35 @@ def add_scenario_arguments(parser: argparse.ArgumentParser) -> None:
         choices=list(SOURCE_MODELS),
         help="Signal model of sky sources and RFI (default: gaussian)",
     )
+    parser.add_argument(
+        "--background-cadence-s",
+        type=_positive_float,
+        default=None,
+        help="Interval between background frames written to disk (default: preset)",
+    )
+    parser.add_argument(
+        "--event-dense-s",
+        type=_positive_float,
+        default=None,
+        help="Length of the contiguous capture from the start of each non-persistent "
+        "event (default: preset). For a dispersed FRB, set it to the dispersion "
+        "sweep plus a few pulse widths to capture the burst in every channel",
+    )
+    parser.add_argument(
+        "--event-sparse-cadence-ms",
+        type=_positive_float,
+        default=None,
+        help="Interval between frames after the dense capture, until the event ends "
+        "(default: preset)",
+    )
+
+
+def _positive_float(value: str) -> float:
+    """argparse type: a float greater than zero."""
+    x = float(value)
+    if not x > 0.0:
+        raise argparse.ArgumentTypeError(f"must be > 0, got {value}")
+    return x
 
 
 def apply_scenario_args(
@@ -115,6 +144,9 @@ def apply_scenario_args(
         cfg.events_json = Path(args.events_json)
     if getattr(args, "source_model", None):
         cfg.source_model = args.source_model
+    for name in ("background_cadence_s", "event_dense_s", "event_sparse_cadence_ms"):
+        if getattr(args, name, None) is not None:
+            setattr(cfg, name, getattr(args, name))
     return cfg
 
 

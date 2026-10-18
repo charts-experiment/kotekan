@@ -9,6 +9,9 @@ Verifies:
     hand-written file injects exactly the listed events.
   - Malformed event files are rejected instead of silently changing the scenario.
   - The CLI options --seed, --events-json and --source-model reach the config.
+  - The capture-schedule options (--background-cadence-s, --event-dense-s,
+    --event-sparse-cadence-ms) reach the config, keep the preset when omitted,
+    reject non-positive values, and change which frames are written.
 """
 
 from __future__ import annotations
@@ -154,6 +157,50 @@ class TestScenarioControl(unittest.TestCase):
         self.assertEqual(defaults.source_model, "gaussian")
         with self.assertRaises(SystemExit):
             parser.parse_args(["--source-model", "phasor"])
+
+    def test_08_capture_schedule_options(self):
+        import charts_sim
+
+        parser = argparse.ArgumentParser()
+        charts_sim.add_scenario_arguments(parser)
+        args = parser.parse_args(
+            [
+                "--background-cadence-s",
+                "0.5",
+                "--event-dense-s",
+                "0.15",
+                "--event-sparse-cadence-ms",
+                "25",
+            ]
+        )
+        cfg = charts_sim.apply_scenario_args(self._cfg("a"), args)
+        self.assertEqual(cfg.background_cadence_s, 0.5)
+        self.assertEqual(cfg.event_dense_s, 0.15)
+        self.assertEqual(cfg.event_sparse_cadence_ms, 25.0)
+        preset = self._cfg("b")
+        kept = charts_sim.apply_scenario_args(self._cfg("b"), parser.parse_args([]))
+        for name in (
+            "background_cadence_s",
+            "event_dense_s",
+            "event_sparse_cadence_ms",
+        ):
+            self.assertEqual(getattr(kept, name), getattr(preset, name))
+        for bad in ("0", "-1"):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(["--event-dense-s", bad])
+
+    def test_09_dense_capture_covers_event(self):
+        """A longer dense capture writes every frame of a non-persistent event."""
+        ev = _event(is_persistent=False, t_start_s=0.0, duration_s=0.05)
+        path = self.tmp / "ev.json"
+        path.write_text(json.dumps([ev]))
+        short = self._generate("short", duration_s=0.06, events_json=path)
+        full = self._generate(
+            "full", duration_s=0.06, events_json=path, event_dense_s=0.06
+        )
+        frame_s = 1536 * 10e-6 / 3
+        self.assertGreater(len(full["frames"]), len(short["frames"]))
+        self.assertGreaterEqual(len(full["frames"]), int(0.05 / frame_s))
 
 
 if __name__ == "__main__":
