@@ -1,9 +1,11 @@
 #include "BasebandWriter.hpp"
+#include <limits>
 
 #include "BasebandFrameView.hpp" // for BasebandFrameView
 #include "BasebandMetadata.hpp"  // for BasebandMetadata
 #include "StageFactory.hpp"      // for REGISTER_KOTEKAN_STAGE
 #include "kotekanLogging.hpp"    // for DEBUG, INFO, ERROR, FATAL_ERROR, WARN
+#include "json.hpp"
 #include "visUtil.hpp"           // for current_time, frameID, modulo, movingAverage
 
 #include "fmt.hpp" // for compile_string_to_view, format, format_string
@@ -11,14 +13,18 @@
 #include <algorithm>     // for max
 #include <bits/chrono.h> // for duration, operator-, operator/, operator>, seconds, ste...
 #include <functional>    // for bind, function
+#include <filesystem>
+#include <fstream>
 #include <math.h>        // for round
 #include <memory>        // for __shared_ptr_access, shared_ptr
 #include <ratio>         // for ratio
+#include <set>
 #include <stddef.h>      // for size_t
 #include <sys/stat.h>    // for mkdir, S_IRGRP, S_IROTH, S_IRWXU, S_IXGRP, S_IXOTH
 #include <thread>        // for sleep_for, thread
 #include <tuple>         // for forward_as_tuple
 #include <utility>       // for pair, piecewise_construct
+#include <stdexcept>
 
 using kotekan::bufferContainer;
 using kotekan::Config;
@@ -39,6 +45,9 @@ BasebandWriter::BasebandWriter(Config& config, const std::string& unique_name,
     _root_path(config.get_default<std::string>(unique_name, "root_path", ".")),
     _dump_timeout(config.get_default<double>(unique_name, "dump_timeout", 60)),
     _max_frames_per_second(config.get_default<double>(unique_name, "max_frames_per_second", 0)),
+    _selected_antennas(config.get_default<std::vector<int>>(unique_name, "selected_antennas", {})),
+    _antenna_index_convention(config.get_default<std::string>(
+        unique_name, "antenna_index_convention", "charts_logical")),
     in_buf(get_buffer("in_buf")), write_in_progress_metric(Metrics::instance().add_gauge(
                                       "kotekan_baseband_writeout_in_progress", unique_name)),
     active_event_dumps_metric(
@@ -48,12 +57,74 @@ BasebandWriter::BasebandWriter(Config& config, const std::string& unique_name,
     bytes_written_metric(
         Metrics::instance().add_counter("kotekan_writer_bytes_total", unique_name)) {
     size_t metadata_size = BasebandMetadata().get_serialized_size();
-    _frame_size = config.get<uint32_t>(unique_name, "samples_per_data_set")
-                      * config.get<uint32_t>(unique_name, "num_elements")
-                  + metadata_size;
+    // The buffer defines the raw record size, including any frequency axis.
+    if (in_buf->frame_size > std::numeric_limits<uint32_t>::max() - metadata_size)
+        throw std::invalid_argument("BasebandWriter raw frame exceeds the 32-bit file format limit");
+    _frame_size = in_buf->frame_size + metadata_size;
+    _spectra_per_frame = config.get_default<uint64_t>(unique_name, "spectra_per_frame", 0);
+    const auto readout_name = config.get_default<std::string>(unique_name, "readout_status", "");
+    if (!readout_name.empty()) {
+        if (_spectra_per_frame == 0 || in_buf->frame_size % _spectra_per_frame != 0)
+            throw std::invalid_argument("BasebandWriter readout_status requires valid spectra_per_frame");
+        _readout_status = kotekan::basebandReadoutManager::named(readout_name);
+    }
+    if (!_selected_antennas.empty()) {
+        if (_selected_antennas.size() != config.get<uint32_t>(unique_name, "num_elements")
+            || _antenna_index_convention.empty())
+            throw std::invalid_argument("BasebandWriter antenna mapping does not match num_elements");
+        std::set<int> unique_antennas(_selected_antennas.begin(), _selected_antennas.end());
+        if (unique_antennas.size() != _selected_antennas.size()
+            || *unique_antennas.begin() < 0)
+            throw std::invalid_argument("BasebandWriter selected_antennas contains invalid indices");
+    }
     in_buf->register_consumer(unique_name);
 
     INFO("BasebandMetaData size: {:d} bytes", metadata_size);
+}
+
+void BasebandWriter::ensure_antenna_mapping(const std::string& event_directory,
+                                            uint64_t event_id) {
+    if (_selected_antennas.empty())
+        return;
+
+    namespace fs = std::filesystem;
+    const fs::path path = fs::path(event_directory) / "antenna_selection.json";
+    const nlohmann::json expected = {
+        {"schema_version", 1},
+        {"event_id", event_id},
+        {"index_convention", _antenna_index_convention},
+        {"selected_antennas", _selected_antennas},
+    };
+
+    if (fs::exists(path)) {
+        std::ifstream input(path);
+        nlohmann::json existing;
+        if (!input || !(input >> existing) || existing != expected)
+            throw std::runtime_error("BasebandWriter existing antenna mapping differs from configuration: "
+                                     + path.string());
+        return;
+    }
+
+    // Never attach a new mapping to raw files whose original antenna order is unknown.
+    for (const auto& entry : fs::directory_iterator(event_directory)) {
+        const std::string name = entry.path().filename().string();
+        if (name.rfind("baseband_", 0) == 0 && entry.path().extension() == ".data")
+            throw std::runtime_error("BasebandWriter found raw data without antenna mapping: "
+                                     + event_directory);
+    }
+
+    const fs::path temporary = path.string() + ".tmp";
+    {
+        std::ofstream output(temporary, std::ios::trunc);
+        if (!output)
+            throw std::runtime_error("BasebandWriter cannot open antenna mapping: "
+                                     + temporary.string());
+        output << expected.dump(2) << '\n';
+        if (!output)
+            throw std::runtime_error("BasebandWriter cannot write antenna mapping: "
+                                     + temporary.string());
+    }
+    fs::rename(temporary, path);
 }
 
 
@@ -71,7 +142,17 @@ void BasebandWriter::main_thread() {
         }
 
         // Write the frame to its event+frequency destination file
-        write_data(in_buf, frame_id);
+        if (_readout_status) {
+            try {
+                write_data(in_buf, frame_id);
+            } catch (const std::exception& ex) {
+                const auto meta = BasebandFrameView(in_buf, frame_id).metadata();
+                _readout_status->written(meta->event_id, 0, ex.what());
+                ERROR("Baseband event {} write failed: {}", meta->event_id, ex.what());
+            }
+        } else {
+            write_data(in_buf, frame_id);
+        }
 
         const auto now = std::chrono::steady_clock::now();
         const std::chrono::duration<double> diff = now - period_start;
@@ -127,7 +208,9 @@ void BasebandWriter::write_data(Buffer* in_buf, int frame_id) {
     const std::string event_directory_name =
         fmt::format("{:s}/baseband_raw_{:d}", _root_path, event_id);
     if (baseband_events.count(event_id) == 0) {
+        std::filesystem::create_directories(_root_path);
         mkdir(event_directory_name.c_str(), S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH);
+        ensure_antenna_mapping(event_directory_name, event_id);
     }
 
     const std::string file_name =
@@ -148,10 +231,25 @@ void BasebandWriter::write_data(Buffer* in_buf, int frame_id) {
     write_in_progress_metric.set(0);
 
     if (write_status == -1) {
+        if (_readout_status)
+            _readout_status->written(event_id, 0, "baseband output file is corrupt");
         ERROR("Output file is corrupt, dropping frame going to {:s}", file_name);
     } else if (write_status == 0) {
-        FATAL_ERROR("Cannot write to file {:s}, maybe out of disk space?", file_name);
+        if (_readout_status) {
+            _readout_status->written(event_id, 0, "baseband disk write failed");
+            ERROR("Cannot write baseband file {:s}; capture is incomplete", file_name);
+        } else {
+            FATAL_ERROR("Cannot write to file {:s}, maybe out of disk space?", file_name);
+        }
     } else {
+        if (_readout_status) {
+            if (metadata->valid_to <= 0
+                || static_cast<uint64_t>(metadata->valid_to) > _spectra_per_frame)
+                _readout_status->written(event_id, 0, "invalid baseband valid_to");
+            else
+                _readout_status->written(event_id, metadata->valid_to
+                    * (in_buf->frame_size / _spectra_per_frame));
+        }
         DEBUG("Written frame with event id {:d} and freq {:d} to {:s}", event_id, freq_id,
               file_name);
 

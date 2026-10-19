@@ -53,6 +53,7 @@ add_library(
     frbPostProcess.cpp
     basebandReadout.cpp
     chartsBasebandReadout.cpp
+    chartsTriggeredBasebandReadout.cpp
     BasebandWriter.cpp
     BaseWriter.cpp
     HFBWriter.cpp
