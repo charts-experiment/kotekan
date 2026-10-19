@@ -34,6 +34,7 @@ private:
     const std::vector<int> _signal_antennas;
     const std::vector<int> _position_outliers;
     const std::vector<nlohmann::json> _position_overrides;
+    const std::vector<nlohmann::json> _position_notes;
 };
 
 #endif // RUN_METADATA_WRITER_HPP
