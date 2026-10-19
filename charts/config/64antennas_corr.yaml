@@ -1,6 +1,9 @@
 ########################
 #### Global options ####
 ########################
+# Output directories (edit paths here).
+output_dir: &output_dir "data/test/corr1018"
+
 type: config
 # Logging level can be one of:
 # OFF, ERROR, WARN, INFO, DEBUG, DEBUG2 (case insensitive)
@@ -9,6 +12,7 @@ log_level: info
 cpu_affinity: [6, 7, 8, 9]
 
 num_elements: 64
+element_order: charts_logical
 n_channels_per_packet: 168
 local_subbands_per_packet: 2
 
@@ -32,19 +36,22 @@ capture_n_frames: 168750
 # Save metadata for the run, including antenna positions and signal antennas
 run_metadata:
   kotekan_stage: runMetadataWriter
-  base_dir: /data/corr/corr_24h_0914
+  base_dir: *output_dir
   num_antennas: num_elements
-  signal_antennas: [0, 4, 6, 8, 32]
-  position_overrides:
-    - antenna: 0
-      position: [-33.421225, -70.863797, 460.0]
-      note: "Antenna in test base"
-    - antenna: 8
-      position: [-33.421117, -70.863486, 460.0]
-      note: "CHORD antenna next to the container"
-    - antenna: 32 
-      position: [-33.421216667, -70.8637972223, 460.0]
-      note: "Antenna with custom base"
+  signal_antennas: [0, 4, 5, 6]
+  # Antennas 4, 5, and 6 have moved; their current coordinates are not specified here.
+  position_outliers: [4, 5, 6]
+  position_notes:
+    - antenna: 4
+      note: "In the position of antenna 1"
+    - antenna: 5
+      note: "In the positon of antenna 6"
+    - antenna: 6
+      note: "In the positon of antenna 7"
+  # position_overrides:
+  #   - antenna: 32
+  #     position_m: [-33.421117, -70.863486, 460.0]
+  #     note: "CHORD antenna next to the container"
 
 # Main CHARTS Metadata Pool
 main_pool:
@@ -251,7 +258,7 @@ raw_file_write_0:
   kotekan_stage: rawFileWrite
   in_buf: integrated_correlation_buffer_0
   file_name: corr_freq_0
-  base_dir: /data/corr/corr_24h_0914
+  base_dir: *output_dir
   file_ext: bin
   num_frames_per_file: 1
   exit_after_n_files: capture_n_frames / integration_frames
@@ -260,7 +267,7 @@ raw_file_write_1:
   kotekan_stage: rawFileWrite
   in_buf: integrated_correlation_buffer_1
   file_name: corr_freq_1
-  base_dir: /data/corr/corr_24h_0914
+  base_dir: *output_dir
   file_ext: bin
   num_frames_per_file: 1
   exit_after_n_files: capture_n_frames / integration_frames
