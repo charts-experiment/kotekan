@@ -23,9 +23,6 @@ test_charts/
 │   ├── visualizer.py             # CASM matrix, multi-baseline waterfalls, and MP4 animations
 │   └── presets.py                # Hardware & observation profiles (quick, 1min, 5min, day, night)
 ├── config/                       # Kotekan stage YAML pipeline templates
-├── slurm/                        # Centralized Slurm cluster job scripts
-│   ├── trillium_pipeline.slurm   # Parameterized cluster launcher
-│   └── submit_build_and_test.slurm
 ├── tests/                        # Comprehensive unit & integration tests
 │   ├── test_constants_parity.py  # C++/Python physical constants parity
 │   ├── test_charts_sim.py        # Pipeline & simulation suite test cases
@@ -65,20 +62,9 @@ python test_charts/charts_sim.py pipeline --preset 1min --profile night
 
 ---
 
-## 3. Execution on HPC Clusters (Trillium / Slurm)
+## 3. Execution on HPC Clusters (Slurm)
 
-All cluster execution is driven by a single parameterized launcher (`test_charts/slurm/trillium_pipeline.slurm`). The root of the repository is completely clean of one-off `.sbatch` scripts.
-
-```bash
-# Standard 1-minute daytime run:
-sbatch test_charts/slurm/trillium_pipeline.slurm
-
-# Full 5-minute nighttime run:
-sbatch --export=ALL,PRESET=5min,PROFILE=night test_charts/slurm/trillium_pipeline.slurm
-
-# Pass arbitrary flags directly to charts_sim.py:
-sbatch test_charts/slurm/trillium_pipeline.slurm --antennas 64 --max-beams 8 --workers 24
-```
+The CLI auto-detects Slurm allocations (`SLURM_TMPDIR` for scratch routing, `SLURM_CPUS_PER_TASK` for worker counts), so the same `charts_sim.py` commands above run unchanged inside an HPC environment. Cluster-specific launchers are managed in the Trillium branch.
 
 ---
 
