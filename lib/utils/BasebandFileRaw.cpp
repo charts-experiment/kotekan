@@ -80,7 +80,7 @@ int32_t BasebandFileRaw::write_frame(const BasebandFrameView& frame) {
 
         nbytes =
             TEMP_FAILURE_RETRY(pwrite(fd, (void*)metabuf, metadata_size, write_index * frame_size));
-        if (nbytes < 0) {
+        if (nbytes != static_cast<ssize_t>(metadata_size)) {
             ERROR("Write error attempting to write metadata {:d} bytes into file {:s}: {:s}",
                   metadata_size, name, strerror(errno));
             return 0;
@@ -90,7 +90,7 @@ int32_t BasebandFileRaw::write_frame(const BasebandFrameView& frame) {
     nbytes = TEMP_FAILURE_RETRY(pwrite(fd, (void*)frame.data(), frame.data_size(),
                                        write_index * frame_size + metadata_size));
 
-    if (nbytes < 0) {
+    if (nbytes != static_cast<ssize_t>(frame.data_size())) {
         ERROR("Write error attempting to write data {:d} bytes into file {:s}: {:s}",
               frame.data_size(), name, strerror(errno));
         return 0;

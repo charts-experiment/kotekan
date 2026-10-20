@@ -1,9 +1,47 @@
 #include "basebandReadoutManager.hpp"
 
 #include <optional> // for optional
+#include <map>
+#include <algorithm>
+#include <stdexcept>
 
 
 namespace kotekan {
+
+std::shared_ptr<basebandReadoutManager> basebandReadoutManager::named(const std::string& name) {
+    static std::mutex mutex;
+    static std::map<std::string, std::weak_ptr<basebandReadoutManager>> managers;
+    std::lock_guard<std::mutex> lock(mutex);
+    auto manager = managers[name].lock();
+    if (!manager) {
+        manager = std::make_shared<basebandReadoutManager>();
+        managers[name] = manager;
+    }
+    return manager;
+}
+
+void basebandReadoutManager::written(uint64_t event_id, size_t bytes, const std::string& error) {
+    std::lock_guard<std::mutex> requests_lock(requests_mtx);
+    std::lock_guard<std::mutex> readout_lock(readout_mtx);
+    for (auto& event : requests) {
+        if (event.request.event_id != event_id)
+            continue;
+        if (event.state != basebandDumpStatus::State::INPROGRESS)
+            return;
+        if (!error.empty()) {
+            event.state = basebandDumpStatus::State::ERROR;
+            event.reason = error;
+        } else {
+            event.bytes_remaining -= std::min(bytes, event.bytes_remaining);
+            if (event.bytes_remaining != 0)
+                return;
+            event.state = basebandDumpStatus::State::DONE;
+        }
+        event.finished = std::make_shared<std::chrono::system_clock::time_point>(
+            std::chrono::system_clock::now());
+        return;
+    }
+}
 
 
 basebandDumpData::basebandDumpData(const uint64_t event_id_, const uint32_t freq_id_,
@@ -24,6 +62,9 @@ basebandDumpData::basebandDumpData(basebandDumpData::Status status_) :
 void basebandReadoutManager::add(basebandRequest req) {
     std::unique_lock<std::mutex> lock(requests_mtx);
 
+    if (!accepting)
+        throw std::runtime_error("baseband readout is draining or stopping");
+
     basebandDumpStatus ev{req};
     requests.push_front(ev);
 
@@ -36,8 +77,33 @@ void basebandReadoutManager::ready(const basebandReadoutManager::ReadyRequest& r
 }
 
 void basebandReadoutManager::stop() {
+    close_requests();
     waiting_queue.cancel();
     ready_queue.cancel();
+}
+
+void basebandReadoutManager::close_requests() {
+    std::lock_guard<std::mutex> lock(requests_mtx);
+    accepting = false;
+}
+
+bool basebandReadoutManager::accepting_requests() {
+    std::lock_guard<std::mutex> lock(requests_mtx);
+    return accepting;
+}
+
+void basebandReadoutManager::fail_pending(const std::string& reason) {
+    std::lock_guard<std::mutex> requests_lock(requests_mtx);
+    std::lock_guard<std::mutex> readout_lock(readout_mtx);
+    for (auto& event : requests) {
+        if (event.state == basebandDumpStatus::State::WAITING
+            || event.state == basebandDumpStatus::State::INPROGRESS) {
+            event.state = basebandDumpStatus::State::ERROR;
+            event.reason = reason;
+            event.finished = std::make_shared<std::chrono::system_clock::time_point>(
+                std::chrono::system_clock::now());
+        }
+    }
 }
 
 std::unique_ptr<basebandReadoutManager::requestStatusMutex>

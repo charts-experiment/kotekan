@@ -11,6 +11,7 @@
 #include "Stage.hpp"             // for Stage
 #include "buffer.hpp"            // for Buffer
 #include "bufferContainer.hpp"   // for bufferContainer
+#include "basebandReadoutManager.hpp"
 #include "prometheusMetrics.hpp" // for Gauge, Counter
 #include "visUtil.hpp"           // for movingAverage
 
@@ -19,6 +20,7 @@
 #include <mutex>              // for mutex
 #include <string>             // for string
 #include <unordered_map>      // for unordered_map
+#include <vector>             // for vector
 
 /**
  * @class BasebandWriter
@@ -30,6 +32,12 @@
  *         @buffer_metadata BasebandMetadata
  *
  * @conf   root_path        String. Location in filesystem to write to.
+ * @conf   selected_antennas Optional list of original antenna indices in output order.
+ *                           Writes antenna_selection.json in each event directory.
+ * @conf   antenna_index_convention String naming the selected antenna indices.
+ * @conf   readout_status   Optional named basebandReadoutManager for disk acknowledgements.
+ * @conf   spectra_per_frame Time spectra per input chunk; required with readout_status.
+ *                          Record byte size is taken from the input buffer.
  *
  * @conf   dump_timeout     Double (default 60). Close dump files when they
  *                          have been inactive this long (in seconds).
@@ -69,6 +77,8 @@ private:
      */
     void write_data(Buffer* in_buf, int frame_id);
 
+    void ensure_antenna_mapping(const std::string& event_directory, uint64_t event_id);
+
     /**
      * @brief runs the loop to periodically close stale dump files
      */
@@ -79,6 +89,11 @@ private:
     double _dump_timeout;
     double _max_frames_per_second;
     uint32_t _frame_size;
+    std::vector<int> _selected_antennas;
+    std::string _antenna_index_convention;
+    /// Optional CHARTS readout acknowledgement, in valid spectra rather than padded bytes.
+    std::shared_ptr<kotekan::basebandReadoutManager> _readout_status;
+    uint64_t _spectra_per_frame;
 
     /// Input buffer to read from
     Buffer* in_buf;

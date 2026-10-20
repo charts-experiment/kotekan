@@ -8,6 +8,7 @@ into /baseband with axes (antenna, frequency, time).  Its source files live in
 
 import argparse
 import datetime as dt
+import json
 import os
 from pathlib import Path
 import re
@@ -24,7 +25,6 @@ RAW_FILE_RE = re.compile(r"^baseband_(?P<event>\d+)_(?P<freq>\d+)(?:\.data)?$")
 FORMAT_VERSION = "charts-baseband-raw2h-v1"
 
 
-# Fixed backing-file layout, matching the old converter's ~500 MB target.
 # 64 antennas x 84 frequencies x 93,000 uint8 samples = 499,968,000 bytes.
 FREQ_CHUNK = 672 // 8
 MAX_SAMPLES_CHUNK = 93_000
@@ -73,6 +73,28 @@ def discover_raw_files(raw_dir, expected_event_id):
     if not files:
         fail(f"no baseband_<event>_<freq> raw files found in {raw_dir}")
     return files
+
+
+def load_antenna_mapping(raw_dir, event_id):
+    path = raw_dir / "antenna_selection.json"
+    if not path.exists():
+        return None
+    try:
+        mapping = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"{path}: cannot read antenna mapping: {error}")
+    if not isinstance(mapping, dict) or mapping.get("schema_version") != 1:
+        fail(f"{path}: unsupported antenna mapping format")
+    if mapping.get("event_id") != event_id:
+        fail(f"{path}: event_id does not match raw files")
+    indices = mapping.get("selected_antennas")
+    if (not isinstance(indices, list) or not indices
+            or any(type(index) is not int or index < 0 for index in indices)
+            or len(indices) != len(set(indices))):
+        fail(f"{path}: selected_antennas must contain distinct non-negative integers")
+    if mapping.get("index_convention") != "charts_logical":
+        fail(f"{path}: unsupported antenna index convention")
+    return mapping
 
 
 def inspect_file(path, filename_event_id, filename_freq_id, args):
@@ -165,6 +187,9 @@ def create_source_dataset(descriptor, args):
         chunks=(args.num_elements, freq_len, min(time_len, 1024)), fillvalue=0,
     )
     dataset.attrs["axes"] = ["antenna", "frequency", "time"]
+    dataset.attrs["antenna_order"] = args.antenna_index_convention
+    if args.antenna_indices is not None:
+        dataset.attrs["antenna_indices"] = np.array(args.antenna_indices, dtype="i4")
     dataset.attrs["freq_start_idx"] = descriptor["freq_start"]
     dataset.attrs["freq_end_idx"] = descriptor["freq_end"]
     dataset.attrs["time_start_idx"] = descriptor["time_start"]
@@ -238,6 +263,9 @@ def write_vds(output_path, source_descriptors, streams, event_id, time0_fpga, fi
         h5_file.attrs["format"] = FORMAT_VERSION
         h5_file.attrs["event_id"] = event_id
         h5_file.attrs["num_elements"] = args.num_elements
+        if args.antenna_indices is not None:
+            h5_file.attrs["antenna_indices"] = np.array(args.antenna_indices, dtype="i4")
+            h5_file.attrs["antenna_index_convention"] = args.antenna_index_convention
         h5_file.attrs["total_num_freq"] = args.total_num_freq
         h5_file.attrs["local_num_freq"] = args.local_num_freq
         h5_file.attrs["spectra_per_frame"] = args.spectra_per_frame
@@ -262,6 +290,9 @@ def write_vds(output_path, source_descriptors, streams, event_id, time0_fpga, fi
 
         dataset = h5_file.create_virtual_dataset("baseband", layout, fillvalue=0)
         dataset.attrs["axes"] = ["antenna", "frequency", "time"]
+        dataset.attrs["antenna_order"] = args.antenna_index_convention
+        if args.antenna_indices is not None:
+            dataset.attrs["antenna_indices"] = np.array(args.antenna_indices, dtype="i4")
         dataset.attrs["sample_dtype"] = "uint8 packed RFSoC voltage"
         dataset.attrs["description"] = "CHARTS baseband virtual dataset"
         metadata = np.array(records, dtype=FRAME_METADATA_DTYPE)
@@ -276,8 +307,9 @@ def main():
                         help="Output VDS .h5 path (overrides the dated default directory)")
     parser.add_argument("--outdir-base", "-o", type=Path, default=Path("/hdd"),
                         help="Base directory for the dated output directory (default: /hdd)")
-    parser.add_argument("--spectra-per-frame", type=int, default=15360)
-    parser.add_argument("--num-elements", type=int, default=64)
+    parser.add_argument("--spectra-per-frame", "-s", type=int, default=15360)
+    parser.add_argument("--num-elements", type=int,
+                        help="Elements per raw frame (default: mapping count, or 64 without mapping)")
     parser.add_argument("--local-num-freq", type=int, default=336)
     parser.add_argument("--total-num-freq", type=int, default=672)
     parser.add_argument("--freq0-mhz", type=float, default=300.0)
@@ -290,11 +322,23 @@ def main():
 
     if not args.raw_dir.is_dir():
         parser.error(f"not a directory: {args.raw_dir}")
-    if min(args.spectra_per_frame, args.num_elements, args.local_num_freq, args.total_num_freq) <= 0:
-        parser.error("frame and dimension values must be positive")
-
     try:
         raw_files = discover_raw_files(args.raw_dir, args.event_id)
+        event_ids = {event_id for _, event_id, _ in raw_files}
+        if len(event_ids) != 1:
+            fail(f"input files contain multiple event IDs: {sorted(event_ids)}")
+        mapping = load_antenna_mapping(args.raw_dir, next(iter(event_ids)))
+        args.antenna_indices = mapping["selected_antennas"] if mapping else None
+        args.antenna_index_convention = mapping["index_convention"] if mapping else "kotekan_raw"
+        if mapping:
+            if args.num_elements is not None and args.num_elements != len(args.antenna_indices):
+                fail("--num-elements disagrees with antenna_selection.json")
+            args.num_elements = len(args.antenna_indices)
+        elif args.num_elements is None:
+            args.num_elements = 64
+        if min(args.spectra_per_frame, args.num_elements, args.local_num_freq,
+               args.total_num_freq) <= 0:
+            fail("frame and dimension values must be positive")
         streams = [inspect_file(*raw_file, args) for raw_file in raw_files]
         event_id, time0_fpga, first_fpga, last_fpga = validate_streams(streams, args)
         total_samples = last_fpga - first_fpga

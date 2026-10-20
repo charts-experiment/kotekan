@@ -56,7 +56,9 @@ runMetadataWriter::runMetadataWriter(Config& config, const std::string& unique_n
     _position_outliers(
         config.get_default<std::vector<int>>(unique_name, "position_outliers", {})),
     _position_overrides(
-        config.get_default<std::vector<nlohmann::json>>(unique_name, "position_overrides", {})) {
+        config.get_default<std::vector<nlohmann::json>>(unique_name, "position_overrides", {})),
+    _position_notes(
+        config.get_default<std::vector<nlohmann::json>>(unique_name, "position_notes", {})) {
 
     if (_num_antennas < 0)
         FATAL_ERROR("runMetadataWriter: num_antennas must be non-negative");
@@ -84,6 +86,18 @@ runMetadataWriter::runMetadataWriter(Config& config, const std::string& unique_n
         }
         if (override.contains("note") && !override["note"].is_string())
             FATAL_ERROR("runMetadataWriter: position_overrides note must be a string");
+    }
+    for (const auto& note : _position_notes) {
+        if (!note.is_object() || !note.contains("antenna")
+            || !note["antenna"].is_number_integer() || !note.contains("note")
+            || !note["note"].is_string()) {
+            FATAL_ERROR("runMetadataWriter: each position_notes entry must contain integer "
+                        "antenna and string note");
+        }
+        const int antenna = note["antenna"].get<int>();
+        if (antenna < 0 || (_num_antennas > 0 && antenna >= _num_antennas))
+            FATAL_ERROR("runMetadataWriter: position_notes contains antenna {} outside 0..{}",
+                        antenna, _num_antennas - 1);
     }
 }
 
@@ -119,6 +133,10 @@ void runMetadataWriter::main_thread() {
             {"position_m", override.at("position_m")},
             {"note", override.value("note", "")},
         };
+    }
+    for (const auto& note : _position_notes) {
+        const std::string antenna = std::to_string(note.at("antenna").get<int>());
+        manifest["position_notes"][antenna] = note.at("note");
     }
     manifest["position_outliers"] = std::vector<int>(outlier_ids.begin(), outlier_ids.end());
 
