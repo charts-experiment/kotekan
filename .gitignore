@@ -56,6 +56,18 @@ tracker_benchmark_comparison.json
 test_charts/*_report.json
 test_charts/*_report.md
 test_charts/tracker_benchmark_report.md
+charts_10tb_campaign_results/
+*.tar.gz
+test_charts/plots_pres/
+
+# Scratch notes and development memory logs
+argon_review.txt
+changes_local_machine.txt
+conversation_log.txt
+data_stream_test.txt
+deployment memory.txt
+local_build_test_output.txt
+
 
 # Compiled benchmark and test binaries
 test_charts/benchmark_pipeline_stages

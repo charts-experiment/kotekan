@@ -166,7 +166,8 @@ python test_charts/charts_sim.py pipeline --preset 1min --profile day
 # 3. Dry-run test (verifies data generation and configs without GPU execution):
 python test_charts/charts_sim.py pipeline --preset quick --dry-run
 
-# 4. Slurm execution on Trillium cluster:
+# 4. Slurm execution on Trillium cluster (switch to kotekan_charts_trillium branch):
+git checkout kotekan_charts_trillium
 sbatch test_charts/slurm/trillium_pipeline.slurm
 ```
 
