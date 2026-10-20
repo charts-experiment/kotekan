@@ -64,6 +64,8 @@ struct basebandDumpStatus {
     size_t bytes_total = 0;
     /// Remaining data to write, in bytes
     size_t bytes_remaining = bytes_total;
+    /// Valid payload bytes copied to staging buffers (CHARTS triggered readout).
+    size_t bytes_staged = 0;
     /// Current state of the request
     basebandDumpStatus::State state = State::WAITING;
     /// Description of the failure, when the state is ERROR
@@ -120,6 +122,16 @@ struct basebandDumpData {
  */
 class basebandReadoutManager {
 public:
+    /// Share progress between a triggered readout and its disk writer without telescope conversion.
+    static std::shared_ptr<basebandReadoutManager> named(const std::string& name);
+
+    /// Acknowledge valid payload bytes after a successful disk write, or report a write error.
+    void written(uint64_t event_id, size_t bytes, const std::string& error = "");
+    /// Stop accepting triggers while allowing accepted requests to finish.
+    void close_requests();
+    bool accepting_requests();
+    /// Report unfinished named captures when their readout is shut down.
+    void fail_pending(const std::string& reason);
     // convenience type alias for keeping a status and mutex required for modifying it
     using requestStatusMutex = std::pair<basebandDumpStatus&, std::mutex&>;
 
@@ -218,6 +230,7 @@ private:
      * or internal pointers (`readout_current`, `writeout_current`) moved around.
      */
     std::mutex requests_mtx;
+    bool accepting = true;
 
     /// requests that have been received by the baseband API, but that the readout thread hasn't
     /// processed yet

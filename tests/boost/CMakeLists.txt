@@ -1,5 +1,12 @@
 project(kotekan_boost_tests)
 
+add_executable(test_chartsTriggeredBasebandReadout test_chartsTriggeredBasebandReadout.cpp)
+target_link_libraries(test_chartsTriggeredBasebandReadout
+    PRIVATE libexternal kotekan_stages kotekan_libs kotekan_utils kotekan_core
+    -Wl,--whole-archive kotekan_metadata -Wl,--no-whole-archive)
+target_include_directories(test_chartsTriggeredBasebandReadout
+    PRIVATE ${KOTEKAN_SOURCE_DIR}/lib/stages ${CUDA_INCLUDE_DIR} ${CUDA_INCLUDE_DIRS})
+
 # Prep ourselves for compiling boost
 find_package(Boost REQUIRED COMPONENTS unit_test_framework filesystem)
 

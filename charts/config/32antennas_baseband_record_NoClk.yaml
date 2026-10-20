@@ -6,6 +6,9 @@
 ########################
 #### Global options ####
 ########################
+# Output directories (edit paths here).
+output_dir: &output_dir "/data/32_test"
+
 type: config
 # Logging level can be one of:
 # OFF, ERROR, WARN, INFO, DEBUG, DEBUG2 (case insensitive)
@@ -108,7 +111,7 @@ baseband_save:
     samples_per_data_set: 10321920 # bytes_per_dataset
     num_elements: 32
     in_buf: baseband_output_buffer_0
-    root_path: /data/32_test # Config (flag)
+    root_path: *output_dir # Config (flag)
     dump_timeout: 5
 # Monitoring and debug stages ####
 
