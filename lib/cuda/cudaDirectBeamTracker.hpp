@@ -417,15 +417,10 @@ inline void launch_precompute_sky_grid(float2* d_grid_weights, const float2* d_g
                                0, stream, 1);
 }
 
-void launch_reduce_beam_power(
-    const float2* d_voltages,
-    float* d_power,
-    std::size_t n_time,
-    std::size_t n_freq,
-    std::size_t active_beams,
-    std::size_t max_beams_stride,
-    cudaStream_t stream = nullptr,
-    std::size_t n_pol = 1);
+void launch_reduce_beam_power(const float2* d_voltages, float* d_power, std::size_t n_time,
+                              std::size_t n_freq, std::size_t active_beams,
+                              std::size_t max_beams_stride, cudaStream_t stream = nullptr,
+                              std::size_t n_pol = 1);
 
 } // namespace kotekan
 
