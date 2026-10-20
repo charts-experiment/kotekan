@@ -636,9 +636,9 @@ def main():
                 "  python test_charts/run_10tb_correlator_campaign.py --run-idx 0 --dry-run"
             )
             print(
-                "  python test_charts/run_10tb_correlator_campaign.py --run-id S1_transit_vela"
+                "  # On HPC clusters, switch to 'kotekan_charts_trillium' and submit via Slurm:"
             )
-            print("  sbatch test_charts/slurm/submit_10tb_correlator_campaign.slurm")
+            print("  # sbatch test_charts/slurm/submit_10tb_correlator_campaign.slurm")
         sys.exit(0)
 
     # Resolve scratch & output paths

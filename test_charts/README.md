@@ -32,6 +32,8 @@ test_charts/
 │   └── test_live_control_cli.py  # REST steering & control tests
 ├── kotekan_tracker_control.py    # Live REST steering CLI
 ├── kotekan_tracker_dashboard.py  # Interactive browser telemetry dashboard
+├── BEAMFORMER_COMPARISON.md      # Julia auto-generated beamformer vs Direct Beam Tracker architecture
+├── REVIEW_BEAM_TRACKERS_COMPARISON.md # Beam tracking & beamforming kernel peer review and audit
 └── CMakeLists.txt                # C++ CUDA test suites & kernel benchmarks
 ```
 
