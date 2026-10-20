@@ -58,7 +58,11 @@ cudaCopyNToRingbuffer::cudaCopyNToRingbuffer(Config& config, const std::string& 
         signal_buffer->register_producer(unique_name);
 
     set_command_type(gpuCommandType::COPY_IN);
-    gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_output, false, false, true));
+    register_gpu_buffer_user({.name = _gpu_mem_output,
+                              .is_array = false,
+                              .does_read = false,
+                              .does_write = true,
+                              .signal_buffer = signal_buffer->buffer_name});
 }
 
 cudaCopyNToRingbuffer::~cudaCopyNToRingbuffer() {
@@ -190,7 +194,11 @@ cudaEvent_t cudaCopyNToRingbuffer::execute(cudaPipelineState& /*pipestate*/,
             freq_upchan_factor.at(i) = meta_in->get_freq_upchan_factor().at(0);
             freq_upchan_index.at(i) = meta_in->get_freq_upchan_index().at(0);
             // Check that the seq_num matches for all input buffers
-            assert(meta_ring->get_fpga_seq_num() == meta_in->get_fpga_seq_num());
+            if (meta_ring->get_fpga_seq_num() != meta_in->get_fpga_seq_num())
+                FATAL_ERROR("Sequence numbers do not match for all input buffers: {:d} ({:s} ) != "
+                            "{:d} ({:s})",
+                            meta_in0->get_fpga_seq_num(), in_buffers.at(0)->buffer_name,
+                            meta_in->get_fpga_seq_num(), in_buffers.at(i)->buffer_name);
         }
         meta_ring->set_coarse_freq(coarse_freq);
         meta_ring->set_freq_upchan_factor(freq_upchan_factor);

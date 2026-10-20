@@ -6,6 +6,7 @@
 If you are contributing, or even just a kotekan user, please have a look at the documentation! You can find an [overview of kotekan](https://kotekan.readthedocs.io/latest/overview.html) and [theory of operation](https://kotekan.readthedocs.io/latest/overview_theory_of_operation.html) in the documentation, which is available at [kotekan.readthedocs.io](https://kotekan.readthedocs.io/).
 
 [![Documentation Status](https://app.readthedocs.org/projects/kotekan/badge/)](https://kotekan.readthedocs.io/)
+[![CI on develop](https://github.com/kotekan/kotekan/actions/workflows/main.yaml/badge.svg?branch=develop&event=push)](https://github.com/kotekan/kotekan/actions/workflows/main.yaml?query=branch%3Adevelop+event%3Apush)
 
 Please send changes that meet an operational need, not refactoring or reformatting on its own. Before asking for human review, it helps to ask an LLM for an adversarial review of the pull request. Write PR descriptions for human reviewers, in a few sentences: what changed, why, and how it was tested. An AGENTS.md file in this repository supports these goals.
 
@@ -72,6 +73,8 @@ Cmake build options (defaults shown in parentheses; most feature toggles accept 
 * `-DUSE_NUMA=<AUTO|ON|OFF>` (`ON`) - Link libnuma and enable NUMA-aware buffer handling. Required when DPDK is enabled.
 
 * `-DWITH_TESTS=<AUTO|ON|OFF>` (`OFF`) - Build and link the helper stages from `lib/testing` into the kotekan binary (used by QA/example configs). Does not build unit tests.
+* `-DWITH_BOOST_TESTS=<AUTO|ON|OFF>` (`OFF`) - Build the Boost.Test unit tests under `tests/boost` (requires `pytest-cpp`).
+* `-DWITH_SPAWN_PROCESS=<ON|OFF>` (`OFF`) - Build the `SpawnProcess` stage, which runs a shell command from the config. Anyone who can reach the REST port can then run commands via `/start`. Needed by the airspy configs.
 
 **Examples (implemented on CHARTS):**
 

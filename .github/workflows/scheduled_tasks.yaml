@@ -19,8 +19,7 @@ on:
         required: false
         type: string
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
 
@@ -37,7 +36,6 @@ jobs:
 
   log-selfhosted-execution:
     runs-on: self-hosted
-    if: github.repository == 'kotekan/kotekan' || vars.HAS_SELF_HOSTED == 'true'
     steps:
       - name: Log execution context
         run: |

@@ -17,7 +17,7 @@
 
 // IWYU pragma: no_include <asm/mman-common.h>
 // IWYU pragma: no_include <asm/mman.h>
-#include "PipelineGraph.hpp"  // for human_bytes
+#include "PipelineGraph.hpp"  // for human_bytes, array_layout_line
 #include "errors.h"           // for CHECK_ERROR_F, ERROR_F, CHECK_MEM_F, DEBUG2_F
 #include "kotekanLogging.hpp" // for DEBUG2, DEBUG, ERROR, WARN, FATAL_ERROR, logLevel, INFO
 #include "metadata.hpp"       // for metadataObject, metadataPool
@@ -52,12 +52,11 @@ GenericBuffer::GenericBuffer(const std::string& _buffer_name, const std::string&
 
 GenericBuffer::~GenericBuffer() {}
 
-bool GenericBuffer::set_metadata(int ID, std::shared_ptr<metadataObject> meta) {
+void GenericBuffer::set_metadata(int ID, std::shared_ptr<metadataObject> meta) {
     assert(ID >= 0);
     assert(ID < num_frames);
     buffer_lock lock(mutex);
     metadata[ID] = meta;
-    return true;
 }
 
 void GenericBuffer::register_consumer(const std::string& name) {
@@ -146,8 +145,7 @@ void GenericBuffer::pass_metadata(int from_ID, GenericBuffer* to_buf, int to_ID)
         return;
     }
     std::shared_ptr<metadataObject> metadata_container = metadata[from_ID];
-    bool set = to_buf->set_metadata(to_ID, metadata_container);
-    assert(set);
+    to_buf->set_metadata(to_ID, metadata_container);
 }
 
 void GenericBuffer::copy_metadata(int from_ID, GenericBuffer* to_buf, int to_ID) {
@@ -258,7 +256,20 @@ std::vector<std::string> GenericBuffer::dot_label_lines(const kotekan::GraphOpti
     std::string type_line = buffer_type;
     if (metadata_pool)
         type_line += fmt::format(fmt(" · {:s}"), metadata_pool->type_name);
-    return {buffer_name, type_line};
+    std::vector<std::string> lines = {buffer_name, type_line};
+
+    // The array layout, when the buffer has one. This is the shape the data
+    // actually has at run time, so nothing here has to be inferred from the
+    // config or from the kernel sources.
+    auto array = get_frame_desc<kotekan::GenericNDArray>();
+    if (array) {
+        std::vector<std::string> dimnames;
+        for (const kotekan::Symbol& dimname : array->get_dimnames())
+            dimnames.push_back(dimname ? dimname.get_string() : std::string());
+        lines.push_back(kotekan::array_layout_line(type_to_string(array->get_value_datatype()),
+                                                   array->get_extents(), dimnames));
+    }
+    return lines;
 }
 
 Buffer::Buffer(int num_frames, size_t len, std::shared_ptr<metadataPool> pool,
@@ -267,10 +278,9 @@ Buffer::Buffer(int num_frames, size_t len, std::shared_ptr<metadataPool> pool,
                bool zero_new_frames, uint8_t zero_value) :
     GenericBuffer(_buffer_name, _buffer_type, pool, num_frames), frame_size(len),
     // By default don't zero buffers at the end of their use.
-    _zero_frames(false), frames(num_frames, nullptr), frames_desc(nullptr),
-    is_full(num_frames, false), peek_in_progress(num_frames, 0),
-    peek_deferred_empty(num_frames, false), last_arrival_time(0), use_hugepages(_use_hugepages),
-    mlock_frames(_mlock_frames), numa_node(_numa_node) {
+    _zero_frames(false), frames(num_frames, nullptr), is_full(num_frames, false),
+    peek_in_progress(num_frames, 0), peek_deferred_empty(num_frames, false), last_arrival_time(0),
+    use_hugepages(_use_hugepages), mlock_frames(_mlock_frames), numa_node(_numa_node) {
     assert(num_frames > 0);
 
     // Get the CPU affinity for the zeroing threads from the config
@@ -604,26 +614,6 @@ void Buffer::json_description(nlohmann::json& buf_json) {
 
 std::vector<std::string> Buffer::dot_label_lines(const kotekan::GraphOptions& options) {
     std::vector<std::string> lines = GenericBuffer::dot_label_lines(options);
-
-    // The array layout, when the buffer was declared with one. This is the shape
-    // the data actually has at run time, so nothing here has to be inferred from
-    // the config or from the kernel sources.
-    auto array = get_frame_desc<kotekan::GenericNDArray>();
-    if (array) {
-        const std::vector<std::ptrdiff_t> extents = array->get_extents();
-        const std::vector<kotekan::Symbol> dimnames = array->get_dimnames();
-        std::string layout;
-        for (size_t d = 0; d < extents.size(); d++) {
-            if (!layout.empty())
-                layout += " × ";
-            if (d < dimnames.size() && dimnames[d])
-                layout += fmt::format(fmt("{:s}:{:d}"), dimnames[d].get_string(), extents[d]);
-            else
-                layout += fmt::format(fmt("{:d}"), extents[d]);
-        }
-        lines.push_back(
-            fmt::format(fmt("{:s} {:s}"), type_to_string(array->get_value_datatype()), layout));
-    }
 
     lines.push_back(fmt::format(fmt("{:s} ×{:d} frames = {:s}"), kotekan::human_bytes(frame_size),
                                 num_frames, kotekan::human_bytes(frame_size * (size_t)num_frames)));

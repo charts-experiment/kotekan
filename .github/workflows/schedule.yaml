@@ -18,7 +18,6 @@ on:
         type: string
 
 permissions:
-  actions: write
   contents: read
 
 jobs:
@@ -29,7 +28,7 @@ jobs:
     steps:
       - name: Determine which branches to run
         id: set-matrix
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             let branches = [];
@@ -41,7 +40,7 @@ jobs:
               console.log('Manual trigger for branches:', branches);
             } else {
               // Scheduled trigger or manual without custom branches
-              branches = ['${{ github.ref_name }}'];
+              branches = ['develop'];
               console.log('Running scheduled branches:', branches);
             }
 
@@ -60,7 +59,7 @@ jobs:
       fail-fast: false
     steps:
       - name: Trigger workflow on ${{ matrix.branch }}
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
