@@ -23,9 +23,14 @@ test_charts/
 │   ├── visualizer.py             # CASM matrix, multi-baseline waterfalls, and MP4 animations
 │   └── presets.py                # Hardware & observation profiles (quick, 1min, 5min, day, night)
 ├── config/                       # Kotekan stage YAML pipeline templates
-├── slurm/                        # Centralized Slurm cluster job scripts
-│   ├── trillium_pipeline.slurm   # Parameterized cluster launcher
-│   └── submit_build_and_test.slurm
+├── slurm/                        # Centralized Slurm cluster job scripts & verification
+│   ├── trillium_pipeline.slurm   # Parameterized cluster simulation launcher
+│   ├── submit_build_and_test.slurm # Native C++/CUDA build & test suite on GPU node
+│   ├── submit_10tb_correlator_campaign.slurm # 10TB correlator campaign Slurm array job
+│   ├── submit_64antennas_beam_tracker.slurm  # 64-antenna live beam tracker job
+│   ├── submit_direct_beam_tracker_benchmark.slurm # Direct beam tracker standalone benchmark
+│   ├── submit_direct_vs_v5_benchmark_comparison.slurm # Head-to-head Direct vs V5 benchmark
+│   └── submit_sequential.sh      # Sequential Slurm pipeline launcher with job dependencies
 ├── tests/                        # Comprehensive unit & integration tests
 │   ├── test_constants_parity.py  # C++/Python physical constants parity
 │   ├── test_charts_sim.py        # Pipeline & simulation suite test cases
@@ -69,17 +74,35 @@ python test_charts/charts_sim.py pipeline --preset 1min --profile night
 
 ## 3. Execution on HPC Clusters (Trillium / Slurm)
 
-All cluster execution is driven by a single parameterized launcher (`test_charts/slurm/trillium_pipeline.slurm`). The root of the repository is completely clean of one-off `.sbatch` scripts.
+All cluster execution and build verification is managed under `test_charts/slurm/`. The root of the repository is completely clean of one-off `.sbatch` scripts.
 
 ```bash
-# Standard 1-minute daytime run:
+# 1. Standard parameterized simulation pipeline:
 sbatch test_charts/slurm/trillium_pipeline.slurm
 
-# Full 5-minute nighttime run:
+# Full 5-minute nighttime simulation:
 sbatch --export=ALL,PRESET=5min,PROFILE=night test_charts/slurm/trillium_pipeline.slurm
 
 # Pass arbitrary flags directly to charts_sim.py:
 sbatch test_charts/slurm/trillium_pipeline.slurm --antennas 64 --max-beams 8 --workers 24
+
+# 2. Build verification stage (compiles Kotekan and runs test suite on GPU node):
+sbatch test_charts/slurm/submit_build_and_test.slurm
+
+# 3. 10-Terabyte Correlator Campaign (16-task Slurm array job):
+sbatch test_charts/slurm/submit_10tb_correlator_campaign.slurm
+
+# 4. Live 64-Antenna Beam Tracker:
+sbatch test_charts/slurm/submit_64antennas_beam_tracker.slurm
+
+# 5. Standalone Direct Beam Tracker benchmark:
+sbatch test_charts/slurm/submit_direct_beam_tracker_benchmark.slurm
+
+# 6. Head-to-Head Comparative Benchmark (Direct vs V5 Beam Tracker):
+sbatch test_charts/slurm/submit_direct_vs_v5_benchmark_comparison.slurm
+
+# 7. Sequential execution of both benchmarks with dependency chaining:
+bash test_charts/slurm/submit_sequential.sh
 ```
 
 ---
