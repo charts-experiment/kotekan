@@ -148,7 +148,8 @@ dpdk:
     - [0] # lcore 3 handles port 0
     - [1] # lcore 5 handles port 1
   max_rx_pkt_len: 9000
-  num_mbufs: 9600
+  rx_ring_size: 4096
+  num_mbufs: 65536
   mbuf_data_size: 9216
 
   handlers:
