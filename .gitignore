@@ -83,6 +83,8 @@ test_charts/test_chaos_engineering
 *.fits
 *.bin
 *.dat
+*.raw
+test_charts/dumps/
 !tests/boost/testdata/**
 test_charts/data/*
 !test_charts/data/.gitkeep

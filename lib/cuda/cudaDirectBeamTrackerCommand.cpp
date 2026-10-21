@@ -1132,8 +1132,6 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
     std::shared_ptr<metadataObject> meta =
         device.get_gpu_memory_array_metadata(_gpu_mem_voltage, gpu_frame_id);
     if (meta) {
-        device.claim_gpu_memory_array_metadata(_gpu_mem_formed_beams, gpu_frame_id, meta);
-
         auto charts_meta = std::dynamic_pointer_cast<chartsMetadata>(meta);
         if (charts_meta) {
             if (charts_meta->has_frame_counter()) {
