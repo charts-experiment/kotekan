@@ -104,8 +104,15 @@ void cudaCommand::register_host_buffer(Buffer* buf) {
     for (int i = 0; i < buf->num_frames; i++) {
         uint flags;
         // only register the memory if it isn't already...
-        if (cudaErrorInvalidValue == cudaHostGetFlags(&flags, buf->frames[i]))
+        const auto host_status = cudaHostGetFlags(&flags, buf->frames[i]);
+        if (host_status == cudaErrorInvalidValue) {
+            // Expected for unregistered memory: do not leak this probe error into
+            // the next kernel's cudaGetLastError launch check.
+            (void)cudaGetLastError();
             CHECK_CUDA_ERROR(cudaHostRegister(buf->frames[i], buf->frame_size, 0));
+        } else {
+            CHECK_CUDA_ERROR(host_status);
+        }
     }
 }
 
@@ -115,8 +122,14 @@ void cudaCommand::unregister_host_buffer(Buffer* buf) {
     for (int i = 0; i < buf->num_frames; i++) {
         uint flags;
         // only unregister if it's actually been registered
-        if (cudaSuccess == cudaHostGetFlags(&flags, buf->frames[i]))
+        const auto host_status = cudaHostGetFlags(&flags, buf->frames[i]);
+        if (host_status == cudaSuccess) {
             CHECK_CUDA_ERROR(cudaHostUnregister(buf->frames[i]));
+        } else if (host_status == cudaErrorInvalidValue) {
+            (void)cudaGetLastError(); // memory may already have been unregistered
+        } else {
+            CHECK_CUDA_ERROR(host_status);
+        }
     }
 }
 
