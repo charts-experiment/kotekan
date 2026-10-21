@@ -25,6 +25,7 @@ from sim.astro import (
     resolve_beam_targets,
 )
 from sim.benchmark import (
+    calculate_beamformer_vram,
     calculate_direct_tracker_vram,
     run_direct_tracker_benchmark,
 )
@@ -43,19 +44,26 @@ from sim.generator import (
     generate_simulation_window,
     schedule_random_events,
 )
+from sim.inspector import (
+    compute_reference_beamformer_intensity,
+    inspect_beamformer_dump,
+)
 from sim.noise_model import AnalogChainParams, ChartsNoiseModel
 from sim.pipeline import (
     create_beam_tracker_yaml,
+    create_beamformer_yaml,
     create_correlator_yaml,
+    execute_kotekan,
     parse_beam_targets,
 )
-from sim.presets import SimulationConfig, get_preset_config
+from sim.presets import SimulationConfig, find_kotekan_binary, get_preset_config
 from sim.reference import (
     create_reference_manifest,
     get_reference_window,
     list_reference_windows,
     save_as_reference_window,
 )
+from sim.writer import pack_int4x2
 
 
 class TestChartsSimulationSuite(unittest.TestCase):
@@ -301,6 +309,130 @@ class TestChartsSimulationSuite(unittest.TestCase):
         with open(events_path, "r", encoding="utf-8") as f:
             ev_list = json.load(f)
             self.assertIsInstance(ev_list, list)
+
+    def test_beamformer_yaml_and_vram(self):
+        """Test unified CHARTS intensity beamformer YAML generation and VRAM calculation (default fine + K=10 + int8)."""
+        default_yaml = self.temp_dir / "bf_default.yaml"
+        create_beamformer_yaml(
+            yaml_path=default_yaml,
+            baseband_dir=self.temp_dir,
+            baseband_name="voltage.shard0",
+            output_dir=self.temp_dir / "out",
+            output_name="intensity.shard0",
+            num_frames=3,
+        )
+        self.assertTrue(default_yaml.is_file())
+        content = default_yaml.read_text(encoding="utf-8")
+        self.assertIn("cudaChartsBeamformerCommand", content)
+        self.assertIn("input_mode: fine", content)
+        self.assertIn("output_format: int8", content)
+        self.assertIn("integration_spectra: 10", content)
+
+        default_vram = calculate_beamformer_vram()
+        self.assertEqual(default_vram["input_mode"], "fine")
+        self.assertEqual(default_vram["output_format"], "int8")
+        self.assertGreater(default_vram["total_vram_gb"], 1.0)
+        self.assertLess(default_vram["total_vram_gb"], 6.0)
+
+    def test_beamformer_gpu_end_to_end_parity(self):
+        """Run unified cudaChartsBeamformerCommand (default fine+K=10+int8 and analytical float32 reference) in Kotekan."""
+        kotekan_bin = find_kotekan_binary()
+        if kotekan_bin is None or not kotekan_bin.is_file():
+            self.skipTest("Compiled Kotekan binary not available")
+
+        rng = np.random.default_rng(42)
+        n_time = 640  # divisible by 32 (fine U=32 -> 20 fine spectra -> 2 windows of K=10)
+        n_freq = 336
+        n_ant = 64
+        n_beams = 64
+
+        v_real = rng.integers(-7, 8, size=(n_time, n_freq, n_ant), dtype=np.int8)
+        v_imag = rng.integers(-7, 8, size=(n_time, n_freq, n_ant), dtype=np.int8)
+        packed = pack_int4x2(v_real.astype(np.float32) + 1j * v_imag.astype(np.float32))
+
+        in_dir = self.temp_dir / "bf_in"
+        in_dir.mkdir(parents=True, exist_ok=True)
+        in_file = in_dir / "voltage_0000000.bin"
+        with open(in_file, "wb") as f:
+            f.write(np.uint32(0).tobytes())
+            f.write(packed.tobytes())
+
+        # 1. Default pipeline (U=32 fine upchannelized + Tiled K=10 integrated + int8 quantized)
+        out_default_dir = self.temp_dir / "bf_out_default"
+        default_yaml = self.temp_dir / "run_default.yaml"
+        create_beamformer_yaml(
+            yaml_path=default_yaml,
+            baseband_dir=in_dir,
+            baseband_name="voltage",
+            output_dir=out_default_dir,
+            output_name="intensity_default",
+            num_frames=1,
+            num_elements=n_ant,
+            num_beams=n_beams,
+            samples_per_data_set=n_time,
+            shard_id=0,
+            buffer_depth=1,
+        )
+        rc_default = execute_kotekan(default_yaml, kotekan_bin=kotekan_bin, timeout_s=60.0)
+        self.assertEqual(rc_default, 0)
+
+        default_dump = out_default_dir / "intensity_default_0000000.bin"
+        self.assertTrue(default_dump.is_file())
+        info_default = inspect_beamformer_dump(
+            default_dump,
+            num_freq=n_freq,
+            num_beams=n_beams,
+            samples_per_data_set=n_time,
+        )
+        self.assertEqual(info_default["input_mode"], "fine")
+        self.assertEqual(info_default["output_format"], "int8")
+        self.assertEqual(info_default["shape"], (2, 10752, 64))
+        self.assertGreater(info_default["max_intensity"], 0.0)
+        self.assertLessEqual(info_default["max_intensity"], 127.0)
+        self.assertGreaterEqual(info_default["min_intensity"], -128.0)
+
+        # 2. Analytical float32 reference parity check on Tiled integrated beamformer
+        out_coarse_dir = self.temp_dir / "bf_out_coarse"
+        coarse_yaml = self.temp_dir / "run_coarse.yaml"
+        create_beamformer_yaml(
+            yaml_path=coarse_yaml,
+            baseband_dir=in_dir,
+            baseband_name="voltage",
+            output_dir=out_coarse_dir,
+            output_name="intensity",
+            num_frames=1,
+            num_elements=n_ant,
+            num_beams=n_beams,
+            samples_per_data_set=n_time,
+            integration_spectra=10,
+            input_mode="coarse",
+            output_format="float32",
+            shard_id=0,
+            buffer_depth=1,
+        )
+        rc = execute_kotekan(coarse_yaml, kotekan_bin=kotekan_bin, timeout_s=60.0)
+        self.assertEqual(rc, 0)
+
+        coarse_dump = out_coarse_dir / "intensity_0000000.bin"
+        self.assertTrue(coarse_dump.is_file())
+        info_coarse = inspect_beamformer_dump(
+            coarse_dump,
+            num_freq=n_freq,
+            num_beams=n_beams,
+            samples_per_data_set=n_time,
+            integration_spectra=10,
+            input_mode="coarse",
+            output_format="float32",
+        )
+        self.assertTrue(info_coarse["all_finite"])
+        self.assertEqual(info_coarse["shape"], (64, 336, 64))
+
+        ref_coarse = compute_reference_beamformer_intensity(
+            packed, shard_id=0, num_beams=n_beams, integration_spectra=10
+        )
+        np.testing.assert_allclose(
+            info_coarse["intensities"], ref_coarse, rtol=1e-5, atol=1e-3
+        )
 
 
 if __name__ == "__main__":

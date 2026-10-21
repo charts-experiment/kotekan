@@ -28,6 +28,8 @@ from .generator import (
     schedule_random_events,
 )
 from .inspector import (
+    compute_reference_beamformer_intensity,
+    inspect_beamformer_dump,
     inspect_correlator_matrix,
     inspect_tracker_dump,
     load_astron_correlator_dump,
@@ -38,6 +40,7 @@ from .noise_model import (
 )
 from .pipeline import (
     create_beam_tracker_yaml,
+    create_beamformer_yaml,
     create_correlator_yaml,
     execute_kotekan,
     parse_beam_targets,
@@ -49,11 +52,16 @@ from .presets import (
     get_default_workers,
     get_preset_config,
 )
-from .visualizer import (
-    plot_casm_correlation_matrix,
-    plot_correlator_waterfalls,
-    plot_tracker_waterfall,
-)
+try:
+    from .visualizer import (
+        plot_casm_correlation_matrix,
+        plot_correlator_waterfalls,
+        plot_tracker_waterfall,
+    )
+except ImportError:
+    plot_casm_correlation_matrix = None
+    plot_correlator_waterfalls = None
+    plot_tracker_waterfall = None
 from .writer import (
     BasebandWriter,
     HDF5Writer,

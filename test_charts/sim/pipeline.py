@@ -303,6 +303,129 @@ tracker_dump:
     return yaml_path
 
 
+def create_beamformer_yaml(
+    yaml_path: Path,
+    baseband_dir: Path,
+    baseband_name: str,
+    output_dir: Path,
+    output_name: str,
+    num_frames: int,
+    num_elements: int = 64,
+    num_beams: int = 64,
+    samples_per_data_set: int = 15360,
+    integration_spectra: int = 10,
+    input_mode: str = "fine",
+    output_format: str = "int8",
+    shard_id: int = 0,
+    buffer_depth: int = 3,
+    spacing_m: float = DEFAULT_SPACING_M,
+    beam_l_step: float = 0.01,
+    weights_file: Optional[Path] = None,
+) -> Path:
+    """Generates Kotekan YAML for rawFileRead -> cudaChartsBeamformerCommand -> rawFileWrite."""
+    yaml_path.parent.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if input_mode == "fine":
+        n_time_bf = samples_per_data_set // 32
+        n_freq_out = 336 * 32
+        integration_spectra = 10
+    else:
+        n_time_bf = samples_per_data_set
+        n_freq_out = 336
+
+    n_time_out = (n_time_bf + integration_spectra - 1) // integration_spectra
+    bytes_per_sample = 1 if output_format == "int8" else 4
+    output_frame_bytes = n_time_out * n_freq_out * num_beams * bytes_per_sample
+    weights_line = f'      weights_file: "{weights_file.as_posix()}"\n' if weights_file else ""
+
+    content = f"""######################################################################
+# CHARTS Unified GPU Intensity Beamformer Replay Pipeline ({input_mode}, {num_beams} Beams)
+######################################################################
+type: config
+log_level: info
+cpu_affinity: []
+num_elements: {num_elements}
+num_beams: {num_beams}
+samples_per_data_set: {samples_per_data_set}
+integration_spectra: {integration_spectra}
+buffer_depth: {buffer_depth}
+profiling: false
+
+main_pool:
+  kotekan_metadata_pool: chartsMetadata
+  num_metadata_objects: 32
+
+voltage_buf:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: samples_per_data_set * 336 * num_elements
+  numa_node: 0
+  mlock_frames: false
+  use_hugepages: false
+  metadata_pool: main_pool
+
+intensity_buf:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: {output_frame_bytes}
+  numa_node: 0
+  mlock_frames: false
+  use_hugepages: false
+  metadata_pool: main_pool
+
+read_voltage:
+  kotekan_stage: rawFileRead
+  buf: voltage_buf
+  base_dir: "{baseband_dir.as_posix()}"
+  file_name: "{baseband_name}"
+  file_ext: bin
+  prefix_hostname: false
+  end_interrupt: false
+
+gpu_beamformer:
+  kotekan_stage: cudaProcess
+  gpu_id: 0
+  buffer_depth: {buffer_depth}
+  in_buffers:
+    raw: voltage_buf
+  out_buffers:
+    intensity: intensity_buf
+  commands:
+    - name: cudaInputData
+      in_buf: raw
+      gpu_mem: charts.voltage.shard{shard_id}
+    - name: cudaSyncInput
+    - name: cudaChartsBeamformerCommand
+      input_mode: {input_mode}
+      output_format: {output_format}
+      in_buf: raw
+      out_buf: intensity
+      shard_id: {shard_id}
+      spacing_m: {spacing_m}
+      beam_l_step: {beam_l_step}
+{weights_line}      gpu_mem_voltage: charts.voltage.shard{shard_id}
+      gpu_mem_intensity: charts.intensity.shard{shard_id}
+    - name: cudaSyncOutput
+    - name: cudaOutputData
+      in_buf: raw
+      gpu_mem: charts.intensity.shard{shard_id}
+      out_buf: intensity
+
+write_intensity:
+  kotekan_stage: rawFileWrite
+  in_buf: intensity_buf
+  base_dir: "{output_dir.as_posix()}"
+  file_name: "{output_name}"
+  file_ext: bin
+  prefix_hostname: false
+  num_frames_per_file: 1
+  exit_after_n_files: {num_frames}
+"""
+    yaml_path.write_text(content, encoding="utf-8")
+    return yaml_path
+
+
 def execute_kotekan(
     config_path: Path,
     kotekan_bin: Optional[Path] = None,
@@ -326,12 +449,19 @@ def execute_kotekan(
     n2k_lib_dir = repo_root / "build" / "external" / "n2k"
 
     env = os.environ.copy()
+    py_bin_dir = str(Path(sys.executable).resolve().parent)
+    env["PATH"] = f"{py_bin_dir}:/usr/bin:{env.get('PATH', '')}"
     ld_paths = [str(n2k_lib_dir)]
     if "LD_LIBRARY_PATH" in env:
         ld_paths.append(env["LD_LIBRARY_PATH"])
     env["LD_LIBRARY_PATH"] = ":".join(ld_paths)
 
-    cmd = [str(bin_path), "-c", str(config_path)]
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        free_port = s.getsockname()[1]
+
+    cmd = [str(bin_path), "-b", f"127.0.0.1:{free_port}", "-c", str(config_path)]
     print(f"\n>>> Executing Kotekan: {' '.join(cmd)}")
 
     t0 = time.perf_counter()
@@ -350,9 +480,10 @@ def execute_kotekan(
             bufsize=1,
         )
 
-        if not log_file:
+        if not log_file and proc.stdout is not None:
             for line in proc.stdout:
                 print(f"  [kotekan] {line.rstrip()}")
+            proc.stdout.close()
 
         proc.wait(timeout=timeout_s)
         rc = proc.returncode

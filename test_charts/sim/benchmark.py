@@ -233,6 +233,80 @@ def calculate_direct_tracker_vram(
     }
 
 
+def calculate_beamformer_vram(
+    n_ant: int = 64,
+    n_beams: int = 64,
+    n_time: int = 15360,
+    input_mode: str = "fine",
+    output_format: str = "int8",
+    integration_spectra: int = 10,
+    buffer_depth: int = 3,
+    num_shards: int = 2,
+    cuda_overhead_mb: float = 350.0,
+) -> Dict[str, Any]:
+    """Computes exact byte-accurate VRAM layout for `cudaChartsBeamformerCommand` across shards."""
+    local_freq = 336
+    input_frame_bytes = n_time * local_freq * n_ant
+
+    beam_tiles = (n_beams + 31) // 32
+    if input_mode == "fine":
+        n_time_bf = n_time // 32
+        n_freq_bf = local_freq * 32
+        integration_spectra = 10
+        fine_packed_bytes = n_time_bf * n_freq_bf * n_ant
+        pfb_history_bytes = local_freq * n_ant * 96
+    else:
+        n_time_bf = n_time
+        n_freq_bf = local_freq
+        fine_packed_bytes = 0
+        pfb_history_bytes = 0
+
+    n_time_out = (n_time_bf + integration_spectra - 1) // integration_spectra
+    fp32_intensity_bytes = n_time_out * n_freq_bf * n_beams * 4
+    if output_format == "int8":
+        output_frame_bytes = n_time_out * n_freq_bf * n_beams * 1
+        t_tiles = n_time_out
+        f_tiles = (n_freq_bf + 15) // 16
+        b_tiles = (n_beams + 15) // 16
+        quant_params_bytes = t_tiles * f_tiles * b_tiles * 8
+        fp32_scratch_bytes = fp32_intensity_bytes
+    else:
+        output_frame_bytes = fp32_intensity_bytes
+        quant_params_bytes = 0
+        fp32_scratch_bytes = 0
+
+    weights_bytes = n_freq_bf * beam_tiles * n_ant * 32 * 8
+
+    per_shard_bytes = (
+        (input_frame_bytes + output_frame_bytes) * buffer_depth
+        + weights_bytes
+        + fine_packed_bytes
+        + pfb_history_bytes
+        + fp32_scratch_bytes
+        + quant_params_bytes
+    )
+    total_gpu_bytes = per_shard_bytes * num_shards
+    total_vram_mb = (total_gpu_bytes / (1024.0 * 1024.0)) + cuda_overhead_mb
+
+    return {
+        "input_mode": input_mode,
+        "output_format": output_format,
+        "num_shards": num_shards,
+        "buffer_depth": buffer_depth,
+        "input_frame_mb": round(input_frame_bytes / (1024.0 * 1024.0), 3),
+        "output_frame_mb": round(output_frame_bytes / (1024.0 * 1024.0), 3),
+        "weights_mb": round(weights_bytes / (1024.0 * 1024.0), 3),
+        "fine_workspace_mb": round(
+            (fine_packed_bytes + pfb_history_bytes + fp32_scratch_bytes + quant_params_bytes)
+            / (1024.0 * 1024.0),
+            3,
+        ),
+        "per_shard_mb": round(per_shard_bytes / (1024.0 * 1024.0), 2),
+        "total_vram_mb": round(total_vram_mb, 2),
+        "total_vram_gb": round(total_vram_mb / 1024.0, 3),
+    }
+
+
 def analyze_direct_tracker_cadence_and_power(
     n_ant: int,
     n_freq: int,

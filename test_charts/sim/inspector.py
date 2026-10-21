@@ -154,3 +154,104 @@ def inspect_tracker_dump(
         "total_power": float(np.sum(beam_powers)),
         "peak_beam": int(np.argmax(beam_powers)),
     }
+
+
+def inspect_beamformer_dump(
+    bin_path: Path,
+    num_freq: int = 336,
+    num_beams: int = 64,
+    samples_per_data_set: int = 15360,
+    integration_spectra: int = 10,
+    input_mode: str = "fine",
+    output_format: str = "int8",
+) -> Dict[str, Any]:
+    """Inspects float32 or int8 integrated beam intensity dump [T_integrated][freq][beam] from cudaChartsBeamformerCommand."""
+    raw = np.fromfile(str(bin_path), dtype=np.uint8)
+    if raw.size < 4:
+        raise ValueError(f"File {bin_path} is smaller than 4-byte metadata header.")
+
+    metadata_size = int(np.frombuffer(raw[:4].tobytes(), dtype="<u4", count=1)[0])
+    payload_offset = 4 + metadata_size
+
+    if input_mode == "fine":
+        n_time_bf = samples_per_data_set // 32
+        n_freq_out = 336 * 32
+        integration_spectra = 10
+    else:
+        n_time_bf = samples_per_data_set
+        n_freq_out = num_freq
+
+    n_time_out = (n_time_bf + integration_spectra - 1) // integration_spectra
+    expected_samples = n_time_out * n_freq_out * num_beams
+    bytes_per_sample = 1 if output_format == "int8" else 4
+    expected_bytes = expected_samples * bytes_per_sample
+
+    payload_size = raw.size - payload_offset
+    if payload_size != expected_bytes:
+        raise ValueError(
+            f"Payload size {payload_size} bytes does not match expected {expected_bytes} bytes"
+        )
+
+    dtype = "i1" if output_format == "int8" else "<f4"
+    intensities = np.frombuffer(
+        raw, dtype=dtype, count=expected_samples, offset=payload_offset
+    ).reshape(n_time_out, n_freq_out, num_beams)
+
+    beam_powers = np.mean(intensities, axis=(0, 1))
+    return {
+        "file_name": bin_path.name,
+        "input_mode": input_mode,
+        "output_format": output_format,
+        "shape": (n_time_out, n_freq_out, num_beams),
+        "all_finite": bool(np.all(np.isfinite(intensities))),
+        "min_intensity": float(np.min(intensities)),
+        "max_intensity": float(np.max(intensities)),
+        "beam_powers": [float(p) for p in beam_powers],
+        "peak_beam": int(np.argmax(beam_powers)),
+        "intensities": intensities,
+    }
+
+
+def compute_reference_beamformer_intensity(
+    packed_voltage: np.ndarray,
+    shard_id: int = 0,
+    num_beams: int = 64,
+    integration_spectra: int = 320,
+    spacing_m: float = 0.6,
+    beam_l_step: float = 0.01,
+    freq_zero_hz: float = 300e6,
+    freq_step_hz: float = 300e3,
+) -> np.ndarray:
+    """Computes analytical/CPU reference coarse integrated beam intensity [T_int][336][B] in float32."""
+    from .writer import unpack_int4x2
+
+    n_time, n_freq, n_ant = packed_voltage.shape
+    voltages = unpack_int4x2(packed_voltage)  # complex64 [T, F, E]
+
+    rows = 4 if n_ant == 32 else 8
+    cols = 8
+    pos_x = np.array([float(c) * spacing_m for _ in range(rows) for c in range(cols)], dtype=np.float64)
+
+    center = num_beams // 2
+    l_vals = np.array([(b - center) * beam_l_step for b in range(num_beams)], dtype=np.float64)
+
+    coarse_origin = shard_id * 336
+    freqs_hz = freq_zero_hz + (coarse_origin + np.arange(n_freq, dtype=np.float64)) * freq_step_hz
+    wave_numbers = (2.0 * math.pi * freqs_hz) / 299792458.0
+
+    # phase[b, f, a] = wave_number[f] * (pos_x[a] * l_vals[b])
+    phases = wave_numbers[None, :, None] * (l_vals[:, None, None] * pos_x[None, None, :])
+    weights = np.cos(phases).astype(np.float32) + 1j * np.sin(phases).astype(np.float32)  # [B, F, E]
+
+    # Sum over antennas: sum_real = w_r * v_r - w_i * v_i, sum_imag = w_r * v_i + w_i * v_r
+    # Notice this is standard complex multiplication: weights[b, f, e] * voltages[t, f, e]
+    formed = np.einsum("tfe,bfe->tfb", voltages, weights, optimize=True)
+    power = (formed.real ** 2 + formed.imag ** 2).astype(np.float32)
+
+    n_windows = (n_time + integration_spectra - 1) // integration_spectra
+    integrated = np.zeros((n_windows, n_freq, num_beams), dtype=np.float32)
+    for w in range(n_windows):
+        t0 = w * integration_spectra
+        t1 = min(n_time, t0 + integration_spectra)
+        integrated[w] = np.sum(power[t0:t1], axis=0, dtype=np.float32)
+    return integrated
