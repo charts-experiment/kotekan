@@ -105,6 +105,9 @@ chartsFEngineSim::chartsFEngineSim(Config& config, const std::string& unique_nam
     _spacing_m = config.get_default<double>(unique_name, "spacing_m", 0.6);
     _site_lat_deg = config.get_default<double>(unique_name, "site_lat_deg", -33.4211146);
     _seed = config.get_default<int>(unique_name, "seed", 42);
+    _frb_dm = config.get_default<double>(unique_name, "frb_dm", 2.0);
+    _frb_arrival_time_s = config.get_default<double>(unique_name, "frb_arrival_time_s", 0.005);
+    _frb_pulse_width_s = config.get_default<double>(unique_name, "frb_pulse_width_s", 0.0008);
 
     INFO("chartsFEngineSim: Initialized for scenario '{:s}' (noise={:d}, saturate={:d}, "
          "antennas={:d}, freq={:d}, samples={:d}, frames={:d})",
@@ -126,8 +129,9 @@ void chartsFEngineSim::main_thread() {
     // Antenna physical grid positions (8x8)
     std::vector<double> pos_x(_num_elements), pos_y(_num_elements);
     for (int a = 0; a < _num_elements; ++a) {
-        int col = a & 7;
-        int row = a >> 3;
+        int dish = a % 64;
+        int col = dish & 7;
+        int row = dish >> 3;
         pos_x[a] = col * _spacing_m;
         pos_y[a] = row * _spacing_m;
     }
@@ -169,12 +173,25 @@ void chartsFEngineSim::main_thread() {
         out_buf->allocate_new_metadata_object(frame_id);
         auto meta = get_chord_metadata(out_buf, frame_id);
         if (meta) {
-            meta->set_fpga_seq_num(static_cast<uint64_t>(frame_idx));
+            meta->set_fpga_seq_num(static_cast<uint64_t>(frame_idx) * _samples_per_data_set);
+            meta->set_time_downsampling_fpga(1);
+            meta->set_name("E");
+            meta->dims = 4;
+            meta->set_array_dimension(0, _samples_per_data_set, "T", 1);
+            meta->set_array_dimension(1, _num_local_freq, "F", 1);
+            meta->set_array_dimension(2, 2, "P", 1);
+            meta->set_array_dimension(3, 64, "D", 1);
+            meta->set_strides_simple();
+            meta->type = kotekan::int4x2_swapped_withoffset;
             std::vector<int> coarse_freq(_num_local_freq);
             for (int f = 0; f < _num_local_freq; ++f) {
                 coarse_freq[f] = f;
             }
             meta->set_coarse_freq(coarse_freq);
+            std::vector<int> freq_upchan_factor(_num_local_freq, 1);
+            meta->set_freq_upchan_factor(freq_upchan_factor);
+            std::vector<int> freq_upchan_index(_num_local_freq, 0);
+            meta->set_freq_upchan_index(freq_upchan_index);
         }
 
         int64_t global_t_start = static_cast<int64_t>(frame_idx) * _samples_per_data_set;
@@ -194,13 +211,12 @@ void chartsFEngineSim::main_thread() {
                 if (target->is_frb) {
                     double f_ref = freqs_hz.back();
                     double dm_delay_s =
-                        (K_DM * 1e-6) * target->dm
+                        (K_DM * 1e-6) * _frb_dm
                         * (1.0 / std::pow(freq_hz / 1e9, 2.0) - 1.0 / std::pow(f_ref / 1e9, 2.0));
                     double t_physical_s = t * dt_s;
-                    double pulse_center_s = (_samples_per_data_set * dt_s) * 0.4;
+                    double pulse_center_s = _frb_arrival_time_s;
                     double t_diff = t_physical_s - (pulse_center_s + dm_delay_s);
-                    double pulse_width_s = 0.001;
-                    frb_envelope = std::exp(-0.5 * std::pow(t_diff / pulse_width_s, 2.0));
+                    frb_envelope = std::exp(-0.5 * std::pow(t_diff / _frb_pulse_width_s, 2.0));
                 }
 
                 for (int a = 0; a < _num_elements; ++a) {

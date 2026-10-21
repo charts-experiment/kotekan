@@ -47,6 +47,9 @@ private:
     double _spacing_m;
     double _site_lat_deg;
     int _seed;
+    double _frb_dm;
+    double _frb_arrival_time_s;
+    double _frb_pulse_width_s;
 };
 
 #endif // CHARTS_FENGINE_SIM_HPP
