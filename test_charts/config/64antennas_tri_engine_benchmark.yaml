@@ -3,8 +3,8 @@
 # CHARTS 64-Antenna Tri-Engine Real-Time GPU Benchmark Pipeline
 # ==============================================================================
 # Target: Validation & Benchmark of 3 concurrent DSP engines on a single GPU:
-#   1. CHARTS Direct Astrometric Multi-Beam Tracker (cudaDirectBeamTrackerCommand)
-#   2. CHARTS 64-Antenna 2D Grid Beamformer (Sky Grid Synthesis / Julia BB)
+#   1. CHARTS Direct Astrometric Multi-Beam Tracker (cudaDirectBeamTrackerCommand, 4 beams)
+#   2. CHARTS 64-Beam Time-Integrated FRB Intensity Beamformer (cudaFRBBeamformer_charts_U32)
 #   3. Astron WMMA Tensor Core Correlator (cudaShuffleAstron + cudaCorrelatorAstron)
 # Ingestion: In-process Synthetic Astrophysical Baseband Generator (chartsFEngineSim)
 # Target Hardware: Single NVIDIA RTX 5090 (32 GB GDDR7) + 512 GB Host RAM
@@ -52,15 +52,102 @@ data_format: "cuda_wmma"
 # ------------------------------------------------------------------------------
 # Beamformer Parameters
 # ------------------------------------------------------------------------------
-# Direct Beam Tracker
+# Direct Beam Tracker (Engine 1)
 max_direct_beams: 4               # 4 simultaneous tracked astronomical directions
 initial_active_direct_beams: 2    # Sgr A* and Vela Pulsar active on start
-
-# Grid Beamformer
-max_grid_beams: 16                # 16-beam sky grid scan
-grid_step_rad: 0.02               # ~1.15 deg beam separation
-
 sizeof_complex_float: 8           # float2 (4 bytes real + 4 bytes imag)
+
+# FRB Beamformer (Engine 2: 64 Beams, 8x8 Grid, K=320 Time Integration)
+num_frb_beams: 64                 # 64 synthesized beams (8x8 uniform sky grid)
+frb_integration_factor: 320       # Temporal downsampling factor (15,360 / 320 = 48 time bins)
+frb1_phase_lifetime_in_samples: 15360 # Multiple of quantum 5,120 (3 * 5,120)
+sizeof_float: 4                   # float32 intensity power (4 bytes)
+
+# ------------------------------------------------------------------------------
+# Telescope Configuration (CHORDTelescope required by cudaFRBBeamformer_charts_U32)
+# ------------------------------------------------------------------------------
+num_dishes_x: 8
+num_dishes_y: 8
+num_dishes: 64
+num_polarizations: 1
+
+telescope:
+    name: CHORDTelescope
+    log_level: info
+    require_gps: false
+    require_eop: false
+    origin_itrs_lat_deg: -33.4211146
+    origin_itrs_lon_deg: -70.8634710
+    dish_grid_size_x: 8
+    dish_grid_size_y: 8
+    dish_separation_x_m: 0.6
+    dish_separation_y_m: 0.6
+    dish_inputs: [
+      {dish_idx: 0, grid_x_idx: 0, grid_y_idx: 0, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D00},
+      {dish_idx: 1, grid_x_idx: 1, grid_y_idx: 0, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D01},
+      {dish_idx: 2, grid_x_idx: 2, grid_y_idx: 0, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D02},
+      {dish_idx: 3, grid_x_idx: 3, grid_y_idx: 0, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D03},
+      {dish_idx: 4, grid_x_idx: 4, grid_y_idx: 0, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D04},
+      {dish_idx: 5, grid_x_idx: 5, grid_y_idx: 0, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D05},
+      {dish_idx: 6, grid_x_idx: 6, grid_y_idx: 0, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D06},
+      {dish_idx: 7, grid_x_idx: 7, grid_y_idx: 0, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D07},
+      {dish_idx: 8, grid_x_idx: 0, grid_y_idx: 1, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D08},
+      {dish_idx: 9, grid_x_idx: 1, grid_y_idx: 1, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D09},
+      {dish_idx: 10, grid_x_idx: 2, grid_y_idx: 1, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D10},
+      {dish_idx: 11, grid_x_idx: 3, grid_y_idx: 1, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D11},
+      {dish_idx: 12, grid_x_idx: 4, grid_y_idx: 1, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D12},
+      {dish_idx: 13, grid_x_idx: 5, grid_y_idx: 1, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D13},
+      {dish_idx: 14, grid_x_idx: 6, grid_y_idx: 1, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D14},
+      {dish_idx: 15, grid_x_idx: 7, grid_y_idx: 1, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D15},
+      {dish_idx: 16, grid_x_idx: 0, grid_y_idx: 2, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D16},
+      {dish_idx: 17, grid_x_idx: 1, grid_y_idx: 2, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D17},
+      {dish_idx: 18, grid_x_idx: 2, grid_y_idx: 2, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D18},
+      {dish_idx: 19, grid_x_idx: 3, grid_y_idx: 2, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D19},
+      {dish_idx: 20, grid_x_idx: 4, grid_y_idx: 2, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D20},
+      {dish_idx: 21, grid_x_idx: 5, grid_y_idx: 2, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D21},
+      {dish_idx: 22, grid_x_idx: 6, grid_y_idx: 2, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D22},
+      {dish_idx: 23, grid_x_idx: 7, grid_y_idx: 2, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D23},
+      {dish_idx: 24, grid_x_idx: 0, grid_y_idx: 3, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D24},
+      {dish_idx: 25, grid_x_idx: 1, grid_y_idx: 3, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D25},
+      {dish_idx: 26, grid_x_idx: 2, grid_y_idx: 3, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D26},
+      {dish_idx: 27, grid_x_idx: 3, grid_y_idx: 3, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D27},
+      {dish_idx: 28, grid_x_idx: 4, grid_y_idx: 3, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D28},
+      {dish_idx: 29, grid_x_idx: 5, grid_y_idx: 3, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D29},
+      {dish_idx: 30, grid_x_idx: 6, grid_y_idx: 3, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D30},
+      {dish_idx: 31, grid_x_idx: 7, grid_y_idx: 3, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D31},
+      {dish_idx: 32, grid_x_idx: 0, grid_y_idx: 4, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D32},
+      {dish_idx: 33, grid_x_idx: 1, grid_y_idx: 4, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D33},
+      {dish_idx: 34, grid_x_idx: 2, grid_y_idx: 4, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D34},
+      {dish_idx: 35, grid_x_idx: 3, grid_y_idx: 4, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D35},
+      {dish_idx: 36, grid_x_idx: 4, grid_y_idx: 4, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D36},
+      {dish_idx: 37, grid_x_idx: 5, grid_y_idx: 4, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D37},
+      {dish_idx: 38, grid_x_idx: 6, grid_y_idx: 4, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D38},
+      {dish_idx: 39, grid_x_idx: 7, grid_y_idx: 4, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D39},
+      {dish_idx: 40, grid_x_idx: 0, grid_y_idx: 5, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D40},
+      {dish_idx: 41, grid_x_idx: 1, grid_y_idx: 5, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D41},
+      {dish_idx: 42, grid_x_idx: 2, grid_y_idx: 5, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D42},
+      {dish_idx: 43, grid_x_idx: 3, grid_y_idx: 5, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D43},
+      {dish_idx: 44, grid_x_idx: 4, grid_y_idx: 5, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D44},
+      {dish_idx: 45, grid_x_idx: 5, grid_y_idx: 5, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D45},
+      {dish_idx: 46, grid_x_idx: 6, grid_y_idx: 5, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D46},
+      {dish_idx: 47, grid_x_idx: 7, grid_y_idx: 5, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D47},
+      {dish_idx: 48, grid_x_idx: 0, grid_y_idx: 6, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D48},
+      {dish_idx: 49, grid_x_idx: 1, grid_y_idx: 6, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D49},
+      {dish_idx: 50, grid_x_idx: 2, grid_y_idx: 6, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D50},
+      {dish_idx: 51, grid_x_idx: 3, grid_y_idx: 6, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D51},
+      {dish_idx: 52, grid_x_idx: 4, grid_y_idx: 6, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D52},
+      {dish_idx: 53, grid_x_idx: 5, grid_y_idx: 6, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D53},
+      {dish_idx: 54, grid_x_idx: 6, grid_y_idx: 6, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D54},
+      {dish_idx: 55, grid_x_idx: 7, grid_y_idx: 6, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D55},
+      {dish_idx: 56, grid_x_idx: 0, grid_y_idx: 7, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D56},
+      {dish_idx: 57, grid_x_idx: 1, grid_y_idx: 7, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D57},
+      {dish_idx: 58, grid_x_idx: 2, grid_y_idx: 7, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D58},
+      {dish_idx: 59, grid_x_idx: 3, grid_y_idx: 7, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D59},
+      {dish_idx: 60, grid_x_idx: 4, grid_y_idx: 7, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D60},
+      {dish_idx: 61, grid_x_idx: 5, grid_y_idx: 7, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D61},
+      {dish_idx: 62, grid_x_idx: 6, grid_y_idx: 7, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D62},
+      {dish_idx: 63, grid_x_idx: 7, grid_y_idx: 7, feed_pos_disp_m: [0.0, 0.0, 0.0], coelev_disp_deg: 0.0, type: ArrayDish, label: D63}
+    ]
 
 # ------------------------------------------------------------------------------
 # Metadata Pool
@@ -94,12 +181,13 @@ host_direct_beams_buffer:
     zero_new_frames: true
     mlock_frames: false
 
-# 3. Grid Beamformer formed beams: [time][freq][max_grid_beams] of float2
-# Frame Size = 15360 * 336 * 16 * 8 = 660,602,880 bytes (~660.6 MB per frame)
-host_grid_beams_buffer:
+# 3. FRB Intensity formed beams: [time_int][freq][num_frb_beams] of float32
+# Frame Size = (samples_per_data_set / 320) * num_local_freq * 64 * 4
+#            = 48 * 336 * 64 * 4 = 4,128,768 bytes (~3.94 MiB per frame, 160x volume reduction!)
+host_frb_intensity_buffer:
     kotekan_buffer: standard
     num_frames: buffer_depth
-    frame_size: samples_per_data_set * num_local_freq * max_grid_beams * sizeof_complex_float
+    frame_size: (samples_per_data_set / 320) * num_local_freq * 64 * 4
     numa_node: 0
     metadata_pool: main_pool
     zero_new_frames: true
@@ -202,30 +290,18 @@ gpu:
           source_dec_deg_1: -45.1764
 
         # ----------------------------------------------------------------------
-        # ENGINE 2: CHARTS 64-Antenna Sky Grid Beamformer (2D Grid Synthesis)
+        # ENGINE 2: CHARTS 64-Beam Time-Integrated FRB Beamformer (8x8 Grid)
         # ----------------------------------------------------------------------
-        # Computes 16 synthesized sky grid directions concurrently
-        - name: cudaDirectBeamTrackerCommand
-          gpu_mem_voltage: voltage
-          gpu_mem_formed_beams: grid_beams
-          num_elements: 64
-          num_local_freq: 336
-          samples_per_data_set: samples_per_data_set
-          spacing_m: spacing_m
-          max_beams: max_grid_beams
-          initial_active_beams: max_grid_beams
-          buffer_depth: gpu_buffer_depth
-          time_chunk_size: 256
-          time_unroll: 4
-          beam_tile_size: 4
-          enable_cuda_graph: false
-          enable_grid_mode: true
-          grid_step: grid_step_rad
-          site_lat_deg: -33.4211146
-          site_lon_deg: -70.8634710
-          site_alt_m: 458.0
-          freq_start_hz: 300000000.0
-          freq_step_hz: 300000.0
+        # In-Tree Julia PTX Kernel: 64 beams, 48 integrated time bins (K=320), TFB layout
+        - name: cudaFRBBeamformer_charts_U32
+          voltage_name: voltage
+          frb_phase_name: frb_phases
+          frb_beamgrid_name: frb_intensity
+          Fbar_in_min: 0
+          Fbar_in_max: 336
+          Fbar_out_min: 0
+          Fbar_out_max: 336
+          frb1_phase_lifetime_in_samples: 15360
 
         # ----------------------------------------------------------------------
         # ENGINE 3: Astron WMMA Tensor Core Correlator (All 2,080 Baselines)
@@ -266,11 +342,11 @@ gpu:
           gpu_mem: direct_beams
           out_buf: host_direct_beams
 
-        # Grid Beams D2H Transfer
+        # FRB 64-Beam Intensity D2H Transfer (4.13 MB) - DOWN FROM 660.6 MB!
         - name: cudaOutputData
           in_buf: host_voltage
-          gpu_mem: grid_beams
-          out_buf: host_grid_beams
+          gpu_mem: frb_intensity
+          out_buf: host_frb_intensity
 
         # Visibilities D2H Transfer
         - name: cudaOutputData
@@ -287,7 +363,7 @@ gpu:
             host_voltage: network_capture_buf
         out_buffers:
             host_direct_beams: host_direct_beams_buffer
-            host_grid_beams: host_grid_beams_buffer
+            host_frb_intensity: host_frb_intensity_buffer
             host_correlation: host_correlation_buffer
 
 # ------------------------------------------------------------------------------
@@ -299,9 +375,9 @@ inspect_direct_beams:
     in_buf: host_direct_beams_buffer
     max_history: 5
 
-inspect_grid_beams:
+inspect_frb_intensity:
     kotekan_stage: restInspectFrame
-    in_buf: host_grid_beams_buffer
+    in_buf: host_frb_intensity_buffer
     max_history: 5
 
 inspect_correlation:
