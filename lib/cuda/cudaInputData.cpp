@@ -33,14 +33,8 @@ cudaInputData::cudaInputData(Config& config, const std::string& unique_name,
     if (in_buf->frame_size) {
         uint flags;
         // only register the memory if it isn't already...
-        const auto host_status = cudaHostGetFlags(&flags, in_buf->frames[instance_num]);
-        if (host_status == cudaErrorInvalidValue) {
-            // Expected for unregistered memory: do not leak this probe error into
-            // the next kernel's cudaGetLastError launch check.
-            (void)cudaGetLastError();
+        if (cudaErrorInvalidValue == cudaHostGetFlags(&flags, in_buf->frames[instance_num])) {
             CHECK_CUDA_ERROR(cudaHostRegister(in_buf->frames[instance_num], in_buf->frame_size, 0));
-        } else {
-            CHECK_CUDA_ERROR(host_status);
         }
         _gpu_mem = config.get<std::string>(unique_name, "gpu_mem");
         gpu_buffers_used.push_back(std::make_tuple(_gpu_mem, true, false, true));
@@ -59,13 +53,8 @@ cudaInputData::~cudaInputData() {
     if (in_buf->frame_size) {
         uint flags;
         // only unregister if it's actually been registered
-        const auto host_status = cudaHostGetFlags(&flags, in_buf->frames[instance_num]);
-        if (host_status == cudaSuccess) {
+        if (cudaSuccess == cudaHostGetFlags(&flags, in_buf->frames[instance_num])) {
             CHECK_CUDA_ERROR(cudaHostUnregister(in_buf->frames[instance_num]));
-        } else if (host_status == cudaErrorInvalidValue) {
-            (void)cudaGetLastError(); // memory may already have been unregistered
-        } else {
-            CHECK_CUDA_ERROR(host_status);
         }
     }
 }

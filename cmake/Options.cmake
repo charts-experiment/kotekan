@@ -77,9 +77,6 @@ function(ktk_tristate_option flag desc default)
     set_property(CACHE ${flag} PROPERTY STRINGS AUTO ON OFF)
 endfunction()
 
-option(USE_CHARTS_BEAMFORMER "Link the local CHARTS scientific CUDA library" OFF)
-set(CHARTS_BEAMFORMER_SOURCE_DIR "" CACHE PATH "Local beamform_project source checkout")
-
 # AUTO by default (most "Features")
 ktk_tristate_option(USE_AIRSPY "Build Airspy Producer" AUTO)
 ktk_tristate_option(USE_ASDF "Build ASDF output stages" AUTO)

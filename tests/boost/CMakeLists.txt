@@ -196,22 +196,3 @@ target_link_libraries(
             -Wl,--no-whole-archive)
 target_include_directories(test_N2Subset PRIVATE ${KOTEKAN_SOURCE_DIR}/lib/stages
                                                  ${KOTEKAN_SOURCE_DIR}/lib/utils)
-
-# Follow the existing metadata tests' whole-archive registration pattern on Linux.
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    set(_CHARTS_METADATA_LINK -Wl,--whole-archive kotekan_metadata -Wl,--no-whole-archive)
-else()
-    set(_CHARTS_METADATA_LINK kotekan_metadata)
-endif()
-add_executable(test_charts_beam_metadata test_charts_beam_metadata.cpp)
-target_link_libraries(test_charts_beam_metadata PRIVATE kotekan_core kotekan_utils libexternal
-                      ${_CHARTS_METADATA_LINK})
-add_test(NAME charts_beam_metadata COMMAND test_charts_beam_metadata)
-if(USE_CHARTS_BEAMFORMER)
-    add_executable(test_charts_beamformer test_charts_beamformer.cpp
-                   ${KOTEKAN_SOURCE_DIR}/lib/cuda/cudaChartsBeamformerCommand.cpp)
-    target_link_libraries(test_charts_beamformer PRIVATE kotekan_cuda kotekan_core kotekan_gpu
-                          kotekan_utils libexternal charts::cuda ${_CHARTS_METADATA_LINK})
-    add_test(NAME charts_beamformer COMMAND test_charts_beamformer)
-    set_tests_properties(charts_beamformer PROPERTIES LABELS "cuda;charts;validation" TIMEOUT 120)
-endif()

@@ -32,12 +32,6 @@ GPU Backends
   Adds ``-DWITH_CUDA`` and builds CUDA stages.
 - ``USE_OPENCL`` (``OFF``): Enable the OpenCL backend. Set to ``AUTO``/``ON`` when OpenCL headers and
   libraries are installed; the build installs kernel files to ``/var/lib/kotekan/opencl``.
-- ``USE_CHARTS_BEAMFORMER`` (``OFF``): Link the local CHARTS scientific CUDA library.
-  Requires CUDA and CMake 3.24 or newer; adds no processing stages or pipeline changes.
-- ``CHARTS_BEAMFORMER_SOURCE_DIR`` (empty): Path to a local ``beamform_project`` checkout
-  providing ``charts::cuda``. No downloads occur. Tools and scientific tests stay disabled
-  in the embedded build. Validate the link with the explicit
-  ``charts_beamformer_link_check`` target, which runs without a GPU.
 - ``USE_HIP`` (``OFF``): Enable the HIP backend when the HIP toolchain is available.
 
 

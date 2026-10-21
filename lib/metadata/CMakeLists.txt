@@ -13,8 +13,7 @@ add_library(
     Metadata.cpp
     NDArray.cpp
     Symbol.cpp
-    chartsMetadata.cpp
-    chartsBeamMetadata.cpp)
+    chartsMetadata.cpp)
 
 target_link_libraries(kotekan_metadata PRIVATE kotekan_utils)
 target_include_directories(kotekan_metadata PUBLIC .)
