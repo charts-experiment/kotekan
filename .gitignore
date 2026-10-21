@@ -55,6 +55,7 @@ tracker_benchmark_comparison.json
 /*_report.md
 test_charts/*_report.json
 test_charts/*_report.md
+!test_charts/tri_engine_frb_benchmark_report.md
 test_charts/tracker_benchmark_report.md
 charts_10tb_campaign_results/
 *.tar.gz
