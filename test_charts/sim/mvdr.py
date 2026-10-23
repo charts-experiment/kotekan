@@ -19,6 +19,25 @@ from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
 
+def expected_weight_updates(
+    num_frames: int, half_window: int, guard: int, min_frames: int, update_every: int
+) -> int:
+    """Number of weight updates chartsMVDRBeams makes on a stream of num_frames frames.
+
+    Same rule as the stage (and charts_mvdr.stage_reference): the window of frame t holds
+    the frames k with guard < |k - t| <= half_window; the first frame with at least
+    min_frames frames updates, then frames with t % update_every == 0 (with enough frames).
+    """
+    count, has_weights = 0, False
+    for t in range(num_frames):
+        lo, hi = max(0, t - half_window), min(num_frames - 1, t + half_window)
+        n_window = sum(1 for k in range(lo, hi + 1) if abs(k - t) > guard)
+        if n_window >= min_frames and (not has_weights or t % update_every == 0):
+            count += 1
+            has_weights = True
+    return count
+
+
 def create_mvdr_yaml(
     yaml_path: Path,
     baseband_dir: Path,
@@ -35,6 +54,7 @@ def create_mvdr_yaml(
     samples_per_data_set: int = 1536,
     cov_half_window: int = 10,
     cov_guard: int = 1,
+    cov_min_frames: Optional[int] = None,
     update_every: int = 1,
     loading: float = 10.0,
     loading_ref: str = "noise",
@@ -49,6 +69,11 @@ def create_mvdr_yaml(
     The correlation buffer holds 2 * cov_half_window + 4 frames (the stage keeps
     2 * cov_half_window + 1 frames). flush_after_frames = num_frames, so every frame of
     the window gets an output (the last cov_half_window with truncated windows).
+
+    Shutdown: the reader does not end the pipeline (end_interrupt: false); the writers use
+    exit_after_n_files with the expected counts (num_frames correlation and power frames,
+    expected_weight_updates() weight frames), so Kotekan exits only after the stage has
+    flushed and every output is on disk.
     """
     if len(positions_x_m) != num_elements or len(positions_y_m) != num_elements:
         raise ValueError("positions must have num_elements values")
@@ -62,6 +87,16 @@ def create_mvdr_yaml(
     corr_dir.mkdir(parents=True, exist_ok=True)
     mvdr_dir.mkdir(parents=True, exist_ok=True)
 
+    min_frames = (
+        cov_half_window - cov_guard if cov_min_frames is None else cov_min_frames
+    )
+    n_updates = expected_weight_updates(
+        num_frames, cov_half_window, cov_guard, min_frames, update_every
+    )
+    if n_updates == 0:
+        raise ValueError(
+            "no weight update would happen: window too short for cov_min_frames"
+        )
     block_size = 2
     num_blocks = (num_elements // block_size) * (num_elements // block_size + 1) // 2
     num_beams = len(beams)
@@ -89,6 +124,7 @@ correlator_dump:
   num_frames_per_file: 1
   prefix_hostname: false
   skip_zero_frames: false
+  exit_after_n_files: {num_frames}
 """
 
     content = f"""######################################################################
@@ -157,7 +193,7 @@ baseband_reader:
   file_name: "{baseband_name}"
   file_ext: "bin"
   prefix_hostname: false
-  end_interrupt: true
+  end_interrupt: false
 
 gpu:
   profiling: false
@@ -216,6 +252,7 @@ mvdr_beams:
   beams: {bs}
   cov_half_window: {cov_half_window}
   cov_guard: {cov_guard}
+  cov_min_frames: {min_frames}
   update_every: {update_every}
   loading: {float(loading)!r}
   loading_ref: {loading_ref}
@@ -230,6 +267,7 @@ mvdr_power_dump:
   num_frames_per_file: 1
   prefix_hostname: false
   skip_zero_frames: false
+  exit_after_n_files: {num_frames}
 
 mvdr_weights_dump:
   kotekan_stage: rawFileWrite
@@ -240,6 +278,7 @@ mvdr_weights_dump:
   num_frames_per_file: 1
   prefix_hostname: false
   skip_zero_frames: false
+  exit_after_n_files: {n_updates}
 {corr_dump}"""
     yaml_path.write_text(content, encoding="utf-8")
     return yaml_path

@@ -8,7 +8,7 @@ import pytest
 yaml = pytest.importorskip("yaml")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from sim.mvdr import create_mvdr_yaml  # noqa: E402
+from sim.mvdr import create_mvdr_yaml, expected_weight_updates  # noqa: E402
 
 
 def _make(tmp_path, **kw):
@@ -73,3 +73,24 @@ def test_rejects_bad_positions(tmp_path):
             [0.0] * 3,
             [(0, 0)],
         )
+
+
+def test_shutdown_counts(tmp_path):
+    cfg = _make(tmp_path)
+    assert cfg["baseband_reader"]["end_interrupt"] is False
+    assert cfg["mvdr_power_dump"]["exit_after_n_files"] == 99
+    assert cfg["correlator_dump"]["exit_after_n_files"] == 99
+    assert cfg["mvdr_weights_dump"]["exit_after_n_files"] == 99  # update_every 1
+    cfg = _make(tmp_path, update_every=4)
+    assert cfg["mvdr_weights_dump"]["exit_after_n_files"] == expected_weight_updates(
+        99, 10, 1, 9, 4
+    )
+
+
+def test_expected_weight_updates():
+    # 40 frames, H 4, g 1, min 6, U 4: first window with 6 frames at t = 4, then every 4th
+    # frame while the window keeps 6 frames (t = 36 has 5): 4, 8, ..., 32 -> 8 updates, as
+    # measured on the stage with the same parameters
+    assert expected_weight_updates(40, 4, 1, 6, 4) == 8
+    assert expected_weight_updates(30, 10, 1, 9, 1) == 30
+    assert expected_weight_updates(3, 10, 1, 9, 1) == 0
