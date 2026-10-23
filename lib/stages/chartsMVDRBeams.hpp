@@ -53,13 +53,16 @@
  * @conf beams               Array of [l, m]. Look directions (direction cosines).
  * @conf gains_file          String. Optional complex gains .npy (n_freq_file, num_elements).
  * @conf gains_first_channel Int.    Row of the gains file for channel 0 (default 0).
- * @conf cov_half_window     Int.    H (default 10).
+ * @conf cov_half_window     Int.    H (default 40: on the simulated windows the null depth
+ *                                   spread and the burst recovery were better than with 10).
  * @conf cov_guard           Int.    g (default 1).
  * @conf cov_min_frames      Int.    Minimum frames in the window for an update (default H - g).
  * @conf update_every        Int.    Update period in frames (default 1).
  * @conf loading             Double. Diagonal loading in units of loading_ref (default 10).
  * @conf loading_ref         String. noise (median eigenvalue of F), trace or absolute.
  * @conf wng_warn_db         Double. Warn when WNG = N ||w||^2 exceeds this (default 3 dB).
+ * @conf wng_log_period      Int.    Repeat an unchanged WNG warning at most every this many
+ *                                   updates (default 100).
  * @conf flush_after_frames  Int.    Produce all remaining frames after this many inputs
  *                                   (default 0: never).
  */
@@ -85,6 +88,9 @@ private:
     int update_every;
     double wng_warn_db;
     int64_t flush_after_frames;
+    int wng_log_period;
+    long last_wng_count = -1;
+    int updates_since_wng_log = 0;
     int out_frame_id = 0;
     int weights_frame_id = 0;
 };

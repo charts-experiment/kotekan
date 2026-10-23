@@ -52,7 +52,7 @@ def create_mvdr_yaml(
     num_elements: int = 64,
     num_local_freq: int = 336,
     samples_per_data_set: int = 1536,
-    cov_half_window: int = 10,
+    cov_half_window: int = 40,
     cov_guard: int = 1,
     cov_min_frames: Optional[int] = None,
     update_every: int = 1,

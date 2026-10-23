@@ -58,11 +58,12 @@ chartsMVDRBeams::chartsMVDRBeams(Config& config, const std::string& unique_name,
         INFO("Loaded gains from {:s} (rows {:d}-{:d})", gains_file, first, first + p.num_freq - 1);
     }
 
-    half_window = config.get_default<int>(unique_name, "cov_half_window", 10);
+    half_window = config.get_default<int>(unique_name, "cov_half_window", 40);
     guard = config.get_default<int>(unique_name, "cov_guard", 1);
     min_frames = config.get_default<int>(unique_name, "cov_min_frames", half_window - guard);
     update_every = config.get_default<int>(unique_name, "update_every", 1);
     wng_warn_db = config.get_default<double>(unique_name, "wng_warn_db", 3.0);
+    wng_log_period = config.get_default<int>(unique_name, "wng_log_period", 100);
     flush_after_frames = config.get_default<int64_t>(unique_name, "flush_after_frames", 0);
     if (half_window < 1 || guard < 0 || guard >= half_window)
         throw std::invalid_argument("chartsMVDRBeams: need cov_half_window >= 1 and "
@@ -126,11 +127,19 @@ bool chartsMVDRBeams::process(int64_t t, int64_t last_index) {
             const float thr = std::pow(10.0f, static_cast<float>(wng_warn_db) / 10.0f);
             const auto n_high =
                 std::count_if(wng.begin(), wng.end(), [&](float v) { return v > thr; });
-            if (n_high > 0)
+            // Log when the number of (channel, beam) pairs above the threshold changes, and at
+            // most every wng_log_period updates otherwise (a fixed geometry near a grating lobe
+            // would warn at every update).
+            ++updates_since_wng_log;
+            if (n_high > 0
+                && (n_high != last_wng_count || updates_since_wng_log >= wng_log_period)) {
                 WARN("Frame {:d}: WNG above {:.1f} dB in {:d} (channel, beam) pairs, max {:.1f} "
                      "dB",
                      t, wng_warn_db, n_high,
                      10.0 * std::log10(*std::max_element(wng.begin(), wng.end())));
+                updates_since_wng_log = 0;
+            }
+            last_wng_count = n_high;
             if (weights_buf) {
                 uint8_t* w = weights_buf->wait_for_empty_frame(unique_name, weights_frame_id);
                 if (w == nullptr)
