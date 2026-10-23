@@ -210,9 +210,9 @@ std::vector<cplx> gains_to_elements(const std::vector<cplx>& gains, int num_freq
 }
 
 std::vector<std::complex<float>> calibration_correctors(const std::vector<cplx>& gains,
-                                                       int num_freq, int num_ant,
-                                                       const std::vector<int>& elem_to_ant,
-                                                       int* num_dropped) {
+                                                        int num_freq, int num_ant,
+                                                        const std::vector<int>& elem_to_ant,
+                                                        int* num_dropped) {
     if (static_cast<long>(gains.size()) != static_cast<long>(num_freq) * num_ant)
         throw std::invalid_argument("charts_mvdr: gains must have num_freq * num_ant values");
     const int n_elem = static_cast<int>(elem_to_ant.size());

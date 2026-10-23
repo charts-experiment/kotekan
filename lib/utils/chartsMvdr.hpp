@@ -71,9 +71,9 @@ std::vector<cplx> gains_to_elements(const std::vector<cplx>& gains, int num_freq
 /// element e takes the gain of antenna elem_to_ant[e]. Non-finite or zero gains give c = 0
 /// (the element is dropped). gains is [freq][antenna] with num_ant antennas.
 std::vector<std::complex<float>> calibration_correctors(const std::vector<cplx>& gains,
-                                                       int num_freq, int num_ant,
-                                                       const std::vector<int>& elem_to_ant,
-                                                       int* num_dropped = nullptr);
+                                                        int num_freq, int num_ant,
+                                                        const std::vector<int>& elem_to_ant,
+                                                        int* num_dropped = nullptr);
 
 /// Weight update rule: the first frame whose window holds at least min_frames frames, then
 /// frames with t % update_every == 0 (and at least min_frames frames in the window).
