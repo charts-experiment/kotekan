@@ -78,6 +78,7 @@ private:
     void free_device_buffers();
     void invalidate_cuda_graphs();
     void update_weights_if_needed(const DirectBeamTrackerConfig& cfg, cudaStream_t stream);
+    void upload_calibration_gains(const DirectBeamTrackerConfig& cfg);
 
     std::string _rest_prefix = "/direct_tracker";
     double _freq_start_hz = 300.0e6;
@@ -131,6 +132,10 @@ private:
     float3* _d_antenna_positions = nullptr;
     float* _d_norm_taper = nullptr;
     float2* _d_calibration_gains = nullptr;
+
+    // Complex antenna gains (charts-utils .npy, v_obs = g v); empty: no calibration
+    std::string _gains_file;
+    int32_t _gains_first_channel = 0;
 
     // Power reduction buffers
     float* _d_beam_power = nullptr;
