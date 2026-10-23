@@ -183,6 +183,32 @@ std::vector<cplx> load_gains_npy(const std::string& path, int first_channel, int
     return out;
 }
 
+std::vector<int> element_to_antenna(int n, const std::string& antenna_order) {
+    if (antenna_order != "descending" && antenna_order != "ascending")
+        throw std::invalid_argument("antenna_order must be descending or ascending; got "
+                                    + antenna_order);
+    std::vector<int> out(static_cast<std::size_t>(n));
+    for (int e = 0; e < n; ++e)
+        out[e] = (antenna_order == "descending") ? n - 1 - e : e;
+    return out;
+}
+
+std::vector<cplx> gains_to_elements(const std::vector<cplx>& gains, int num_freq,
+                                    const std::vector<int>& elem_to_ant) {
+    const int n = static_cast<int>(elem_to_ant.size());
+    if (static_cast<long>(gains.size()) != static_cast<long>(num_freq) * n)
+        throw std::invalid_argument("charts_mvdr: gains must have num_freq * num_elements values");
+    std::vector<cplx> out(gains.size());
+    for (int f = 0; f < num_freq; ++f)
+        for (int e = 0; e < n; ++e) {
+            const int a = elem_to_ant[e];
+            if (a < 0 || a >= n)
+                throw std::invalid_argument("charts_mvdr: element maps outside the gains file");
+            out[static_cast<std::size_t>(f) * n + e] = gains[static_cast<std::size_t>(f) * n + a];
+        }
+    return out;
+}
+
 std::vector<int64_t> window_indices(int64_t t, int64_t last_index, int half_window, int guard) {
     if (half_window < 1 || guard < 0 || guard >= half_window)
         throw std::invalid_argument("need half_window >= 1 and 0 <= guard < half_window");

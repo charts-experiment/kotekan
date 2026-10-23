@@ -59,6 +59,7 @@ def create_mvdr_yaml(
     loading: float = 10.0,
     loading_ref: str = "noise",
     gains_file: Optional[Path] = None,
+    antenna_order: str = "descending",
     write_correlation: bool = True,
     buffer_depth: int = 2,
     cpu_cores: Optional[List[int]] = None,
@@ -79,6 +80,8 @@ def create_mvdr_yaml(
         raise ValueError("positions must have num_elements values")
     if not beams:
         raise ValueError("need at least one beam")
+    if antenna_order not in ("descending", "ascending"):
+        raise ValueError("antenna_order must be descending or ascending")
     yaml_path = Path(yaml_path)
     output_dir = Path(output_dir)
     corr_dir = output_dir / "corr"
@@ -110,7 +113,11 @@ def create_mvdr_yaml(
     xs = json.dumps([float(v) for v in positions_x_m])
     ys = json.dumps([float(v) for v in positions_y_m])
     bs = json.dumps([[float(l), float(m)] for l, m in beams])
-    gains = f'\n  gains_file: "{Path(gains_file).as_posix()}"' if gains_file else ""
+    gains = (
+        f'\n  gains_file: "{Path(gains_file).as_posix()}"\n  antenna_order: {antenna_order}'
+        if gains_file
+        else ""
+    )
 
     corr_dump = ""
     if write_correlation:

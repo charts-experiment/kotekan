@@ -58,6 +58,14 @@ std::vector<int64_t> window_indices(int64_t t, int64_t last_index, int half_wind
 std::vector<cplx> load_gains_npy(const std::string& path, int first_channel, int num_freq,
                                  int num_elements);
 
+/// Logical antenna of each correlator element: e (ascending) or n - 1 - e (descending, the
+/// order of CHARTS baseband frames and the cudaDirectBeamTracker default).
+std::vector<int> element_to_antenna(int n, const std::string& antenna_order);
+
+/// Gains [freq][antenna] (file order, logical antennas) reordered to [freq][element].
+std::vector<cplx> gains_to_elements(const std::vector<cplx>& gains, int num_freq,
+                                    const std::vector<int>& elem_to_ant);
+
 /// Weight update rule: the first frame whose window holds at least min_frames frames, then
 /// frames with t % update_every == 0 (and at least min_frames frames in the window).
 inline bool should_update(int64_t t, bool has_weights, int update_every, std::size_t n_window,

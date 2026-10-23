@@ -54,8 +54,14 @@ chartsMVDRBeams::chartsMVDRBeams(Config& config, const std::string& unique_name,
     const std::string gains_file = config.get_default<std::string>(unique_name, "gains_file", "");
     if (!gains_file.empty()) {
         const int first = config.get_default<int>(unique_name, "gains_first_channel", 0);
-        p.gains = charts_mvdr::load_gains_npy(gains_file, first, p.num_freq, p.num_elements);
-        INFO("Loaded gains from {:s} (rows {:d}-{:d})", gains_file, first, first + p.num_freq - 1);
+        const std::string order =
+            config.get_default<std::string>(unique_name, "antenna_order", "descending");
+        // The file is indexed by logical antenna; the engine works in correlator element order.
+        p.gains = charts_mvdr::gains_to_elements(
+            charts_mvdr::load_gains_npy(gains_file, first, p.num_freq, p.num_elements), p.num_freq,
+            charts_mvdr::element_to_antenna(p.num_elements, order));
+        INFO("Loaded gains from {:s} (rows {:d}-{:d}, antenna order {:s})", gains_file, first,
+             first + p.num_freq - 1, order);
     }
 
     half_window = config.get_default<int>(unique_name, "cov_half_window", 40);

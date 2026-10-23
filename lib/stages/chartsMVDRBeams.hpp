@@ -53,6 +53,10 @@
  * @conf beams               Array of [l, m]. Look directions (direction cosines).
  * @conf gains_file          String. Optional complex gains .npy (n_freq_file, num_elements).
  * @conf gains_first_channel Int.    Row of the gains file for channel 0 (default 0).
+ * @conf antenna_order       String. Logical antenna of correlator element e for the gains
+ *                                   file: descending (n - 1 - e, default, as the baseband
+ *                                   frames and cudaDirectBeamTracker) or ascending (e).
+ *                                   Positions are given per element and are not reordered.
  * @conf cov_half_window     Int.    H (default 40: on the simulated windows the null depth
  *                                   spread and the burst recovery were better than with 10).
  * @conf cov_guard           Int.    g (default 1).
