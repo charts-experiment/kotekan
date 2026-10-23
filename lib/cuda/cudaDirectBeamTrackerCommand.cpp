@@ -2,6 +2,7 @@
 
 #include "chartsConstants.hpp"
 #include "chartsMetadata.hpp"
+#include "chartsMvdr.hpp"
 #include "cudaDirectBeamTracker.cuh"
 #include "cudaDirectBeamTracker.hpp"
 #include "cudaUtils.hpp"
@@ -177,6 +178,13 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
         unique_name, "rest_prefix", _grid_mode_enabled ? "/grid_tracker" : "/direct_tracker");
     _freq_start_hz = config.get_default<double>(unique_name, "freq_start_hz", 300.0e6);
     _freq_step_hz = config.get_default<double>(unique_name, "freq_step_hz", 300.0e3);
+
+    // Calibration: gains file indexed (channel, physical antenna), row 0 at 300 MHz in steps of
+    // freq_step_hz unless gains_first_channel is given (sharded nodes slice the full band).
+    _gains_file = config.get_default<std::string>(unique_name, "gains_file", "");
+    _gains_first_channel = config.get_default<int>(
+        unique_name, "gains_first_channel",
+        static_cast<int>(std::lround((_freq_start_hz - 300.0e6) / _freq_step_hz)));
 
     std::shared_ptr<TrackerGroup> group;
     {
@@ -819,6 +827,31 @@ void cudaDirectBeamTrackerCommand::invalidate_cuda_graphs() {
     }
 }
 
+void cudaDirectBeamTrackerCommand::upload_calibration_gains(const DirectBeamTrackerConfig& cfg) {
+    // The weight kernels multiply each weight by calibration_gains[freq][elem] and form
+    // y = sum_e w_e v_e, so they need the corrector 1 / g of each element (v_obs = g v);
+    // non-finite or zero gains drop the element (corrector 0).
+    const auto gains = charts_mvdr::load_gains_npy(_gains_file, _gains_first_channel,
+                                                   _num_local_freq, _num_antennas);
+    std::vector<int> elem_to_ant(static_cast<std::size_t>(_num_elements));
+    for (int r = 0; r < _num_elements; ++r)
+        elem_to_ant[r] = static_cast<int>(cfg.raw_elem_to_physical_ant(r));
+    int dropped = 0;
+    const auto corr = charts_mvdr::calibration_correctors(gains, _num_local_freq, _num_antennas,
+                                                          elem_to_ant, &dropped);
+    std::vector<float2> host(corr.size());
+    for (std::size_t i = 0; i < corr.size(); ++i)
+        host[i] = make_float2(corr[i].real(), corr[i].imag());
+    if (_d_calibration_gains == nullptr)
+        CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_calibration_gains, host.size() * sizeof(float2)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(_d_calibration_gains, host.data(),
+                                       host.size() * sizeof(float2), cudaMemcpyHostToDevice));
+    INFO_NON_OO("Direct Beam Tracker: calibration gains from {:s} (rows {:d}-{:d}, "
+                "{:d} (channel, element) pairs dropped)",
+                _gains_file, _gains_first_channel, _gains_first_channel + _num_local_freq - 1,
+                dropped);
+}
+
 void cudaDirectBeamTrackerCommand::allocate_device_buffers() {
     const std::size_t weights_elems = static_cast<std::size_t>(_max_beams)
                                       * static_cast<std::size_t>(_num_local_freq)
@@ -870,6 +903,9 @@ void cudaDirectBeamTrackerCommand::allocate_device_buffers() {
                                        _num_elements * sizeof(float3), cudaMemcpyHostToDevice));
     CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(_d_norm_taper, cfg.normalized_taper_weights.data(),
                                        _num_elements * sizeof(float), cudaMemcpyHostToDevice));
+
+    if (!_gains_file.empty())
+        upload_calibration_gains(cfg);
 
     if (_grid_mode_enabled) {
         _h_grid_lms = generate_sky_grid_directions(_grid_step);

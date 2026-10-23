@@ -209,6 +209,33 @@ std::vector<cplx> gains_to_elements(const std::vector<cplx>& gains, int num_freq
     return out;
 }
 
+std::vector<std::complex<float>> calibration_correctors(const std::vector<cplx>& gains,
+                                                        int num_freq, int num_ant,
+                                                        const std::vector<int>& elem_to_ant,
+                                                        int* num_dropped) {
+    if (static_cast<long>(gains.size()) != static_cast<long>(num_freq) * num_ant)
+        throw std::invalid_argument("charts_mvdr: gains must have num_freq * num_ant values");
+    const int n_elem = static_cast<int>(elem_to_ant.size());
+    std::vector<std::complex<float>> out(static_cast<std::size_t>(num_freq) * n_elem);
+    int dropped = 0;
+    for (int f = 0; f < num_freq; ++f)
+        for (int e = 0; e < n_elem; ++e) {
+            const int a = elem_to_ant[e];
+            if (a < 0 || a >= num_ant)
+                throw std::invalid_argument("charts_mvdr: element maps outside the gains file");
+            const cplx g = gains[static_cast<std::size_t>(f) * num_ant + a];
+            const bool ok = std::isfinite(g.real()) && std::isfinite(g.imag()) && std::abs(g) > 0.0;
+            const cplx v = ok ? 1.0 / g : cplx(0.0, 0.0);
+            if (!ok)
+                ++dropped;
+            out[static_cast<std::size_t>(f) * n_elem + e] =
+                std::complex<float>(static_cast<float>(v.real()), static_cast<float>(v.imag()));
+        }
+    if (num_dropped)
+        *num_dropped = dropped;
+    return out;
+}
+
 std::vector<int64_t> window_indices(int64_t t, int64_t last_index, int half_window, int guard) {
     if (half_window < 1 || guard < 0 || guard >= half_window)
         throw std::invalid_argument("need half_window >= 1 and 0 <= guard < half_window");
