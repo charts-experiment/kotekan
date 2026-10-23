@@ -38,7 +38,8 @@ add_library(
     UpchannelizationSchedule.cpp
     geoUtil.cpp
     beamUtil.cpp
-    pfbPrototype.cpp)
+    pfbPrototype.cpp
+    chartsMvdr.cpp)
 
 target_link_libraries(
     kotekan_utils
