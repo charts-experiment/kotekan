@@ -80,9 +80,9 @@ void unpack_astron(const T* base, int N, int bs, double scale, std::vector<cplx>
                 for (int px = 0; px < bs; ++px) {
                     const std::size_t idx = ((blk * bs + py) * bs + px) * 2;
                     const int ey = ry * bs + py, ex = rx * bs + px;
-                    full[ey * N + ex] = cplx(static_cast<double>(base[idx]),
-                                             -static_cast<double>(base[idx + 1]))
-                                        * scale;
+                    full[ey * N + ex] =
+                        cplx(static_cast<double>(base[idx]), -static_cast<double>(base[idx + 1]))
+                        * scale;
                     stored[ey * N + ex] = 1;
                 }
         }
@@ -352,9 +352,8 @@ MvdrEngine::MvdrEngine(const MvdrParams& params) : p_(params) {
         for (int b = 0; b < n_beam_; ++b)
             for (int i = 0; i < n; ++i) {
                 const int a = good_[f][i];
-                const double delay =
-                    (p_.beam_l[b] * p_.pos_x_m[a] + p_.beam_m[b] * p_.pos_y_m[a])
-                    / speed_of_light_m_per_s;
+                const double delay = (p_.beam_l[b] * p_.pos_x_m[a] + p_.beam_m[b] * p_.pos_y_m[a])
+                                     / speed_of_light_m_per_s;
                 steer_[f][b * n + i] = std::polar(1.0, -two_pi * p_.freqs_hz[f] * delay);
             }
     }
@@ -394,8 +393,8 @@ bool MvdrEngine::update(const std::vector<const int32_t*>& frames) {
     const int N = p_.num_elements;
     std::vector<cplx> full;
     for (int f = 0; f < F; ++f) {
-        unpack_astron(sum.data() + static_cast<std::size_t>(f) * floats_per_freq_, N,
-                      p_.block_size, scale, full);
+        unpack_astron(sum.data() + static_cast<std::size_t>(f) * floats_per_freq_, N, p_.block_size,
+                      scale, full);
         const auto& idx = good_[f];
         const auto& ig = inv_gain_[f];
         const int n = static_cast<int>(idx.size());
@@ -493,8 +492,7 @@ std::vector<float> MvdrEngine::wng() const {
 
 std::size_t MvdrEngine::weights_frame_size() const {
     const std::size_t nfb = static_cast<std::size_t>(p_.num_freq) * n_beam_;
-    return 2 * sizeof(int64_t) + nfb * p_.num_elements * 2 * sizeof(float)
-           + nfb * sizeof(float);
+    return 2 * sizeof(int64_t) + nfb * p_.num_elements * 2 * sizeof(float) + nfb * sizeof(float);
 }
 
 void MvdrEngine::write_weights(uint8_t* out, int64_t frame_index, int64_t n_window) const {

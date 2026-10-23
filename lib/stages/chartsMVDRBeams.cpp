@@ -171,9 +171,9 @@ bool chartsMVDRBeams::process(int64_t t, int64_t last_index) {
 
 void chartsMVDRBeams::main_thread() {
     const int nf = in_buf->num_frames;
-    int64_t received = 0;  // input frames held or released
-    int64_t next_out = 0;  // next output frame
-    int64_t released = 0;  // input frames marked empty
+    int64_t received = 0; // input frames held or released
+    int64_t next_out = 0; // next output frame
+    int64_t released = 0; // input frames marked empty
 
     while (!stop_thread) {
         const bool flushing = flush_after_frames > 0 && received >= flush_after_frames;

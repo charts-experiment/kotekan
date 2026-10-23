@@ -41,12 +41,12 @@ struct MvdrParams {
     int num_freq = 0;
     int block_size = 2;
     double samples_per_frame = 1.0;
-    std::vector<double> freqs_hz;            // num_freq
-    std::vector<double> pos_x_m, pos_y_m;    // num_elements
-    std::vector<double> beam_l, beam_m;      // num_beams
+    std::vector<double> freqs_hz;         // num_freq
+    std::vector<double> pos_x_m, pos_y_m; // num_elements
+    std::vector<double> beam_l, beam_m;   // num_beams
     double loading = 10.0;
     LoadingRef loading_ref = LoadingRef::noise;
-    std::vector<cplx> gains;                 // empty (unity) or num_freq * num_elements
+    std::vector<cplx> gains; // empty (unity) or num_freq * num_elements
 };
 
 /// Frame indices k with guard < |k - t| <= half_window inside [0, last_index].
@@ -117,11 +117,11 @@ private:
 
     MvdrParams p_;
     int n_beam_;
-    std::size_t floats_per_freq_;    // num_blocks * bs * bs * 2
-    std::vector<std::vector<int>> good_;          // usable element indices per channel
-    std::vector<std::vector<cplx>> inv_gain_;     // per channel, per usable element
-    std::vector<std::vector<cplx>> steer_;        // per channel [beam][good element]
-    std::vector<std::vector<cplx>> w_mvdr_;       // per channel [beam][good element]
+    std::size_t floats_per_freq_;             // num_blocks * bs * bs * 2
+    std::vector<std::vector<int>> good_;      // usable element indices per channel
+    std::vector<std::vector<cplx>> inv_gain_; // per channel, per usable element
+    std::vector<std::vector<cplx>> steer_;    // per channel [beam][good element]
+    std::vector<std::vector<cplx>> w_mvdr_;   // per channel [beam][good element]
     bool has_weights_ = false;
 };
 
