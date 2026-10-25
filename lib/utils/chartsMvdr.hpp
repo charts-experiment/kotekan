@@ -66,6 +66,15 @@ std::vector<int> element_to_antenna(int n, const std::string& antenna_order);
 std::vector<cplx> gains_to_elements(const std::vector<cplx>& gains, int num_freq,
                                     const std::vector<int>& elem_to_ant);
 
+/// Correctors c = 1 / g for a beamformer that multiplies its weights by c and forms
+/// y = sum_e w_e v_e (charts-utils convention v_obs = g v), laid out [freq][element]:
+/// element e takes the gain of antenna elem_to_ant[e]. Non-finite or zero gains give c = 0
+/// (the element is dropped). gains is [freq][antenna] with num_ant antennas.
+std::vector<std::complex<float>> calibration_correctors(const std::vector<cplx>& gains,
+                                                        int num_freq, int num_ant,
+                                                        const std::vector<int>& elem_to_ant,
+                                                        int* num_dropped = nullptr);
+
 /// Weight update rule: the first frame whose window holds at least min_frames frames, then
 /// frames with t % update_every == 0 (and at least min_frames frames in the window).
 inline bool should_update(int64_t t, bool has_weights, int update_every, std::size_t n_window,
