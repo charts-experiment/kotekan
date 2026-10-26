@@ -56,7 +56,7 @@ __device__ __forceinline__ float2 complex_mul(float2 a, float2 b) {
     return make_float2(fmaf(-a.y, b.y, a.x * b.x), fmaf(a.x, b.y, a.y * b.x));
 }
 
-__device__ __forceinline__ float2 complex_pow_int(float2 z, std::size_t exp) {
+[[maybe_unused]] __device__ __forceinline__ float2 complex_pow_int(float2 z, std::size_t exp) {
     float2 res = make_float2(1.0f, 0.0f);
     float2 base = z;
     while (exp > 0) {
@@ -75,20 +75,38 @@ __device__ __forceinline__ float2 complex_pow_int(float2 z, std::size_t exp) {
     return res;
 }
 
-__device__ __forceinline__ float2 unpack_int4_byte(std::uint32_t byte_val) {
+template <bool SWAPPED_WITH_OFFSET = false>
+__device__ __forceinline__ float2 unpack_int4_byte_fmt(std::uint32_t byte_val) {
+    if constexpr (SWAPPED_WITH_OFFSET) {
 #if defined(__CUDA_ARCH__)
-    int r, i;
-    asm("bfe.s32 %0, %1, 0, 4;" : "=r"(r) : "r"(byte_val));
-    asm("bfe.s32 %0, %1, 4, 4;" : "=r"(i) : "r"(byte_val));
-    return make_float2(__int2float_rn(r), __int2float_rn(i));
+        int r, i;
+        asm("bfe.u32 %0, %1, 4, 4;" : "=r"(r) : "r"(byte_val));
+        asm("bfe.u32 %0, %1, 0, 4;" : "=r"(i) : "r"(byte_val));
+        return make_float2(__int2float_rn(r - 8), __int2float_rn(i - 8));
 #else
-    const int r = (static_cast<int>(byte_val) << 28) >> 28;
-    const int i = (static_cast<int>(byte_val) << 24) >> 28;
-    return make_float2(static_cast<float>(r), static_cast<float>(i));
+        const int r = static_cast<int>((byte_val >> 4) & 0x0Fu) - 8;
+        const int i = static_cast<int>(byte_val & 0x0Fu) - 8;
+        return make_float2(static_cast<float>(r), static_cast<float>(i));
 #endif
+    } else {
+#if defined(__CUDA_ARCH__)
+        int r, i;
+        asm("bfe.s32 %0, %1, 0, 4;" : "=r"(r) : "r"(byte_val));
+        asm("bfe.s32 %0, %1, 4, 4;" : "=r"(i) : "r"(byte_val));
+        return make_float2(__int2float_rn(r), __int2float_rn(i));
+#else
+        const int r = (static_cast<int>(byte_val) << 28) >> 28;
+        const int i = (static_cast<int>(byte_val) << 24) >> 28;
+        return make_float2(static_cast<float>(r), static_cast<float>(i));
+#endif
+    }
 }
 
-template <int ELEM_PER_LANE>
+[[maybe_unused]] __device__ __forceinline__ float2 unpack_int4_byte(std::uint32_t byte_val) {
+    return unpack_int4_byte_fmt<false>(byte_val);
+}
+
+template <int ELEM_PER_LANE, bool SWAPPED_WITH_OFFSET = false>
 __device__ __forceinline__ void load_and_unpack_contiguous(
     const std::uint8_t* __restrict__ row_ptr,
     unsigned int lane,
@@ -96,32 +114,32 @@ __device__ __forceinline__ void load_and_unpack_contiguous(
 
     if constexpr (ELEM_PER_LANE == 1) {
         const std::uint32_t b = __ldg(&row_ptr[lane]);
-        out[0] = unpack_int4_byte(b);
+        out[0] = unpack_int4_byte_fmt<SWAPPED_WITH_OFFSET>(b);
     } else if constexpr (ELEM_PER_LANE == 2) {
         const std::uint16_t packed2 = __ldg(reinterpret_cast<const std::uint16_t*>(row_ptr) + lane);
-        out[0] = unpack_int4_byte(packed2 & 0xFFu);
-        out[1] = unpack_int4_byte((packed2 >> 8) & 0xFFu);
+        out[0] = unpack_int4_byte_fmt<SWAPPED_WITH_OFFSET>(packed2 & 0xFFu);
+        out[1] = unpack_int4_byte_fmt<SWAPPED_WITH_OFFSET>((packed2 >> 8) & 0xFFu);
     } else if constexpr (ELEM_PER_LANE == 4) {
         const std::uint32_t packed4 = __ldg(reinterpret_cast<const std::uint32_t*>(row_ptr) + lane);
         #pragma unroll
         for (int a = 0; a < 4; ++a) {
-            out[a] = unpack_int4_byte((packed4 >> (a * 8)) & 0xFFu);
+            out[a] = unpack_int4_byte_fmt<SWAPPED_WITH_OFFSET>((packed4 >> (a * 8)) & 0xFFu);
         }
     } else if constexpr (ELEM_PER_LANE == 8) {
         const uint2 packed8 = __ldg(reinterpret_cast<const uint2*>(row_ptr) + lane);
         #pragma unroll
         for (int a = 0; a < 4; ++a) {
-            out[a]     = unpack_int4_byte((packed8.x >> (a * 8)) & 0xFFu);
-            out[a + 4] = unpack_int4_byte((packed8.y >> (a * 8)) & 0xFFu);
+            out[a]     = unpack_int4_byte_fmt<SWAPPED_WITH_OFFSET>((packed8.x >> (a * 8)) & 0xFFu);
+            out[a + 4] = unpack_int4_byte_fmt<SWAPPED_WITH_OFFSET>((packed8.y >> (a * 8)) & 0xFFu);
         }
     } else if constexpr (ELEM_PER_LANE == 16) {
         const uint4 packed16 = __ldg(reinterpret_cast<const uint4*>(row_ptr) + lane);
         #pragma unroll
         for (int a = 0; a < 4; ++a) {
-            out[a]      = unpack_int4_byte((packed16.x >> (a * 8)) & 0xFFu);
-            out[a + 4]  = unpack_int4_byte((packed16.y >> (a * 8)) & 0xFFu);
-            out[a + 8]  = unpack_int4_byte((packed16.z >> (a * 8)) & 0xFFu);
-            out[a + 12] = unpack_int4_byte((packed16.w >> (a * 8)) & 0xFFu);
+            out[a]      = unpack_int4_byte_fmt<SWAPPED_WITH_OFFSET>((packed16.x >> (a * 8)) & 0xFFu);
+            out[a + 4]  = unpack_int4_byte_fmt<SWAPPED_WITH_OFFSET>((packed16.y >> (a * 8)) & 0xFFu);
+            out[a + 8]  = unpack_int4_byte_fmt<SWAPPED_WITH_OFFSET>((packed16.z >> (a * 8)) & 0xFFu);
+            out[a + 12] = unpack_int4_byte_fmt<SWAPPED_WITH_OFFSET>((packed16.w >> (a * 8)) & 0xFFu);
         }
     }
 }
@@ -491,7 +509,8 @@ template <
     int B_TILE,
     int TIME_UNROLL,
     bool INTERPOLATE,
-    bool COOPERATIVE_SMEM>
+    bool COOPERATIVE_SMEM,
+    bool SWAPPED_WITH_OFFSET = false>
 __global__ void __launch_bounds__(128, 4)
 direct_beamformer_blackwell_kernel(
     float2* __restrict__ voltages,
@@ -566,6 +585,7 @@ direct_beamformer_blackwell_kernel(
     float w_i[B_TILE][ELEM_PER_LANE];
     float dw_r[B_TILE][ELEM_PER_LANE];
     float dw_i[B_TILE][ELEM_PER_LANE];
+    float w_amp[B_TILE][ELEM_PER_LANE];
 
     #pragma unroll
     for (int b = 0; b < B_TILE; ++b) {
@@ -577,24 +597,37 @@ direct_beamformer_blackwell_kernel(
         for (unsigned int a = 0; a < ELEM_PER_LANE; ++a) {
             if (b < active_in_tile) {
                 const float2 w = __ldg(&weights[w_offset + a]);
+                const float amp = hypotf(w.x, w.y);
+                w_amp[b][a] = amp;
                 if constexpr (INTERPOLATE) {
                     const float2 dw = __ldg(&step_weights[w_offset + a]);
-                    dw_r[b][a] = dw.x;
-                    dw_i[b][a] = dw.y;
-                    if (t_start > 0) {
-                        const float2 pow_dw = complex_pow_int(dw, t_start);
-                        const float2 w_rot = complex_mul(w, pow_dw);
-                        w_r[b][a] = w_rot.x;
-                        w_i[b][a] = w_rot.y;
+                    if (amp > 1.0e-12f) {
+                        const float phi0 = atan2f(w.y, w.x);
+                        const float dphi = atan2f(dw.y, dw.x);
+                        const double phi_exact_d = static_cast<double>(phi0) +
+                                                  static_cast<double>(t_start) * static_cast<double>(dphi);
+                        const double cycles = round(phi_exact_d * (1.0 / (2.0 * 3.14159265358979323846)));
+                        const float phi_red = static_cast<float>(phi_exact_d - cycles * (2.0 * 3.14159265358979323846));
+                        float s0, c0;
+                        __sincosf(phi_red, &s0, &c0);
+                        w_r[b][a] = c0 * amp;
+                        w_i[b][a] = s0 * amp;
+                        float sd, cd;
+                        __sincosf(dphi, &sd, &cd);
+                        dw_r[b][a] = cd;
+                        dw_i[b][a] = sd;
                     } else {
-                        w_r[b][a] = w.x;
-                        w_i[b][a] = w.y;
+                        w_r[b][a] = 0.0f;
+                        w_i[b][a] = 0.0f;
+                        dw_r[b][a] = 1.0f;
+                        dw_i[b][a] = 0.0f;
                     }
                 } else {
                     w_r[b][a] = w.x;
                     w_i[b][a] = w.y;
                 }
             } else {
+                w_amp[b][a] = 0.0f;
                 w_r[b][a] = 0.0f;
                 w_i[b][a] = 0.0f;
                 if constexpr (INTERPOLATE) {
@@ -628,7 +661,7 @@ direct_beamformer_blackwell_kernel(
                 const int k_idx = flat_idx / N_ELEM;
                 const int e_idx = flat_idx % N_ELEM;
                 const std::uint32_t raw_b = __ldg(&packed_ptr[k_idx * t_stride + e_idx]);
-                smem_voltages[flat_idx] = unpack_int4_byte(raw_b);
+                smem_voltages[flat_idx] = unpack_int4_byte_fmt<SWAPPED_WITH_OFFSET>(raw_b);
             }
             __syncthreads();
         }
@@ -643,7 +676,7 @@ direct_beamformer_blackwell_kernel(
                         p_vec[a] = smem_voltages[k * N_ELEM + elem_base + a];
                     }
                 } else {
-                    load_and_unpack_contiguous<ELEM_PER_LANE>(packed_ptr + k * t_stride, lane, p_vec);
+                    load_and_unpack_contiguous<ELEM_PER_LANE, SWAPPED_WITH_OFFSET>(packed_ptr + k * t_stride, lane, p_vec);
                 }
 
                 #pragma unroll
@@ -703,6 +736,24 @@ direct_beamformer_blackwell_kernel(
                     }
                 }
             }
+
+            if constexpr (INTERPOLATE) {
+                #pragma unroll
+                for (int b = 0; b < B_TILE; ++b) {
+                    #pragma unroll
+                    for (unsigned int a = 0; a < ELEM_PER_LANE; ++a) {
+                        const float amp = w_amp[b][a];
+                        if (amp > 1.0e-12f) {
+                            const float norm_sq = fmaf(w_r[b][a], w_r[b][a], w_i[b][a] * w_i[b][a]);
+                            if (norm_sq > 0.0f) {
+                                const float renorm = amp * rsqrtf(norm_sq);
+                                w_r[b][a] *= renorm;
+                                w_i[b][a] *= renorm;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         if constexpr (COOPERATIVE_SMEM) {
@@ -719,7 +770,7 @@ direct_beamformer_blackwell_kernel(
             float s_i[B_TILE][N_POL] = {0.0f};
 
             float2 p_vec[ELEM_PER_LANE];
-            load_and_unpack_contiguous<ELEM_PER_LANE>(packed_ptr, lane, p_vec);
+            load_and_unpack_contiguous<ELEM_PER_LANE, SWAPPED_WITH_OFFSET>(packed_ptr, lane, p_vec);
 
             #pragma unroll
             for (unsigned int a = 0; a < ELEM_PER_LANE; ++a) {
@@ -837,7 +888,8 @@ void launch_direct_beamformer(
     std::size_t beam_tile_size,
     cudaStream_t stream,
     std::size_t n_pol,
-    DirectPolLayout pol_layout) {
+    DirectPolLayout pol_layout,
+    DirectInputFormat input_format) {
 
     if (num_active_beams == 0) return;
 
@@ -876,34 +928,43 @@ void launch_direct_beamformer(
     const bool interpolate = (d_step_weights != nullptr);
 
     auto launch_configured = [&](auto elem_tag, auto pol_tag, auto layout_tag,
-                                 auto b_tile_tag, auto interp_tag, auto smem_tag) {
+                                 auto b_tile_tag, auto interp_tag, auto smem_tag, auto fmt_tag) {
         constexpr int N_E = decltype(elem_tag)::value;
         constexpr int N_P = decltype(pol_tag)::value;
         constexpr int L_O = decltype(layout_tag)::value;
         constexpr int B_T = decltype(b_tile_tag)::value;
         constexpr bool I_P = decltype(interp_tag)::value;
         constexpr bool C_S = decltype(smem_tag)::value;
+        constexpr bool F_O = decltype(fmt_tag)::value;
         constexpr int T_U = (B_T == 4) ? 4 : 8;
 
         const int t_unroll_sel = (time_unroll >= 8 && B_T <= 2) ? 8 : 4;
         if (t_unroll_sel == 8 && T_U == 8) {
-            direct_beamformer_blackwell_kernel<N_E, N_P, L_O, B_T, 8, I_P, C_S>
+            direct_beamformer_blackwell_kernel<N_E, N_P, L_O, B_T, 8, I_P, C_S, F_O>
                 <<<grid_dim, block_dim, 0, stream>>>(
                     d_voltages, d_weights, d_step_weights, packed_bytes, n_time, n_freq,
                     time_chunk_size, active_beams, stride_beams, total_work_units);
         } else {
-            direct_beamformer_blackwell_kernel<N_E, N_P, L_O, B_T, 4, I_P, C_S>
+            direct_beamformer_blackwell_kernel<N_E, N_P, L_O, B_T, 4, I_P, C_S, F_O>
                 <<<grid_dim, block_dim, 0, stream>>>(
                     d_voltages, d_weights, d_step_weights, packed_bytes, n_time, n_freq,
                     time_chunk_size, active_beams, stride_beams, total_work_units);
         }
     };
 
+    auto dispatch_fmt = [&](auto elem_tag, auto pol_tag, auto layout_tag, auto b_tile_tag, auto interp_tag, auto smem_tag) {
+        if (input_format == DirectInputFormat::INT4X2_SWAPPED_WITHOFFSET) {
+            launch_configured(elem_tag, pol_tag, layout_tag, b_tile_tag, interp_tag, smem_tag, std::true_type{});
+        } else {
+            launch_configured(elem_tag, pol_tag, layout_tag, b_tile_tag, interp_tag, smem_tag, std::false_type{});
+        }
+    };
+
     auto dispatch_smem = [&](auto elem_tag, auto pol_tag, auto layout_tag, auto b_tile_tag, auto interp_tag) {
         if (use_coop_smem) {
-            launch_configured(elem_tag, pol_tag, layout_tag, b_tile_tag, interp_tag, std::true_type{});
+            dispatch_fmt(elem_tag, pol_tag, layout_tag, b_tile_tag, interp_tag, std::true_type{});
         } else {
-            launch_configured(elem_tag, pol_tag, layout_tag, b_tile_tag, interp_tag, std::false_type{});
+            dispatch_fmt(elem_tag, pol_tag, layout_tag, b_tile_tag, interp_tag, std::false_type{});
         }
     };
 

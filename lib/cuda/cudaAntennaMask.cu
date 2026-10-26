@@ -11,21 +11,34 @@ namespace kotekan {
 // Device Helpers (Fast Branchless Bitfield Extraction)
 // ============================================================================
 
+template <bool SWAPPED_WITH_OFFSET = false>
 __device__ __forceinline__ void decode_int4x2_fast(std::uint32_t byte_val, int& re, int& im) {
+    if constexpr (SWAPPED_WITH_OFFSET) {
 #if defined(__CUDA_ARCH__)
-    asm("bfe.s32 %0, %1, 0, 4;" : "=r"(re) : "r"(byte_val));
-    asm("bfe.s32 %0, %1, 4, 4;" : "=r"(im) : "r"(byte_val));
+        asm("bfe.u32 %0, %1, 4, 4;" : "=r"(re) : "r"(byte_val));
+        asm("bfe.u32 %0, %1, 0, 4;" : "=r"(im) : "r"(byte_val));
+        re -= 8;
+        im -= 8;
 #else
-    re = (static_cast<int>(byte_val) << 28) >> 28;
-    im = (static_cast<int>(byte_val) << 24) >> 28;
+        re = static_cast<int>((byte_val >> 4) & 0x0Fu) - 8;
+        im = static_cast<int>(byte_val & 0x0Fu) - 8;
 #endif
+    } else {
+#if defined(__CUDA_ARCH__)
+        asm("bfe.s32 %0, %1, 0, 4;" : "=r"(re) : "r"(byte_val));
+        asm("bfe.s32 %0, %1, 4, 4;" : "=r"(im) : "r"(byte_val));
+#else
+        re = (static_cast<int>(byte_val) << 28) >> 28;
+        im = (static_cast<int>(byte_val) << 24) >> 28;
+#endif
+    }
 }
 
 // ============================================================================
 // Multi-Moment Coalesced Inspection Kernel
 // ============================================================================
 
-template <int BLOCK_ANT, int BLOCK_SPEC>
+template <int BLOCK_ANT, int BLOCK_SPEC, bool SWAPPED_WITH_OFFSET = false>
 __global__ void __launch_bounds__(512, 2)
 inspect_antenna_moments_kernel(
     const std::uint8_t* __restrict__ raw_bytes,
@@ -57,7 +70,7 @@ inspect_antenna_moments_kernel(
         const std::uint32_t byte_val = __ldg(&raw_bytes[s * n_elem + ant]);
 
         int re, im;
-        decode_int4x2_fast(byte_val, re, im);
+        decode_int4x2_fast<SWAPPED_WITH_OFFSET>(byte_val, re, im);
 
         const int r2 = re * re;
         const int i2 = im * im;
@@ -243,7 +256,8 @@ void launch_inspect_antenna_moments(
     std::size_t n_freq,
     std::size_t n_elem,
     std::size_t sample_stride,
-    cudaStream_t stream)
+    cudaStream_t stream,
+    bool is_swapped_withoffset)
 {
     const std::size_t total_spectra = n_time * n_freq;
     if (total_spectra == 0 || n_elem == 0) return;
@@ -265,31 +279,40 @@ void launch_inspect_antenna_moments(
     // 256 blocks provides full wave saturation across all SMs
     constexpr unsigned int NUM_BLOCKS = 256;
 
-    if (n_elem <= 32) {
-        const dim3 block(32, 8);
-        inspect_antenna_moments_kernel<32, 8><<<NUM_BLOCKS, block, 0, stream>>>(
-            raw_bytes, d_raw_stats, d_antenna_powers, d_antenna_clips,
-            num_inspected_spectra, n_elem, sample_stride);
-    } else if (n_elem <= 64) {
-        const dim3 block(64, 4);
-        inspect_antenna_moments_kernel<64, 4><<<NUM_BLOCKS, block, 0, stream>>>(
-            raw_bytes, d_raw_stats, d_antenna_powers, d_antenna_clips,
-            num_inspected_spectra, n_elem, sample_stride);
-    } else if (n_elem <= 128) {
-        const dim3 block(128, 2);
-        inspect_antenna_moments_kernel<128, 2><<<NUM_BLOCKS, block, 0, stream>>>(
-            raw_bytes, d_raw_stats, d_antenna_powers, d_antenna_clips,
-            num_inspected_spectra, n_elem, sample_stride);
-    } else if (n_elem <= 256) {
-        const dim3 block(256, 1);
-        inspect_antenna_moments_kernel<256, 1><<<NUM_BLOCKS, block, 0, stream>>>(
-            raw_bytes, d_raw_stats, d_antenna_powers, d_antenna_clips,
-            num_inspected_spectra, n_elem, sample_stride);
+    auto dispatch_kernel = [&](auto fmt_tag) {
+        constexpr bool F_O = decltype(fmt_tag)::value;
+        if (n_elem <= 32) {
+            const dim3 block(32, 8);
+            inspect_antenna_moments_kernel<32, 8, F_O><<<NUM_BLOCKS, block, 0, stream>>>(
+                raw_bytes, d_raw_stats, d_antenna_powers, d_antenna_clips,
+                num_inspected_spectra, n_elem, sample_stride);
+        } else if (n_elem <= 64) {
+            const dim3 block(64, 4);
+            inspect_antenna_moments_kernel<64, 4, F_O><<<NUM_BLOCKS, block, 0, stream>>>(
+                raw_bytes, d_raw_stats, d_antenna_powers, d_antenna_clips,
+                num_inspected_spectra, n_elem, sample_stride);
+        } else if (n_elem <= 128) {
+            const dim3 block(128, 2);
+            inspect_antenna_moments_kernel<128, 2, F_O><<<NUM_BLOCKS, block, 0, stream>>>(
+                raw_bytes, d_raw_stats, d_antenna_powers, d_antenna_clips,
+                num_inspected_spectra, n_elem, sample_stride);
+        } else if (n_elem <= 256) {
+            const dim3 block(256, 1);
+            inspect_antenna_moments_kernel<256, 1, F_O><<<NUM_BLOCKS, block, 0, stream>>>(
+                raw_bytes, d_raw_stats, d_antenna_powers, d_antenna_clips,
+                num_inspected_spectra, n_elem, sample_stride);
+        } else {
+            const dim3 block(512, 1);
+            inspect_antenna_moments_kernel<512, 1, F_O><<<NUM_BLOCKS, block, 0, stream>>>(
+                raw_bytes, d_raw_stats, d_antenna_powers, d_antenna_clips,
+                num_inspected_spectra, n_elem, sample_stride);
+        }
+    };
+
+    if (is_swapped_withoffset) {
+        dispatch_kernel(std::true_type{});
     } else {
-        const dim3 block(512, 1);
-        inspect_antenna_moments_kernel<512, 1><<<NUM_BLOCKS, block, 0, stream>>>(
-            raw_bytes, d_raw_stats, d_antenna_powers, d_antenna_clips,
-            num_inspected_spectra, n_elem, sample_stride);
+        dispatch_kernel(std::false_type{});
     }
 }
 
@@ -301,11 +324,12 @@ void launch_inspect_antenna_health(
     std::size_t n_freq,
     std::size_t n_ant,
     std::size_t sample_stride,
-    cudaStream_t stream)
+    cudaStream_t stream,
+    bool is_swapped_withoffset)
 {
     launch_inspect_antenna_moments(
         d_voltages, nullptr, d_antenna_powers, d_antenna_clips,
-        n_time, n_freq, n_ant, sample_stride, stream);
+        n_time, n_freq, n_ant, sample_stride, stream, is_swapped_withoffset);
 }
 
 void launch_zero_bad_antennas(

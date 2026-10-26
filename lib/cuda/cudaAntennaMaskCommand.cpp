@@ -1,5 +1,7 @@
 #include "cudaAntennaMaskCommand.hpp"
 
+#include "chartsMetadata.hpp"
+#include "chordMetadata.hpp"
 #include "cudaDirectBeamTrackerCommand.hpp"
 #include "cudaUtils.hpp"
 #include "gpuCommand.hpp"
@@ -687,6 +689,19 @@ cudaEvent_t cudaAntennaMaskCommand::execute(cudaPipelineState& /*pipestate*/,
 
     AntennaMaskConfig current_cfg = get_config();
 
+    bool is_swapped_withoffset = false;
+    std::shared_ptr<metadataObject> meta =
+        device.get_gpu_memory_array_metadata(_gpu_mem_voltage, gpu_frame_id);
+    if (auto c_meta = std::dynamic_pointer_cast<chartsMetadata>(meta)) {
+        if (c_meta->type == kotekan::int4x2_swapped_withoffset) {
+            is_swapped_withoffset = true;
+        }
+    } else if (auto ch_meta = std::dynamic_pointer_cast<chordMetadata>(meta)) {
+        if (ch_meta->type == kotekan::int4x2_swapped_withoffset) {
+            is_swapped_withoffset = true;
+        }
+    }
+
     const std::size_t total_spectra =
         static_cast<std::size_t>(_samples_per_data_set) * _num_local_freq;
     const std::size_t inspected_spectra =
@@ -696,7 +711,7 @@ cudaEvent_t cudaAntennaMaskCommand::execute(cudaPipelineState& /*pipestate*/,
         // 1. Single-pass exact integer moment accumulation on GPU
         launch_inspect_antenna_moments(d_voltages, _d_raw_stats, nullptr, nullptr,
                                        _samples_per_data_set, _num_local_freq, _num_elements,
-                                       current_cfg.sample_stride, stream);
+                                       current_cfg.sample_stride, stream, is_swapped_withoffset);
 
         // Single consolidated DMA transfer of AntennaRawStats
         CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_h_raw_stats, _d_raw_stats,

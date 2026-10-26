@@ -17,6 +17,8 @@
 #include <string>
 #include <vector>
 
+class StatTracker;
+
 namespace kotekan {
 
 class cudaDirectBeamTrackerCommand;
@@ -77,7 +79,8 @@ private:
     void allocate_device_buffers();
     void free_device_buffers();
     void invalidate_cuda_graphs();
-    void update_weights_if_needed(const DirectBeamTrackerConfig& cfg, cudaStream_t stream);
+    void update_weights_if_needed(const DirectBeamTrackerConfig& cfg, cudaStream_t stream,
+                                   double frame_timestamp_utc = -1.0);
     void upload_calibration_gains(const DirectBeamTrackerConfig& cfg);
 
     std::string _rest_prefix = "/direct_tracker";
@@ -106,6 +109,12 @@ private:
     double _initial_utc_start_time = -1.0;
     double _sample_period_s = charts::constants::fpga_time_resolution_s;
     std::uint64_t _frame_counter = 0;
+
+    // Kotekan StatTrackers for live REST telemetry (/trackers)
+    std::shared_ptr<StatTracker> _tracker_kernel_time;
+    std::shared_ptr<StatTracker> _tracker_realtime_budget;
+    std::shared_ptr<StatTracker> _tracker_active_beams;
+    std::shared_ptr<StatTracker> _tracker_vram_mb;
 
     // Per-instance generation trackers for multi-stream synchronization
     std::uint64_t _applied_config_generation = 0;

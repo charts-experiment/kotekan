@@ -3,12 +3,15 @@
 #include "chartsConstants.hpp"
 #include "chartsMetadata.hpp"
 #include "chartsMvdr.hpp"
+#include "chordMetadata.hpp"
 #include "cudaDirectBeamTracker.cuh"
 #include "cudaDirectBeamTracker.hpp"
 #include "cudaUtils.hpp"
 #include "gpuCommand.hpp"
 #include "kotekanLogging.hpp"
+#include "kotekanTrackers.hpp"
 #include "restServer.hpp"
+#include "visUtil.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -198,6 +201,16 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
             group = it->second;
         }
         group->instances.push_back(this);
+    }
+
+    try {
+        auto& trackers = KotekanTrackers::instance();
+        _tracker_kernel_time = trackers.add_tracker(unique_name, "direct_tracker_exec_time", "ms");
+        _tracker_realtime_budget = trackers.add_tracker(unique_name, "direct_tracker_rtf_pct", "%");
+        _tracker_active_beams = trackers.add_tracker(unique_name, "direct_tracker_active_beams", "count");
+        _tracker_vram_mb = trackers.add_tracker(unique_name, "direct_tracker_vram_mb", "MB");
+    } catch (...) {
+        // Safe fallback if trackers not yet initialized
     }
 
     {
@@ -780,6 +793,83 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                 rest.register_get_callback("/beam_tracker/beam_power", beam_power_cb);
             }
 
+            // 9. Structured Live Telemetry for Viewer Integration
+            auto telemetry_cb = [group](connectionInstance& conn) {
+                nlohmann::json reply;
+                std::lock_guard<std::mutex> lk(group->group_mutex);
+
+                reply["rest_prefix"] = group->rest_prefix;
+                reply["active_beams"] = group->config.num_active_beams;
+                reply["max_beams"] = group->config.max_beams;
+                reply["num_antennas"] = group->config.num_antennas;
+                reply["total_elements"] = group->config.total_elements();
+                reply["active_elements"] = group->config.num_active_antennas;
+                reply["masked_elements"] = group->config.total_elements() - group->config.num_active_antennas;
+                reply["subframe_interpolation"] = group->config.enable_subframe_interpolation;
+                reply["taper_type"] = taper_type_to_string(group->config.taper_type);
+                reply["weight_bislc"] = group->config.enable_weight_bislc;
+
+                std::uint64_t latest_frame = 0;
+                double latest_timestamp = 0.0;
+                for (auto* inst : group->instances) {
+                    latest_frame = std::max(latest_frame, inst->get_last_frame_id());
+                    latest_timestamp = std::max(latest_timestamp, inst->get_last_timestamp_utc());
+                }
+                reply["frame_id"] = latest_frame;
+                reply["timestamp_utc"] = latest_timestamp;
+
+                nlohmann::json targets = nlohmann::json::array();
+                for (std::size_t b = 0; b < group->config.num_active_beams; ++b) {
+                    nlohmann::json t;
+                    t["beam_id"] = b;
+                    t["l0"] = group->config.targets[b].direction.x;
+                    t["m0"] = group->config.targets[b].direction.y;
+                    t["n0"] = group->config.targets[b].direction.z;
+                    t["l1"] = group->config.targets[b].direction_end.x;
+                    t["m1"] = group->config.targets[b].direction_end.y;
+                    t["n1"] = group->config.targets[b].direction_end.z;
+                    t["is_celestial"] = group->config.targets[b].celestial.is_set;
+                    if (group->config.targets[b].celestial.is_set) {
+                        t["ra_deg"] = group->config.targets[b].celestial.ra_deg;
+                        t["dec_deg"] = group->config.targets[b].celestial.dec_deg;
+                    }
+                    targets.push_back(t);
+                }
+                reply["targets"] = targets;
+                conn.send_json_reply(reply);
+            };
+            rest.register_get_callback(group->rest_prefix + "/telemetry", telemetry_cb);
+            rest.register_get_callback("/direct_beam_tracker/telemetry", telemetry_cb);
+
+            // 10. Dedicated Beam Targets Endpoint
+            auto targets_cb = [group](connectionInstance& conn) {
+                nlohmann::json reply;
+                std::lock_guard<std::mutex> lk(group->group_mutex);
+                reply["max_beams"] = group->config.max_beams;
+                reply["active_beams"] = group->config.num_active_beams;
+                nlohmann::json targets = nlohmann::json::array();
+                for (std::size_t b = 0; b < group->config.num_active_beams; ++b) {
+                    nlohmann::json t;
+                    t["beam_id"] = b;
+                    t["l0"] = group->config.targets[b].direction.x;
+                    t["m0"] = group->config.targets[b].direction.y;
+                    t["n0"] = group->config.targets[b].direction.z;
+                    t["l1"] = group->config.targets[b].direction_end.x;
+                    t["m1"] = group->config.targets[b].direction_end.y;
+                    t["n1"] = group->config.targets[b].direction_end.z;
+                    t["is_celestial"] = group->config.targets[b].celestial.is_set;
+                    if (group->config.targets[b].celestial.is_set) {
+                        t["ra_deg"] = group->config.targets[b].celestial.ra_deg;
+                        t["dec_deg"] = group->config.targets[b].celestial.dec_deg;
+                    }
+                    targets.push_back(t);
+                }
+                reply["targets"] = targets;
+                conn.send_json_reply(reply);
+            };
+            rest.register_get_callback(group->rest_prefix + "/targets", targets_cb);
+            rest.register_get_callback("/beam_tracker/targets", targets_cb);
+
             group->endpoints_registered = true;
         }
     }
@@ -857,6 +947,37 @@ void cudaDirectBeamTrackerCommand::allocate_device_buffers() {
                                       * static_cast<std::size_t>(_num_local_freq)
                                       * static_cast<std::size_t>(_num_elements);
     const std::size_t weights_bytes = weights_elems * sizeof(float2);
+
+    std::size_t free_bytes = 0, total_bytes = 0;
+    if (cudaMemGetInfo(&free_bytes, &total_bytes) == cudaSuccess) {
+        const std::size_t input_frame_bytes =
+            static_cast<std::size_t>(_num_elements) * static_cast<std::size_t>(_num_local_freq)
+            * static_cast<std::size_t>(_samples_per_data_set) * sizeof(int4x2_t);
+        const std::size_t output_frame_bytes =
+            static_cast<std::size_t>(_num_local_freq) * static_cast<std::size_t>(_samples_per_data_set)
+            * static_cast<std::size_t>(_max_beams) * static_cast<std::size_t>(_num_pols) * sizeof(float2);
+
+        const std::size_t needed_bytes =
+            static_cast<std::size_t>(_gpu_buffer_depth) * (input_frame_bytes + output_frame_bytes)
+            + 2 * weights_bytes;
+
+        if (needed_bytes > free_bytes) {
+            std::size_t safe_depth = free_bytes / (input_frame_bytes + output_frame_bytes + 1);
+            if (safe_depth >= 2 && safe_depth < static_cast<std::size_t>(_gpu_buffer_depth)) {
+                WARN_NON_OO(
+                    "Direct Beam Tracker: VRAM constrained (requires {:.1f} MB with depth {:d}, but only {:.1f} MB free). Down-scaling buffer_depth to {:d}.",
+                    static_cast<double>(needed_bytes) / (1024.0 * 1024.0), _gpu_buffer_depth,
+                    static_cast<double>(free_bytes) / (1024.0 * 1024.0), safe_depth);
+                _gpu_buffer_depth = static_cast<int32_t>(safe_depth);
+            } else {
+                FATAL_ERROR(
+                    "OUT_OF_VRAM: Direct Beam Tracker requires {:.1f} MB VRAM (antennas={:d}, beams={:d}, depth={:d}) but device only has {:.1f} MB free out of {:.1f} MB total.",
+                    static_cast<double>(needed_bytes) / (1024.0 * 1024.0), _num_antennas, _max_beams,
+                    _gpu_buffer_depth, static_cast<double>(free_bytes) / (1024.0 * 1024.0),
+                    static_cast<double>(total_bytes) / (1024.0 * 1024.0));
+            }
+        }
+    }
 
     // Single contiguous allocation for _d_weights + _d_step_weights in Blackwell L2 cache
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_weights, 2 * weights_bytes));
@@ -989,7 +1110,8 @@ void cudaDirectBeamTrackerCommand::free_device_buffers() {
 }
 
 void cudaDirectBeamTrackerCommand::update_weights_if_needed(const DirectBeamTrackerConfig& in_cfg,
-                                                            cudaStream_t stream) {
+                                                            cudaStream_t stream,
+                                                            double frame_timestamp_utc) {
     std::shared_ptr<TrackerGroup> group;
     {
         std::lock_guard<std::mutex> reg_lock(_registry_mutex);
@@ -1004,9 +1126,11 @@ void cudaDirectBeamTrackerCommand::update_weights_if_needed(const DirectBeamTrac
     bool mask_changed = false;
 
     {
-        using namespace std::chrono;
-        double unix_s =
-            duration_cast<duration<double>>(system_clock::now().time_since_epoch()).count();
+        double unix_s = (frame_timestamp_utc > 0.0)
+                            ? frame_timestamp_utc
+                            : std::chrono::duration_cast<std::chrono::duration<double>>(
+                                  std::chrono::system_clock::now().time_since_epoch())
+                                  .count();
         const double frame_duration_s =
             static_cast<double>(_samples_per_data_set) * charts::constants::fpga_time_resolution_s;
         const double unix_s_end = unix_s + frame_duration_s;
@@ -1167,21 +1291,23 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
 
     std::shared_ptr<metadataObject> meta =
         device.get_gpu_memory_array_metadata(_gpu_mem_voltage, gpu_frame_id);
-    if (meta) {
-        auto charts_meta = std::dynamic_pointer_cast<chartsMetadata>(meta);
-        if (charts_meta) {
-            if (charts_meta->has_frame_counter()) {
+    auto charts_meta = meta ? std::dynamic_pointer_cast<chartsMetadata>(meta) : nullptr;
+    if (charts_meta) {
+        if (charts_meta->has_frame_counter()) {
                 current_frame = charts_meta->get_frame_counter();
             } else if (charts_meta->has_fpga_seq_num()) {
                 current_frame = charts_meta->get_fpga_seq_num() / _samples_per_data_set;
             }
-            if (_initial_utc_start_time <= 0.0 && charts_meta->has_first_packet_recv_time()) {
+            if (charts_meta->has_time0_fpga() && charts_meta->has_fpga_seq_num()) {
+                frame_timestamp_utc = charts_meta->get_time0_fpga()
+                                      + static_cast<double>(charts_meta->get_fpga_seq_num()) * _sample_period_s;
+            } else if (charts_meta->has_first_packet_recv_time()) {
                 timeval tv = charts_meta->get_first_packet_recv_time();
-                _initial_utc_start_time =
-                    static_cast<double>(tv.tv_sec) + static_cast<double>(tv.tv_usec) * 1e-6;
+                double t_pkt = static_cast<double>(tv.tv_sec) + static_cast<double>(tv.tv_usec) * 1e-6;
+                if (_initial_utc_start_time <= 0.0) _initial_utc_start_time = t_pkt;
+                frame_timestamp_utc = t_pkt;
             }
         }
-    }
 
     if (_initial_utc_start_time <= 0.0) {
         using namespace std::chrono;
@@ -1189,9 +1315,11 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
             duration_cast<duration<double>>(system_clock::now().time_since_epoch()).count();
     }
 
-    frame_timestamp_utc = _initial_utc_start_time
-                          + static_cast<double>(current_frame)
-                                * static_cast<double>(_samples_per_data_set) * _sample_period_s;
+    if (frame_timestamp_utc <= 0.0) {
+        frame_timestamp_utc = _initial_utc_start_time
+                              + static_cast<double>(current_frame)
+                                    * static_cast<double>(_samples_per_data_set) * _sample_period_s;
+    }
 
     _last_frame_id.store(static_cast<std::uint64_t>(current_frame), std::memory_order_relaxed);
     _last_timestamp_utc.store(frame_timestamp_utc, std::memory_order_relaxed);
@@ -1199,7 +1327,16 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
     record_start_event();
 
     cudaStream_t stream = device.getStream(cuda_stream_id);
-    update_weights_if_needed(current_config, stream);
+    update_weights_if_needed(current_config, stream, frame_timestamp_utc);
+
+    DirectInputFormat input_format = DirectInputFormat::INT4X2;
+    if (charts_meta && charts_meta->type == kotekan::int4x2_swapped_withoffset) {
+        input_format = DirectInputFormat::INT4X2_SWAPPED_WITHOFFSET;
+    } else if (auto ch_meta = std::dynamic_pointer_cast<chordMetadata>(meta)) {
+        if (ch_meta->type == kotekan::int4x2_swapped_withoffset) {
+            input_format = DirectInputFormat::INT4X2_SWAPPED_WITHOFFSET;
+        }
+    }
 
     const bool use_interp = current_config.enable_subframe_interpolation && !_grid_mode_enabled;
     const float2* step_weights_ptr = use_interp ? _d_step_weights : nullptr;
@@ -1226,7 +1363,8 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
                 static_cast<std::size_t>(_samples_per_data_set),
                 static_cast<std::size_t>(_num_local_freq), static_cast<std::size_t>(_num_antennas),
                 active_beams, static_cast<std::size_t>(_max_beams), _time_chunk_size, _time_unroll,
-                _beam_tile_size, stream, static_cast<std::size_t>(_num_pols), _pol_layout);
+                _beam_tile_size, stream, static_cast<std::size_t>(_num_pols), _pol_layout,
+                input_format);
             CHECK_CUDA_ERROR_NON_OO(cudaStreamEndCapture(stream, &_cuda_graphs[slot]));
             CHECK_CUDA_ERROR_NON_OO(cudaGraphInstantiate(&_cuda_graph_execs[slot],
                                                          _cuda_graphs[slot], nullptr, nullptr, 0));
@@ -1239,7 +1377,16 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
             static_cast<std::size_t>(_samples_per_data_set),
             static_cast<std::size_t>(_num_local_freq), static_cast<std::size_t>(_num_antennas),
             active_beams, static_cast<std::size_t>(_max_beams), _time_chunk_size, _time_unroll,
-            _beam_tile_size, stream, static_cast<std::size_t>(_num_pols), _pol_layout);
+            _beam_tile_size, stream, static_cast<std::size_t>(_num_pols), _pol_layout,
+            input_format);
+    }
+
+    if (_tracker_active_beams) {
+        _tracker_active_beams->add_sample(static_cast<double>(active_beams));
+    }
+    if (_tracker_vram_mb) {
+        const double vram_mb = static_cast<double>(input_bytes + output_bytes) / (1024.0 * 1024.0);
+        _tracker_vram_mb->add_sample(vram_mb);
     }
 
     // Launch reduction kernel & copy to pinned host buffer

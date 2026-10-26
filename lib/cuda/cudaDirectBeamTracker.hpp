@@ -24,6 +24,11 @@ enum class DirectPolLayout : int {
     PLANAR = 1       // [time][freq][pol][ant] -> elem = pol * n_ant + ant
 };
 
+enum class DirectInputFormat : uint8_t {
+    INT4X2 = 0,                    // Two's complement: low nibble = real, high nibble = imag
+    INT4X2_SWAPPED_WITHOFFSET = 1  // Swapped with offset (+8): high nibble = real + 8, low nibble = imag + 8
+};
+
 enum class DirectTaperType : int {
     NONE = 0, // Uniform weights (first sidelobe ~ -13.2 dB)
     COSINE_PEDESTAL =
@@ -316,7 +321,8 @@ void launch_direct_beamformer(const int4x2_t* d_packed, const float2* d_weights,
                               std::size_t max_beams_stride, std::size_t time_chunk_size = 256,
                               std::size_t time_unroll = 4, std::size_t beam_tile_size = 4,
                               cudaStream_t stream = nullptr, std::size_t n_pol = 1,
-                              DirectPolLayout pol_layout = DirectPolLayout::INTERLEAVED);
+                              DirectPolLayout pol_layout = DirectPolLayout::INTERLEAVED,
+                              DirectInputFormat input_format = DirectInputFormat::INT4X2);
 
 inline void launch_direct_beamformer(const int4x2_t* d_packed, const float2* d_weights,
                                      float2* d_voltages, std::size_t n_time, std::size_t n_freq,
@@ -325,10 +331,11 @@ inline void launch_direct_beamformer(const int4x2_t* d_packed, const float2* d_w
                                      std::size_t time_chunk_size = 256, std::size_t time_unroll = 4,
                                      std::size_t beam_tile_size = 4, cudaStream_t stream = nullptr,
                                      std::size_t n_pol = 1,
-                                     DirectPolLayout pol_layout = DirectPolLayout::INTERLEAVED) {
+                                     DirectPolLayout pol_layout = DirectPolLayout::INTERLEAVED,
+                                     DirectInputFormat input_format = DirectInputFormat::INT4X2) {
     launch_direct_beamformer(d_packed, d_weights, nullptr, d_voltages, n_time, n_freq, n_ant,
                              num_active_beams, max_beams_stride, time_chunk_size, time_unroll,
-                             beam_tile_size, stream, n_pol, pol_layout);
+                             beam_tile_size, stream, n_pol, pol_layout, input_format);
 }
 
 void set_l2_persisting_weights_policy(cudaStream_t stream, const void* ptr, std::size_t bytes);

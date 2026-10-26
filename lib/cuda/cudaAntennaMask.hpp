@@ -170,7 +170,8 @@ void launch_inspect_antenna_moments(const int4x2_t* __restrict__ d_voltages,
                                     float* __restrict__ d_antenna_powers,
                                     std::uint32_t* __restrict__ d_antenna_clips, std::size_t n_time,
                                     std::size_t n_freq, std::size_t n_elem,
-                                    std::size_t sample_stride, cudaStream_t stream);
+                                    std::size_t sample_stride, cudaStream_t stream,
+                                    bool is_swapped_withoffset = false);
 
 /**
  * @brief Legacy-compatible wrapper for launch_inspect_antenna_health.
@@ -179,7 +180,7 @@ void launch_inspect_antenna_health(const int4x2_t* __restrict__ d_voltages,
                                    float* __restrict__ d_antenna_powers,
                                    std::uint32_t* __restrict__ d_antenna_clips, std::size_t n_time,
                                    std::size_t n_freq, std::size_t n_ant, std::size_t sample_stride,
-                                   cudaStream_t stream);
+                                   cudaStream_t stream, bool is_swapped_withoffset = false);
 
 /**
  * @brief Coalesced in-place voltage blanking for bad antenna elements.

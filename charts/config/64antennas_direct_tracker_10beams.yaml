@@ -95,7 +95,7 @@ mask_buffer_zeros_1:
 host_formed_beams_buffer_0:
     kotekan_buffer: standard
     num_frames: buffer_depth
-    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float # ~82.58 MB
+    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float # ~412.88 MB per frame (at 10 beams)
     numa_node: 0
     metadata_pool: main_pool
     zero_new_frames: true
@@ -105,7 +105,7 @@ host_formed_beams_buffer_0:
 host_formed_beams_buffer_1:
     kotekan_buffer: standard
     num_frames: buffer_depth
-    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float # ~82.58 MB
+    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float # ~412.88 MB per frame (at 10 beams)
     numa_node: 0
     metadata_pool: main_pool
     zero_new_frames: true

@@ -775,29 +775,68 @@ TestResult test_multisource_independence(std::size_t n_ant, std::size_t n_time =
                                               max_beams, freqs, config);
     cudaMemcpy(gpu_out.data(), d_voltages, total_out * sizeof(float2), cudaMemcpyDeviceToHost);
 
-    double b0_sum = 0.0, b1_sum = 0.0;
+    std::vector<float2> cpu_ref(total_out);
+    cpu_reference_multibeam(host_packed, cpu_ref.data(), n_time, n_freq, n_ant, max_beams, freqs,
+                            config);
+
+    // Compute exact FP64 Reference metrics
+    double l2_diff_sq = 0.0;
+    double l2_ref_sq = 0.0;
+    double max_phase_err_deg = 0.0;
+    double b0_gpu = 0.0, b1_gpu = 0.0;
+    double b0_cpu = 0.0, b1_cpu = 0.0;
     const std::size_t n_spectra = n_time * n_freq;
+
     for (std::size_t i = 0; i < n_spectra; ++i) {
-        const float2 v0 = gpu_out[i * max_beams + 0];
-        const float2 v1 = gpu_out[i * max_beams + 1];
-        b0_sum += static_cast<double>(v0.x * v0.x + v0.y * v0.y);
-        b1_sum += static_cast<double>(v1.x * v1.x + v1.y * v1.y);
+        for (std::size_t b = 0; b < 2; ++b) {
+            const float2 vg = gpu_out[i * max_beams + b];
+            const float2 vc = cpu_ref[i * max_beams + b];
+
+            const double dr = static_cast<double>(vg.x) - static_cast<double>(vc.x);
+            const double di = static_cast<double>(vg.y) - static_cast<double>(vc.y);
+            l2_diff_sq += dr * dr + di * di;
+            l2_ref_sq += static_cast<double>(vc.x) * vc.x + static_cast<double>(vc.y) * vc.y;
+
+            const double ref_pwr =
+                static_cast<double>(vc.x) * vc.x + static_cast<double>(vc.y) * vc.y;
+            if (ref_pwr > 1.0) {
+                const double phase_g =
+                    std::atan2(static_cast<double>(vg.y), static_cast<double>(vg.x));
+                const double phase_c =
+                    std::atan2(static_cast<double>(vc.y), static_cast<double>(vc.x));
+                double dphase = std::abs(phase_g - phase_c);
+                if (dphase > M_PI)
+                    dphase = 2.0 * M_PI - dphase;
+                const double dphase_deg = dphase * (180.0 / M_PI);
+                if (dphase_deg > max_phase_err_deg)
+                    max_phase_err_deg = dphase_deg;
+            }
+
+            if (b == 0) {
+                b0_gpu += static_cast<double>(vg.x) * vg.x + static_cast<double>(vg.y) * vg.y;
+                b0_cpu += static_cast<double>(vc.x) * vc.x + static_cast<double>(vc.y) * vc.y;
+            } else {
+                b1_gpu += static_cast<double>(vg.x) * vg.x + static_cast<double>(vg.y) * vg.y;
+                b1_cpu += static_cast<double>(vc.x) * vc.x + static_cast<double>(vc.y) * vc.y;
+            }
+        }
     }
-    b0_sum /= n_spectra;
-    b1_sum /= n_spectra;
 
-    const float quant_power_factor = 9.3756f;
-    const float exp_p1 = static_cast<float>(n_ant * n_ant) * quant_power_factor;
-    const float exp_p2 = static_cast<float>(n_ant * n_ant) * quant_power_factor;
-
-    const double r1 = b0_sum / exp_p1;
-    const double r2 = b1_sum / exp_p2;
+    const double rel_l2_err = std::sqrt(l2_diff_sq / std::max(1e-12, l2_ref_sq));
+    const double p0_ratio_err = std::abs((b0_gpu / std::max(1e-12, b0_cpu)) - 1.0);
+    const double p1_ratio_err = std::abs((b1_gpu / std::max(1e-12, b1_cpu)) - 1.0);
 
     std::ostringstream ss;
-    ss << "Beam 0 (Src 1): Meas=" << b0_sum << ", Exp=" << exp_p1 << " (Ratio=" << r1 << "); "
-       << "Beam 1 (Src 2): Meas=" << b1_sum << ", Exp=" << exp_p2 << " (Ratio=" << r2 << ")";
+    ss << "Rel L2 Err=" << std::scientific << std::setprecision(2) << rel_l2_err
+       << ", MaxPhaseErr=" << std::fixed << std::setprecision(4) << max_phase_err_deg << " deg"
+       << ", PwrRatioErr=[B0:" << std::scientific << std::setprecision(2) << p0_ratio_err
+       << ", B1:" << p1_ratio_err << "]";
 
-    res.passed = (std::abs(r1 - 1.0) < 0.04) && (std::abs(r2 - 1.0) < 0.04);
+    const bool l2_ok = (rel_l2_err < 1.0e-4);
+    const bool phase_ok = (max_phase_err_deg < 0.01);
+    const bool pwr_ok = (p0_ratio_err < 1.0e-4) && (p1_ratio_err < 1.0e-4);
+
+    res.passed = l2_ok && phase_ok && pwr_ok;
     res.details = ss.str();
 
     cudaFree(d_packed);

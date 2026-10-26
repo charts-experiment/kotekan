@@ -39,9 +39,24 @@ import signal
 import socket
 import struct
 import sys
+import urllib.request
 
 import numpy as np
-from autobahn.twisted.websocket import WebSocketServerFactory, WebSocketServerProtocol
+try:
+    from autobahn.twisted.websocket import WebSocketServerFactory, WebSocketServerProtocol
+except ImportError:
+    from twisted.internet.protocol import ServerFactory, Protocol
+    class WebSocketServerProtocol(Protocol):
+        pass
+    class WebSocketServerFactory(ServerFactory):
+        def __init__(self, *args, **kwargs):
+            self.clients = []
+            self.kotekan = None
+            self.viewer_config = {}
+        def setProtocolOptions(self, *args, **kwargs):
+            pass
+        def close_all(self):
+            pass
 from twisted.internet import reactor
 from twisted.internet.interfaces import IPushProducer
 from twisted.python import log
@@ -152,20 +167,55 @@ class KotekanPowerStream:
         # Browser-facing integration window; integrations drained inside one
         # window are averaged into a single emitted frame.
         self.emit_interval_s = emit_interval_s
-        # Populated by start() once kotekan's handshake is parsed.
         self.frame_nvis = 0
         self.frame_nfreq = 0
+        self.integrate_n = 1
+        self.kotekan_period_s = 0.05
+        self.frame_freqs = np.zeros((1, 2), dtype=np.float32)
+        self.frame_elems = np.zeros(1, dtype=np.int8)
+        self.databuf = np.zeros((1, 1), dtype=np.float32)
+        self.outbuf = np.zeros((1, 1), dtype=np.float32)
+        self._emit_idx = 0
+        self.frame_utc0 = 0.0
+        self.frame_raw_cad = 0.0
+        self.frame_int_len = 0
+        self.frame_idx0 = 0
+        self._acc = np.zeros((1, 1), dtype=np.float64)
+        self._acc_n = 0
+        self._block_ready = False
+        self._listen_sock = None
+        self.connection = None
 
-    def start(self):
-        """Bind, ``accept`` (blocking), parse the handshake, and prime the loop."""
+    def start(self, blocking=False):
+        """Bind, listen, and accept kotekan connection (blocking or via reactor)."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((self.host, self.port))
         sock.listen(1)
-        log_.info("Waiting for kotekan on %s:%d", self.host, self.port)
+        log_.info("Listening for kotekan on %s:%d", self.host, self.port)
         self._listen_sock = sock
-        self.connection, peer = sock.accept()
+        if blocking:
+            self.connection, peer = sock.accept()
+            self._handle_accepted(self.connection, peer)
+        else:
+            sock.setblocking(False)
+            reactor.callLater(0.01, self._check_accept)
+
+    def _check_accept(self):
+        if self._listen_sock is None or self.connected:
+            return
+        try:
+            conn, peer = self._listen_sock.accept()
+            self._handle_accepted(conn, peer)
+        except (BlockingIOError, socket.error):
+            # Not ready yet, check again in 100 ms
+            reactor.callLater(0.1, self._check_accept)
+
+    def _handle_accepted(self, conn, peer):
         log_.info("Connected to kotekan: %s", peer)
+        self.connection = conn
+        self.connection.setblocking(True)
+        self.connection.settimeout(5.0)
 
         self.packed_header = self._recv_exact(self.HEADER_LEN, self.connection)
         (
@@ -195,20 +245,6 @@ class KotekanPowerStream:
         self.samples_summed = 0
         self.connected = True
 
-        # Fixed-N integration accumulator. We average exactly ``integrate_n``
-        # kotekan integrations into one emitted frame -- a data-domain decimation,
-        # *not* a wall-clock window -- so the emitted-frame spacing is
-        # exactly ``N x kotekan_period`` in the instrument's own clock. The
-        # instrument clock (frame_idx / raw_cad / int_len / utc0) is the
-        # single source of truth; the host wall clock is never consulted.
-        #
-        # ``_emit_idx`` is the kotekan frame index of the newest integration
-        # in the most recently finalized block; sample_time() reconstructs
-        # the timestamp from it. Caught up, consecutive emits' indices
-        # differ by exactly N -> spacing == reported frame_period_s. Behind,
-        # the drain loop finalizes several blocks per tick but only keeps
-        # the last -> the index jumps by k*N and the client's gap detector
-        # correctly paints the (k-1) dropped blocks grey.
         self.kotekan_period_s = float(self.frame_raw_cad) * float(self.frame_int_len)
         self.integrate_n = max(1, round(self.emit_interval_s / self.kotekan_period_s))
         self._acc = np.zeros((self.frame_nvis, self.frame_nfreq), dtype=np.float64)
@@ -670,8 +706,37 @@ class ModeResource(resource.Resource):
         self.kotekan = kotekan
 
     def render_GET(self, request):
-        request.responseHeaders.setRawHeaders("Content-Type", [b"application/json"])
-        return json.dumps({"mode": self.kotekan.mode}).encode("utf-8")
+        request.responseHeaders.setRawHeaders(b"Content-Type", [b"application/json"])
+        mode = getattr(self.kotekan, "mode", "unknown")
+        return json.dumps({"mode": mode}).encode("utf-8")
+
+
+class RestProxyResource(resource.Resource):
+    """Proxies GET requests to Kotekan REST API on port 12048."""
+
+    isLeaf = True
+
+    def __init__(self, rest_port: int, endpoint: str):
+        resource.Resource.__init__(self)
+        self.rest_port = rest_port
+        self.endpoint = endpoint
+
+    def render_GET(self, request):
+        request.responseHeaders.setRawHeaders(b"Content-Type", [b"application/json"])
+        request.responseHeaders.setRawHeaders(b"Access-Control-Allow-Origin", [b"*"])
+        url = f"http://127.0.0.1:{self.rest_port}{self.endpoint}"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "livebeam_server"})
+            with urllib.request.urlopen(req, timeout=1.5) as resp:
+                data = resp.read()
+                return data
+        except Exception as e:
+            err = {
+                "error": f"Failed to connect to Kotekan REST on port {self.rest_port}",
+                "detail": str(e),
+                "endpoint": self.endpoint,
+            }
+            return json.dumps(err).encode("utf-8")
 
 
 def main():
@@ -774,7 +839,7 @@ def main():
         port=args.kotekan_port,
         emit_interval_s=args.viewer_integration_ms / 1000.0,
     )
-    kotekan.start()  # blocks on accept until kotekan connects
+    kotekan.start(blocking=False)
 
     if kotekan.mode == "unknown":
         log_.warning(
@@ -793,6 +858,16 @@ def main():
     # "I edited the JS but the browser ignored me" trouble during development.
     root = NoCacheFile(static_dir)
     root.putChild(b"mode", ModeResource(kotekan))
+    root.putChild(
+        b"telemetry",
+        RestProxyResource(args.kotekan_rest_port, "/direct_beam_tracker/telemetry"),
+    )
+    root.putChild(
+        b"targets", RestProxyResource(args.kotekan_rest_port, "/beam_tracker/targets")
+    )
+    root.putChild(
+        b"trackers", RestProxyResource(args.kotekan_rest_port, "/trackers")
+    )
     reactor.listenTCP(args.http_port, server.Site(root))
 
     def _on_shutdown():
