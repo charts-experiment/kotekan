@@ -71,6 +71,7 @@ add_library(
     HFBRawReader.cpp
     restInspectFrame.cpp
     frbNetworkProcess.cpp
+    frbNetworkSend.cpp
     pulsarNetworkProcess.cpp
     bufferMerge.cpp
     bufferCopy.cpp
@@ -125,6 +126,7 @@ add_library(
     dropAllFrames.cpp
     N2FrameToVisFrame.cpp
     RfiMaskSum.cpp
+    DtvRfiMask.cpp
     RfiFrameMask.cpp
     RfiSKMetrics.cpp
     CountLostPLSamplesScalar.cpp
