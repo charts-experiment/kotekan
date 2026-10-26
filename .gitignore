@@ -37,6 +37,8 @@ Manifest*.toml
 
 *.conda
 *.venv
+*.ipynb
+*.pdf
 
 # Generated figures and plots (preserve official Sphinx documentation)
 *.png
@@ -54,12 +56,16 @@ direct_vs_v5_*.out
 direct_vs_v5_*.err
 tracker_benchmark_comparison.json
 *.json
+!test_charts/benchmarks/**
 /*_report.md
 test_charts/*_report.json
 test_charts/*_report.md
 !test_charts/tri_engine_frb_benchmark_report.md
 test_charts/tracker_benchmark_report.md
 charts_10tb_campaign_results/
+test_charts/data/campaign_10tb_output/
+dumps/
+**/dumps/
 *.tar.gz
 test_charts/plots_pres/
 
@@ -70,6 +76,8 @@ conversation_log.txt
 data_stream_test.txt
 deployment memory.txt
 local_build_test_output.txt
+.agents/
+!.agents/skills/**
 
 
 # Compiled benchmark and test binaries
