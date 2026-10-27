@@ -113,7 +113,7 @@ bool test_matrix_inversion() {
         std::cout << "  B=" << std::setw(2) << B << "x" << std::setw(2) << B
                   << " Inversion Residual Error: " << std::scientific << std::setprecision(3)
                   << max_err;
-        if (max_err < 1.0e-4f) {
+        if (max_err <= 1.0e-6f) {
             std::cout << " [PASS]\n";
         } else {
             std::cout << " [FAIL]\n";
@@ -305,9 +305,9 @@ bool test_sidelobe_cancellation() {
     std::cout << "  Sidelobe Interference Suppression: " << std::fixed << std::setprecision(1)
               << suppression_ratio_db << " dB\n";
 
-    bool passed = (suppression_ratio_db >= 30.0);
+    bool passed = (suppression_ratio_db >= 75.0);
     std::cout << "  Result: " << (passed ? "[PASS]" : "[FAIL]")
-              << " (Requirement: >= 30 dB suppression)\n";
+              << " (Requirement: >= 75 dB suppression)\n";
     return passed;
 }
 
@@ -406,7 +406,7 @@ bool test_gpu_kernel_benchmark() {
     }
     std::cout << "  GPU vs CPU Parity Max Discrepancy: " << std::scientific << std::setprecision(3)
               << max_diff;
-    bool parity_pass = (max_diff < 1.0e-4f);
+    bool parity_pass = (max_diff <= 1.0e-6f);
     std::cout << " " << (parity_pass ? "[PASS]" : "[FAIL]") << "\n";
 
     // Benchmark timing
@@ -565,12 +565,12 @@ bool test_gpu_matrix_inversion_parity() {
 
     std::cout << "  Coupling Matrix A(f) Max CPU vs GPU Discrepancy: " << std::scientific
               << std::setprecision(3) << max_diff_A;
-    bool pass_A = (max_diff_A < 1.0e-4f);
+    bool pass_A = (max_diff_A <= 1.0e-6f);
     std::cout << " " << (pass_A ? "[PASS]" : "[FAIL]") << "\n";
 
     std::cout << "  Inverted Matrix M(f) Max CPU vs GPU Discrepancy: " << std::scientific
               << std::setprecision(3) << max_diff_M;
-    bool pass_M = (max_diff_M < 1.0e-3f);
+    bool pass_M = (max_diff_M <= 5.0e-4f);
     std::cout << " " << (pass_M ? "[PASS]" : "[FAIL]") << "\n";
 
     cudaFree(d_M);

@@ -187,7 +187,8 @@ void launch_inspect_antenna_health(const int4x2_t* __restrict__ d_voltages,
  */
 void launch_zero_bad_antennas(int4x2_t* __restrict__ d_voltages,
                               const int* __restrict__ d_bad_antennas, int num_bad_antennas,
-                              std::size_t total_spectra, std::size_t n_ant, cudaStream_t stream);
+                              std::size_t total_spectra, std::size_t n_ant, cudaStream_t stream,
+                              bool is_swapped_withoffset = false);
 
 /**
  * @brief Coalesced warp-per-spectrum extraction of alive antennas into a compact buffer.

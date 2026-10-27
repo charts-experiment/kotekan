@@ -102,7 +102,7 @@ bool test_analytical_phasor_rotation() {
     std::cout << "  - Max Phasor Error vs Analytical: " << std::scientific << max_phase_err << "\n";
     std::cout << "  - Max Unit Norm Drift: " << max_norm_err << "\n";
 
-    const bool passed = (max_phase_err < 5e-4f) && (max_norm_err < 5e-4f);
+    const bool passed = (max_phase_err <= 5.0e-4f) && (max_norm_err <= 5.0e-4f);
     std::cout << "  -> Result: " << (passed ? "PASSED [OK]" : "FAILED [X]") << "\n";
     return passed;
 }
@@ -151,7 +151,7 @@ bool test_chunk_boundary_continuity() {
     std::cout << "  - Max Boundary Phase Discontinuity: " << std::scientific << max_chunk_jump
               << "\n";
 
-    const bool passed = (max_chunk_jump < 1e-5f);
+    const bool passed = (max_chunk_jump <= 1.0e-5f);
     std::cout << "  -> Result: " << (passed ? "PASSED [OK]" : "FAILED [X]") << "\n";
     return passed;
 }
@@ -393,7 +393,7 @@ bool test_multibeam_gpu_vs_cpu() {
     cudaFree(d_positions);
     cudaStreamDestroy(stream);
 
-    const bool passed = (rms_error < 1e-2) && (snr_db > 55.0);
+    const bool passed = (rms_error <= 6.0e-3) && (snr_db >= 60.0);
     std::cout << "  -> Result: " << (passed ? "PASSED [OK]" : "FAILED [X]") << "\n";
     return passed;
 }

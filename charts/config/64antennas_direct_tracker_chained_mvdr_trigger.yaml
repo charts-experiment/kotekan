@@ -1,0 +1,383 @@
+---
+# ==============================================================================
+# CHARTS 64-Antenna Unified Real-Time Chained Pipeline Configuration
+# ==============================================================================
+# Execution Graph:
+#   [ DPDK Ingest ] ──> [ rfsocHandlerShuffle & zeroSamples ]
+#                   ──> [ cudaAntennaMaskCommand ]
+#                   ──> [ cudaDirectBeamTrackerCommand ]
+#                   ──> [ cudaBiSLCCommand / MVDR ]
+#                   ──> [ cudaTransientTriggerCommand ]
+#                   ──> [ restInspectFrame (12048) / Async Ring Dump ]
+# ==============================================================================
+
+type: config
+log_level: info
+
+# CPU Thread Affinity (isolates Kotekan host pipeline from DPDK lcores [3, 4, 5])
+cpu_affinity: [6, 7, 8, 9]
+
+# ------------------------------------------------------------------------------
+# Array Dimensions & Sampling Parameters
+# ------------------------------------------------------------------------------
+num_elements: 64                  # 64 Antennas (8x8 physical array)
+n_channels_per_packet: 168        # RFSoC packet channel packing
+local_subbands_per_packet: 2      # 2 subbands per NIC port
+num_local_freq: 336               # 168 * 2 = 336 coarse channels per NIC stream (672 total)
+
+# Timing & Frame Arrival (RFSoC 300 MSPS PFB -> 10/3 us per sample)
+sample_period_s: 3.333333333333e-6
+
+# Frame Batch: 15,360 samples = 51.2 ms per frame
+samples_per_data_set: 15360
+frame_arrival_period: samples_per_data_set * sample_period_s
+bytes_per_dataset: n_channels_per_packet * local_subbands_per_packet * samples_per_data_set
+capture_n_frames: 1687500         # Continuous streaming duration (24.0 hours)
+
+# Memory & Buffer Management
+buffer_depth: 20                  # Host RAM frame queue depth (~6.6 GB per NIC)
+gpu_buffer_depth: 3               # GPU VRAM frame queue depth (~1.0 GB VRAM per stream)
+
+# Array Geometry & Beam Setup
+spacing_m: 0.6                    # Physical antenna spacing in meters
+max_beams: 4                      # 4 Concurrent beams: 1 Primary target + 3 Reference/Veto beams
+initial_active_beams: 4
+sizeof_complex_float: 8           # float2 per formed beam sample
+max_alive_antennas: 64
+
+# ------------------------------------------------------------------------------
+# Metadata Pool
+# ------------------------------------------------------------------------------
+main_pool:
+    kotekan_metadata_pool: chartsMetadata
+    num_metadata_objects: buffer_depth * 15
+
+# ------------------------------------------------------------------------------
+# Host Buffer Definitions
+# ------------------------------------------------------------------------------
+network_capture_buf_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: bytes_per_dataset * num_elements # ~330.3 MB per frame
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+mask_buffer_zeros_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set
+    numa_node: 0
+    metadata_pool: main_pool
+
+network_capture_buf_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: bytes_per_dataset * num_elements
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+mask_buffer_zeros_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set
+    numa_node: 0
+    metadata_pool: main_pool
+
+# Output Host Buffers for Cleaned Beams
+host_formed_beams_buffer_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float # ~165 MB
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: false
+    mlock_frames: false
+
+host_formed_beams_buffer_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: false
+    mlock_frames: false
+
+# ------------------------------------------------------------------------------
+# Network Ingest Stage: DPDK Core (Dual Port)
+# ------------------------------------------------------------------------------
+dpdk:
+    kotekan_stage: dpdkCore
+    lcore_cpu_map: [3, 5]          # Worker lcores 3 and 5 for ports 0 and 1
+    main_lcore_cpu: 4              # Main DPDK coordinator thread
+    lcore_port_map:
+        - [0]                      # lcore 3 handles NIC port 0
+        - [1]                      # lcore 5 handles NIC port 1
+    max_rx_pkt_len: 9000
+    rx_ring_size: 4096
+    num_mbufs: 65536
+    mbuf_data_size: 9216
+
+    handlers:
+        - dpdk_handler: rfsocHandlerShuffle
+          out_buffer: network_capture_buf_0
+          alignment: 15360
+          mask_buf: mask_buffer_zeros_0
+          first_subband: 0
+          coarse_freq_start: 0
+          num_local_freq: 336
+
+        - dpdk_handler: rfsocHandlerShuffle
+          out_buffer: network_capture_buf_1
+          alignment: 15360
+          mask_buf: mask_buffer_zeros_1
+          first_subband: 2
+          coarse_freq_start: 336
+          num_local_freq: 336
+
+# ------------------------------------------------------------------------------
+# Dropped Packet Zeroing Stages
+# ------------------------------------------------------------------------------
+zero_samples_0:
+    kotekan_stage: zeroSamples
+    out_buf: network_capture_buf_0
+    lost_samples_buf: mask_buffer_zeros_0
+    zero_value: 0
+    sample_size: 21504             # num_elements (64) * num_local_freq (336)
+
+zero_samples_1:
+    kotekan_stage: zeroSamples
+    out_buf: network_capture_buf_1
+    lost_samples_buf: mask_buffer_zeros_1
+    zero_value: 0
+    sample_size: 21504             # num_elements (64) * num_local_freq (336)
+
+# ------------------------------------------------------------------------------
+# GPU Chained Pipeline: Mask -> Direct Tracker -> MVDR / BiSLC -> Transient Trigger
+# ------------------------------------------------------------------------------
+gpu:
+    profiling: false
+
+  # Command Pipeline for Stream 0 (Frequencies 0..335, 300.0 - 400.5 MHz)
+    commands_0: &command_list_0
+        - name: cudaInputData
+          in_buf: host_voltage
+          gpu_mem: voltage_0
+        - name: cudaSyncInput
+
+        # Stage 1: Dynamic Dead & Saturated Antenna Detection/Blanking
+        - name: cudaAntennaMaskCommand
+          gpu_mem_voltage: voltage_0
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          buffer_depth: 3
+          auto_detect_enabled: true
+          blank_voltages_enabled: true     # Blank in-place with format-specific zero byte (0x88 / 0x00)
+          dead_power_threshold: 5.0
+          sat_power_threshold: 80.0
+          clip_fraction_threshold: 0.15
+          revival_frames: 5
+
+        # Stage 2: Direct Beam Tracker with Sub-Frame Interpolation & Complex Gain Calibration
+        - name: cudaDirectBeamTrackerCommand
+          gpu_mem_voltage: voltage_0
+          gpu_mem_formed_beams: formed_beams_0
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          spacing_m: 0.6
+          antenna_order: "descending"
+          max_beams: 4
+          initial_active_beams: 4
+          buffer_depth: 3
+          time_chunk_size: 256
+          time_unroll: 4
+          beam_tile_size: 4
+          enable_cuda_graph: false
+          site_lat_deg: -33.4211146
+          site_lon_deg: -70.8634710
+          site_alt_m: 458.0
+          freq_start_hz: 300000000.0       # 300.0 MHz base for Stream 0
+          freq_step_hz: 300000.0
+          # Complex calibration gain path (hot-reloaded or loaded at startup)
+          # gains_file: "/data/calibration/charts_64ant_gains_stream0.npy"
+          # gains_first_channel: 0
+          # Beam 0: Primary Target (Galactic Center Sgr A*)
+          source_ra_deg: 266.4168
+          source_dec_deg: -29.0078
+          # Beam 1: Reference Beam 1 (Vela Pulsar PSR B0833-45)
+          source_ra_deg_1: 128.8361
+          source_dec_deg_1: -45.1764
+          # Beam 2: Reference Beam 2 (Fornax A)
+          source_ra_deg_2: 50.6750
+          source_dec_deg_2: -37.2083
+          # Beam 3: Off-Axis Sidelobe/RFI Reference Beam
+          source_ra_deg_3: 79.7500
+          source_dec_deg_3: -45.7667
+
+        # Stage 3: Real-Time Joint Matrix Unmixing (BiSLC / MVDR Sidelobe Cancellation)
+        - name: cudaBiSLCCommand
+          gpu_mem_formed_beams: formed_beams_0
+          gpu_mem_cleaned_beams: cleaned_beams_0
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          spacing_m: 0.6
+          max_beams: 4
+          initial_active_beams: 4
+          buffer_depth: 3
+          diagonal_loading: 1.0e-4
+          enabled: true
+          freq_start_hz: 300000000.0
+          freq_step_hz: 300000.0
+
+        # Stage 4: In-VRAM Zero-Disk Transient Trigger & Circular Ring Buffer Candidate Dump
+        - name: cudaTransientTriggerCommand
+          gpu_mem_cleaned_beams: cleaned_beams_0
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          max_beams: 4
+          buffer_depth: 3
+          ring_buffer_depth: 16            # Holds 819.2 ms in GPU VRAM
+          pre_trigger_frames: 4
+          post_trigger_frames: 4
+          sk_threshold: 0.08              # Spectral Kurtosis deviation trigger
+          rfi_threshold: 0.30             # Spatial RFI inter-beam veto ceiling
+          min_flagged_channels: 8         # Minimum channels to trigger
+          dump_directory: "/data/tracker/candidates/stream_0"
+          auto_dump_enabled: true         # Only dumps when trigger fires
+          cooldown_frames: 200            # Refractory holdoff: ~10.2 s between dumps
+          min_free_disk_gb: 20            # Abort trigger dump if disk < 20 GB
+          max_auto_dumps: 20              # Session ceiling
+          enabled: true
+
+        - name: cudaSyncOutput
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: cleaned_beams_0
+          out_buf: host_formed_beams
+
+    commands_1: &command_list_1
+        - name: cudaInputData
+          in_buf: host_voltage
+          gpu_mem: voltage_1
+        - name: cudaSyncInput
+
+        - name: cudaAntennaMaskCommand
+          gpu_mem_voltage: voltage_1
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          buffer_depth: 3
+          auto_detect_enabled: true
+          blank_voltages_enabled: true
+          dead_power_threshold: 5.0
+          sat_power_threshold: 80.0
+          clip_fraction_threshold: 0.15
+          revival_frames: 5
+
+        - name: cudaDirectBeamTrackerCommand
+          gpu_mem_voltage: voltage_1
+          gpu_mem_formed_beams: formed_beams_1
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          spacing_m: 0.6
+          antenna_order: "descending"
+          max_beams: 4
+          initial_active_beams: 4
+          buffer_depth: 3
+          time_chunk_size: 256
+          time_unroll: 4
+          beam_tile_size: 4
+          enable_cuda_graph: false
+          site_lat_deg: -33.4211146
+          site_lon_deg: -70.8634710
+          site_alt_m: 458.0
+          freq_start_hz: 400800000.0       # 400.8 MHz base for Stream 1
+          freq_step_hz: 300000.0
+          source_ra_deg: 266.4168
+          source_dec_deg: -29.0078
+          source_ra_deg_1: 128.8361
+          source_dec_deg_1: -45.1764
+          source_ra_deg_2: 50.6750
+          source_dec_deg_2: -37.2083
+          source_ra_deg_3: 79.7500
+          source_dec_deg_3: -45.7667
+
+        - name: cudaBiSLCCommand
+          gpu_mem_formed_beams: formed_beams_1
+          gpu_mem_cleaned_beams: cleaned_beams_1
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          spacing_m: 0.6
+          max_beams: 4
+          initial_active_beams: 4
+          buffer_depth: 3
+          diagonal_loading: 1.0e-4
+          enabled: true
+          freq_start_hz: 400800000.0
+          freq_step_hz: 300000.0
+
+        - name: cudaTransientTriggerCommand
+          gpu_mem_cleaned_beams: cleaned_beams_1
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          max_beams: 4
+          buffer_depth: 3
+          ring_buffer_depth: 16
+          pre_trigger_frames: 4
+          post_trigger_frames: 4
+          sk_threshold: 0.08
+          rfi_threshold: 0.30
+          min_flagged_channels: 8
+          dump_directory: "/data/tracker/candidates/stream_1"
+          auto_dump_enabled: true
+          cooldown_frames: 200
+          min_free_disk_gb: 20
+          max_auto_dumps: 20
+          enabled: true
+
+        - name: cudaSyncOutput
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: cleaned_beams_1
+          out_buf: host_formed_beams
+
+    gpu_0:
+        kotekan_stage: cudaProcess
+        gpu_id: 0
+        buffer_depth: 3
+        commands: *command_list_0
+        in_buffers:
+            host_voltage: network_capture_buf_0
+        out_buffers:
+            host_formed_beams: host_formed_beams_buffer_0
+
+    gpu_1:
+        kotekan_stage: cudaProcess
+        gpu_id: 0
+        buffer_depth: 3
+        commands: *command_list_1
+        in_buffers:
+            host_voltage: network_capture_buf_1
+        out_buffers:
+            host_formed_beams: host_formed_beams_buffer_1
+
+# ------------------------------------------------------------------------------
+# Monitoring & Live Web Dashboard Endpoints (REST API Port 12048)
+# ------------------------------------------------------------------------------
+inspect_beams_0:
+    kotekan_stage: restInspectFrame
+    in_buf: host_formed_beams_buffer_0
+    len: 4194304                   # 4 MB snapshot for dashboard telemetry
+
+inspect_beams_1:
+    kotekan_stage: restInspectFrame
+    in_buf: host_formed_beams_buffer_1
+    len: 4194304                   # 4 MB snapshot for dashboard telemetry

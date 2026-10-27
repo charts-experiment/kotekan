@@ -148,7 +148,8 @@ __global__ void zero_bad_antennas_coalesced_kernel(
     const int* __restrict__ bad_antennas,
     int num_bad_antennas,
     std::size_t total_spectra,
-    std::size_t n_ant)
+    std::size_t n_ant,
+    std::uint8_t zero_byte)
 {
     __shared__ int s_bad[MAX_MASK_ANTENNAS];
     const unsigned int tid = threadIdx.y * blockDim.x + threadIdx.x;
@@ -165,7 +166,7 @@ __global__ void zero_bad_antennas_coalesced_kernel(
 
     std::uint8_t* row_ptr = raw_bytes + s * n_ant;
     for (int i = static_cast<int>(threadIdx.x); i < num_bad_antennas; i += static_cast<int>(blockDim.x)) {
-        row_ptr[s_bad[i]] = 0U;
+        row_ptr[s_bad[i]] = zero_byte;
     }
 }
 
@@ -338,12 +339,15 @@ void launch_zero_bad_antennas(
     int num_bad_antennas,
     std::size_t total_spectra,
     std::size_t n_ant,
-    cudaStream_t stream)
+    cudaStream_t stream,
+    bool is_swapped_withoffset)
 {
     if (num_bad_antennas <= 0 || total_spectra == 0) return;
 
+    const std::uint8_t zero_byte = is_swapped_withoffset ? 0x88U : 0x00U;
+
     if (static_cast<std::size_t>(num_bad_antennas) >= n_ant) {
-        cudaMemsetAsync(d_voltages, 0, total_spectra * n_ant * sizeof(std::uint8_t), stream);
+        cudaMemsetAsync(d_voltages, zero_byte, total_spectra * n_ant * sizeof(std::uint8_t), stream);
         return;
     }
 
@@ -355,7 +359,7 @@ void launch_zero_bad_antennas(
 
     zero_bad_antennas_coalesced_kernel<<<num_blocks, block, 0, stream>>>(
         reinterpret_cast<std::uint8_t*>(d_voltages),
-        d_bad_antennas, num_bad_antennas, total_spectra, n_ant);
+        d_bad_antennas, num_bad_antennas, total_spectra, n_ant, zero_byte);
 }
 
 void launch_extract_alive_antennas(

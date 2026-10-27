@@ -83,4 +83,11 @@ if(CUDAToolkit_FOUND)
                                                 ${COMMON_TEST_SRCS})
     target_link_libraries(test_transient_trigger_suite PRIVATE CUDA::cudart Threads::Threads)
     target_include_directories(test_transient_trigger_suite PRIVATE ${COMMON_INCLUDE_DIRS})
+
+    # 1. Chained GPU Pipeline Verification Suite: Masking -> Direct Tracker -> MVDR / BiSLC
+    add_executable(test_chained_mask_tracker_mvdr_suite test_chained_mask_tracker_mvdr_suite.cpp
+                                                        ${COMMON_TEST_SRCS}
+                                                        ${CMAKE_CURRENT_SOURCE_DIR}/../lib/utils/chartsMvdr.cpp)
+    target_link_libraries(test_chained_mask_tracker_mvdr_suite PRIVATE CUDA::cudart Threads::Threads)
+    target_include_directories(test_chained_mask_tracker_mvdr_suite PRIVATE ${COMMON_INCLUDE_DIRS})
 endif()

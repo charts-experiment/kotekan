@@ -936,7 +936,7 @@ cudaEvent_t cudaAntennaMaskCommand::execute(cudaPipelineState& /*pipestate*/,
 
         launch_zero_bad_antennas(d_voltages, _d_bad_antennas,
                                  static_cast<int>(_current_bad_indices.size()), total_spectra,
-                                 _num_elements, stream);
+                                 _num_elements, stream, is_swapped_withoffset);
     }
 
     // 3. Coalesced warp-per-spectrum alive antenna baseband extraction
