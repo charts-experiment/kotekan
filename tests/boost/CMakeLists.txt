@@ -1,5 +1,14 @@
 project(kotekan_boost_tests)
 
+# Exercise CHARTS association and the unchanged zeroSamples stage without NICs.
+add_executable(test_charts_packet_loss
+    ${KOTEKAN_SOURCE_DIR}/test_charts/tests/test_packet_loss.cpp
+    ${KOTEKAN_SOURCE_DIR}/lib/dpdk/zeroSamples.cpp)
+target_include_directories(test_charts_packet_loss PRIVATE
+    ${KOTEKAN_SOURCE_DIR}/lib/cuda ${KOTEKAN_SOURCE_DIR}/lib/dpdk)
+target_link_libraries(test_charts_packet_loss PRIVATE libexternal kotekan_libs kotekan_core
+    kotekan_utils -Wl,--whole-archive kotekan_metadata -Wl,--no-whole-archive)
+
 add_executable(test_chartsTriggeredBasebandReadout test_chartsTriggeredBasebandReadout.cpp)
 target_link_libraries(test_chartsTriggeredBasebandReadout
     PRIVATE libexternal kotekan_stages kotekan_libs kotekan_utils kotekan_core
