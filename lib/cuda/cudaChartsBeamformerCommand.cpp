@@ -2,6 +2,7 @@
 #include "cudaChartsUpchannelizer.hpp"
 #include "cudaChartsBeamformer.hpp"
 #include "chartsMetadata.hpp"
+#include "chartsPacketLoss.hpp"
 #include "cudaUtils.hpp"
 #include "kotekanLogging.hpp"
 
@@ -38,12 +39,20 @@ public:
     std::size_t raw_voltage_bytes = 0;
     std::size_t fp32_intensity_bytes = 0;
     std::size_t output_bytes = 0;
+    bool packet_loss_enabled = false;
+    std::size_t exposure_bytes = 0;
 
     ComplexFloat* device_weights = nullptr;
     std::uint8_t* device_history_samples = nullptr;
     std::uint8_t* device_fine_packed = nullptr;
     float* device_fp32_scratch = nullptr;
     Int8QuantizationParameters* device_quant_params = nullptr;
+    std::uint8_t* device_raw_validity = nullptr;
+    std::uint8_t* device_fine_validity = nullptr;
+    std::uint8_t* device_history_validity = nullptr;
+    // Independent of per-slot end_event, which the results thread destroys.
+    cudaEvent_t workspace_ready = nullptr;
+    bool workspace_submitted = false;
     bool history_initialized = false;
     std::optional<std::int64_t> expected_next_seq;
 
@@ -72,8 +81,8 @@ public:
         require(n_beams >= 1 && n_beams <= maximum_beams, "num_beams must be between 1 and 128");
 
         if (mode == BeamformerInputMode::ChannelizedFine) {
-            require(raw_n_time > 0 && raw_n_time % upchannelization_factor == 0,
-                    "fine mode requires samples_per_data_set divisible by 32");
+            require(raw_n_time >= pfb_history_samples && raw_n_time % upchannelization_factor == 0,
+                    "fine mode requires samples_per_data_set >= 96 divisible by 32");
             integration_spectra = cfg.get_default<std::size_t>(name, "integration_spectra", 10);
             require(integration_spectra == 10, "fine mode requires integration_spectra=10");
             beamform_dims = {raw_n_time / upchannelization_factor, fine_frequency_channels, n_ant,
@@ -95,6 +104,24 @@ public:
             output_dims.n_time * output_dims.n_freq * output_dims.n_beams;
         fp32_intensity_bytes = output_samples * sizeof(float);
         output_bytes = quantize_int8 ? (output_samples * sizeof(std::int8_t)) : fp32_intensity_bytes;
+
+        packet_loss_enabled = !cfg.get_default<std::string>(name, "gpu_mem_missing", "").empty();
+        if (packet_loss_enabled) {
+            require(n_ant == 64, "handler masks require 64 CHARTS elements");
+            const bool fine = mode == BeamformerInputMode::ChannelizedFine;
+            exposure_bytes = output_dims.n_time * local_frequency_channels
+                             * (fine ? sizeof(std::uint8_t) : sizeof(std::uint16_t));
+            device_raw_validity = static_cast<std::uint8_t*>(
+                device.get_gpu_memory(name + "/raw_validity", raw_n_time));
+            if (fine) {
+                device_fine_validity = static_cast<std::uint8_t*>(
+                    device.get_gpu_memory(name + "/fine_validity", beamform_dims.n_time));
+                device_history_validity = static_cast<std::uint8_t*>(
+                    device.get_gpu_memory(name + "/history_validity", pfb_history_samples));
+                CHECK_CUDA_ERROR(cudaMemset(device_history_validity, 0, pfb_history_samples));
+            }
+        }
+        CHECK_CUDA_ERROR(cudaEventCreateWithFlags(&workspace_ready, cudaEventDisableTiming));
 
         const double freq_zero_hz = cfg.get_default<double>(name, "frequency_zero_hz", 300e6);
         const double freq_step_hz = cfg.get_default<double>(name, "frequency_step_hz", 300e3);
@@ -151,6 +178,11 @@ public:
                 device.get_gpu_memory(name + "/quant_params", param_bytes));
         }
     }
+
+    ~chartsBeamformerState() {
+        if (workspace_ready)
+            cudaEventDestroy(workspace_ready);
+    }
 };
 
 class cudaChartsBeamformerCommand : public cudaCommand {
@@ -166,6 +198,15 @@ public:
         require(voltage_name != intensity_name,
                 "gpu_mem_voltage and gpu_mem_intensity must be distinct");
 
+        missing_name = cfg.get_default<std::string>(name, "gpu_mem_missing", "");
+        exposure_name = cfg.get_default<std::string>(name, "gpu_mem_exposure", "");
+        if (!state->packet_loss_enabled) {
+            require(exposure_name.empty()
+                        && cfg.get_default<std::string>(name, "in_buf_missing", "").empty()
+                        && cfg.get_default<std::string>(name, "out_buf_exposure", "").empty(),
+                    "mask/exposure options require gpu_mem_missing; no all-valid fallback");
+        }
+
         const std::string in_buf_name = cfg.get_default<std::string>(name, "in_buf", "");
         if (!in_buf_name.empty()) {
             voltage_buf = buffers.get_buffer(in_buf_name);
@@ -179,6 +220,34 @@ public:
                     "output host buffer frame_size mismatch");
         }
 
+        if (state->packet_loss_enabled) {
+            require(voltage_buf, "packet loss requires in_buf for frame association");
+            mask_shard_id = cfg.get<std::size_t>(name, "mask_shard_id");
+            require(mask_shard_id == state->shard_id, "mask_shard_id must match shard_id");
+            missing_buf = buffers.get_buffer(cfg.get<std::string>(name, "in_buf_missing"));
+            auto* exposure_buf = buffers.get_buffer(cfg.get<std::string>(name, "out_buf_exposure"));
+            require(missing_buf != voltage_buf && missing_buf->frame_size == state->raw_n_time,
+                    "mask buffer must be distinct and contain T_raw bytes");
+            require(exposure_buf->frame_size == state->exposure_bytes,
+                    "exposure host buffer frame_size mismatch");
+            require(!exposure_name.empty() && missing_name != voltage_name
+                        && missing_name != intensity_name && exposure_name != voltage_name
+                        && exposure_name != intensity_name && exposure_name != missing_name,
+                    "voltage/mask/intensity/exposure GPU names must be distinct");
+            // Retain host frames for pre-H2D validation using normal consumer ownership.
+            // cudaInputData independently consumes the SAME mask buffer; there is no fan-out.
+            if (inst == 0) {
+                voltage_buf->register_consumer(name);
+                missing_buf->register_consumer(name);
+            }
+            d_missing = static_cast<const std::uint8_t*>(device.get_gpu_memory_array(
+                missing_name, inst, _gpu_buffer_depth, state->raw_n_time));
+            d_exposure = device.get_gpu_memory_array(exposure_name, inst, _gpu_buffer_depth,
+                                                     state->exposure_bytes);
+            register_gpu_buffer_user({missing_name, true, true, false});
+            register_gpu_buffer_user({exposure_name, true, false, true});
+        }
+
         d_voltage = static_cast<const std::uint8_t*>(device.get_gpu_memory_array(
             voltage_name, inst, _gpu_buffer_depth, state->raw_voltage_bytes));
         d_output = device.get_gpu_memory_array(intensity_name, inst, _gpu_buffer_depth,
@@ -187,6 +256,40 @@ public:
         register_gpu_buffer_user({voltage_name, true, true, false});
         register_gpu_buffer_user({intensity_name, true, false, true});
         set_command_type(gpuCommandType::KERNEL);
+        require(cuda_stream_id >= 2, "CHARTS compute requires stream >= 2 for cudaSyncOutput");
+    }
+
+    int wait_on_precondition() override {
+        if (!state->packet_loss_enabled)
+            return 0;
+        const int raw_slot = gpu_frame_id % voltage_buf->num_frames;
+        const int mask_slot = gpu_frame_id % missing_buf->num_frames;
+        if (!voltage_buf->wait_for_full_frame(unique_name, raw_slot))
+            return -1;
+        const auto* flags = missing_buf->wait_for_full_frame(unique_name, mask_slot);
+        if (!flags)
+            return -1;
+        const auto raw_meta = std::dynamic_pointer_cast<chartsMetadata>(
+            voltage_buf->get_metadata(raw_slot));
+        const auto mask_meta = std::dynamic_pointer_cast<chartsMetadata>(
+            missing_buf->get_metadata(mask_slot));
+        try {
+            associated_seq = validate_charts_mask_pair(
+                raw_meta.get(), mask_meta.get(), flags, missing_buf->frame_size,
+                state->raw_n_time, state->shard_id, mask_shard_id);
+        } catch (const std::invalid_argument& error) {
+            FATAL_ERROR("CHARTS packet-loss input rejected: {:s}", error.what());
+            return -1;
+        }
+        return 0;
+    }
+
+    void finalize_frame() override {
+        cudaCommand::finalize_frame();
+        if (state->packet_loss_enabled) {
+            voltage_buf->mark_frame_empty(unique_name, gpu_frame_id % voltage_buf->num_frames);
+            missing_buf->mark_frame_empty(unique_name, gpu_frame_id % missing_buf->num_frames);
+        }
     }
 
     cudaEvent_t execute(cudaPipelineState&, const std::vector<cudaEvent_t>& pre_events) override {
@@ -199,10 +302,22 @@ public:
                 CHECK_CUDA_ERROR(cudaStreamWaitEvent(stream, event, 0));
             }
         }
+        // Serialize persistent history and scratch across rotating slots, even if
+        // a supported configuration selects a different compute stream.
+        if (state->workspace_submitted)
+            CHECK_CUDA_ERROR(cudaStreamWaitEvent(stream, state->workspace_ready, 0));
 
         // Check for sequence discontinuity on this shard if chartsMetadata is attached
         auto meta = std::dynamic_pointer_cast<chartsMetadata>(
             device.get_gpu_memory_array_metadata(voltage_name, gpu_frame_id));
+        if (state->packet_loss_enabled) {
+            const auto mask_meta = std::dynamic_pointer_cast<chartsMetadata>(
+                device.get_gpu_memory_array_metadata(missing_name, gpu_frame_id));
+            if (!meta || !mask_meta || !meta->has_fpga_seq_num() || !mask_meta->has_fpga_seq_num()
+                || meta->get_fpga_seq_num() != associated_seq
+                || mask_meta->get_fpga_seq_num() != associated_seq)
+                FATAL_ERROR("CHARTS H2D voltage/mask metadata does not match validated host frame");
+        }
         if (meta && meta->has_fpga_seq_num()) {
             const std::int64_t seq = meta->get_fpga_seq_num();
             if (state->mode == BeamformerInputMode::ChannelizedFine && state->expected_next_seq
@@ -211,9 +326,33 @@ public:
                     local_frequency_channels * state->beamform_dims.n_ant * pfb_history_samples;
                 CHECK_CUDA_ERROR(
                     cudaMemsetAsync(state->device_history_samples, 0, history_bytes, stream));
+                if (state->packet_loss_enabled)
+                    CHECK_CUDA_ERROR(cudaMemsetAsync(state->device_history_validity, 0,
+                                                     pfb_history_samples, stream));
                 state->history_initialized = false;
             }
             state->expected_next_seq = seq + static_cast<std::int64_t>(state->raw_n_time);
+        }
+
+        if (state->packet_loss_enabled) {
+            // n_coarse=1 explicitly inverts missing flags into compact [T_raw] validity.
+            launch_expand_missing_to_validity(stream, d_missing, state->device_raw_validity,
+                                               state->raw_n_time, 1);
+            const bool fine = state->mode == BeamformerInputMode::ChannelizedFine;
+            const std::uint8_t* validity = state->device_raw_validity;
+            if (fine) {
+                launch_pfb_validity(stream, validity, state->device_history_validity,
+                                    state->history_initialized, state->device_fine_validity,
+                                    state->raw_n_time);
+                validity = state->device_fine_validity;
+            }
+            launch_integrated_exposure(stream, validity, d_exposure, state->beamform_dims.n_time,
+                                        state->integration_spectra, fine);
+            if (fine)
+                CHECK_CUDA_ERROR(cudaMemcpyAsync(
+                    state->device_history_validity,
+                    state->device_raw_validity + state->raw_n_time - pfb_history_samples,
+                    pfb_history_samples, cudaMemcpyDeviceToDevice, stream));
         }
 
         const std::uint8_t* beamform_input = d_voltage;
@@ -243,7 +382,11 @@ public:
 
         if (meta) {
             device.claim_gpu_memory_array_metadata(intensity_name, gpu_frame_id, meta);
+            if (state->packet_loss_enabled)
+                device.claim_gpu_memory_array_metadata(exposure_name, gpu_frame_id, meta);
         }
+        CHECK_CUDA_ERROR(cudaEventRecord(state->workspace_ready, stream));
+        state->workspace_submitted = true;
         return record_end_event();
     }
 
@@ -251,10 +394,17 @@ private:
     std::shared_ptr<chartsBeamformerState> state;
     std::string voltage_name;
     std::string intensity_name;
+    std::string missing_name;
+    std::string exposure_name;
+    std::size_t mask_shard_id = 0;
+    std::int64_t associated_seq = -1;
     Buffer* voltage_buf = nullptr;
+    Buffer* missing_buf = nullptr;
     Buffer* output_buf = nullptr;
     const std::uint8_t* d_voltage = nullptr;
     void* d_output = nullptr;
+    const std::uint8_t* d_missing = nullptr;
+    void* d_exposure = nullptr;
 };
 
 REGISTER_CUDA_COMMAND_WITH_STATE(cudaChartsBeamformerCommand, chartsBeamformerState);

@@ -305,6 +305,37 @@ __global__ void expand_missing_to_validity_kernel(
     expanded_validity[idx] = (raw_missing_flags[t] == 0) ? 1U : 0U;
 }
 
+__global__ void pfb_validity_kernel(const std::uint8_t* raw_validity,
+                                    const std::uint8_t* history_validity,
+                                    bool history_initialized, std::uint8_t* fine_validity,
+                                    std::size_t fine_n_time) {
+    const std::size_t m = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (m >= fine_n_time)
+        return;
+    std::uint8_t complete = 1;
+    for (std::size_t s = 0; s < pfb_prototype_length; ++s) {
+        const auto t = static_cast<std::int64_t>(32 * m + s) - 96;
+        complete &= t < 0
+                        ? (history_initialized ? history_validity[t + 96] : 0)
+                        : raw_validity[t];
+    }
+    fine_validity[m] = complete;
+}
+
+template<typename Count>
+__global__ void integrated_exposure_kernel(const std::uint8_t* validity, Count* exposure,
+                                           std::size_t n_time, std::size_t k,
+                                           std::size_t total_entries) {
+    const std::size_t idx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= total_entries)
+        return;
+    const std::size_t begin = (idx / local_frequency_channels) * k;
+    unsigned int count = 0;
+    for (std::size_t t = begin; t < n_time && t - begin < k; ++t)
+        count += validity[t];
+    exposure[idx] = static_cast<Count>(count);
+}
+
 } // namespace
 
 void launch_fused_upchannelizer(const cudaStream_t stream, const std::uint8_t* raw_payload,
@@ -366,6 +397,40 @@ void launch_expand_missing_to_validity(const cudaStream_t stream,
                                         static_cast<unsigned int>(threads), 0, stream>>>(
         raw_missing_flags, expanded_validity, n_coarse, total_entries);
     check_cuda(cudaGetLastError(), "expand_missing_to_validity_kernel launch");
+}
+
+void launch_pfb_validity(cudaStream_t stream, const std::uint8_t* raw_validity,
+                         const std::uint8_t* history_validity, bool history_initialized,
+                         std::uint8_t* fine_validity, std::size_t raw_n_time) {
+    if (!raw_validity || !history_validity || !fine_validity || raw_n_time < 96
+        || raw_n_time % 32 != 0)
+        throw std::invalid_argument("PFB validity requires buffers and T_raw >= 96 divisible by 32");
+    constexpr unsigned int threads = 128;
+    const auto n = raw_n_time / 32;
+    pfb_validity_kernel<<<static_cast<unsigned int>((n + threads - 1) / threads), threads, 0,
+                          stream>>>(raw_validity, history_validity, history_initialized,
+                                    fine_validity, n);
+    check_cuda(cudaGetLastError(), "pfb_validity_kernel launch");
+}
+
+void launch_integrated_exposure(cudaStream_t stream, const std::uint8_t* validity,
+                                void* exposure, std::size_t n_time,
+                                std::size_t integration_spectra, bool fine_mode) {
+    if (!validity || !exposure || n_time == 0
+        || (fine_mode ? integration_spectra != 10
+                      : (integration_spectra != 10 && integration_spectra != 320)))
+        throw std::invalid_argument("invalid CHARTS exposure dimensions or buffers");
+    const auto entries = ((n_time + integration_spectra - 1) / integration_spectra)
+                         * local_frequency_channels;
+    constexpr unsigned int threads = 256;
+    const auto blocks = static_cast<unsigned int>((entries + threads - 1) / threads);
+    if (fine_mode)
+        integrated_exposure_kernel<<<blocks, threads, 0, stream>>>(
+            validity, static_cast<std::uint8_t*>(exposure), n_time, integration_spectra, entries);
+    else
+        integrated_exposure_kernel<<<blocks, threads, 0, stream>>>(
+            validity, static_cast<std::uint16_t*>(exposure), n_time, integration_spectra, entries);
+    check_cuda(cudaGetLastError(), "integrated_exposure_kernel launch");
 }
 
 } // namespace beamformer

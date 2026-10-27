@@ -100,6 +100,17 @@ void launch_expand_missing_to_validity(cudaStream_t stream, const std::uint8_t* 
                                        std::uint8_t* expanded_validity, std::size_t raw_n_time,
                                        std::size_t n_coarse = local_frequency_channels);
 
+// Compact time-only validity: handler flags apply to every coarse channel.
+void launch_pfb_validity(cudaStream_t stream, const std::uint8_t* raw_validity,
+                         const std::uint8_t* history_validity, bool history_initialized,
+                         std::uint8_t* fine_validity, std::size_t raw_n_time);
+
+// Counts [ceil(n_time/K)][336]. Fine K=10 uses uint8; coarse K=10/320 uses uint16.
+// Tail windows count only supplied spectra. This never gates or rescales intensity.
+void launch_integrated_exposure(cudaStream_t stream, const std::uint8_t* validity,
+                                void* exposure, std::size_t n_time,
+                                std::size_t integration_spectra, bool fine_mode);
+
 } // namespace beamformer
 
 #endif // CUDA_CHARTS_UPCHANNELIZER_HPP
