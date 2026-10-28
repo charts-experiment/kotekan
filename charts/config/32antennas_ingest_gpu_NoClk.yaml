@@ -2,6 +2,9 @@
 # Single-port RFSoC NoClk capture, GPU correlation, and raw correlation output.
 # The run script replaces __CORR_RAW_DIR__ with its selected output directory.
 
+# Output directories (edit paths here).
+output_dir: &output_dir "__CORR_RAW_DIR__"
+
 type: config
 log_level: info
 cpu_affinity: [0, 1]
@@ -105,7 +108,7 @@ raw_correlation_write:
   kotekan_stage: rawFileWrite
   in_buf: host_correlation_buffer
   file_name: correlation_0
-  base_dir: "__CORR_RAW_DIR__"
+  base_dir: *output_dir
   file_ext: bin
   prefix_hostname: false
   num_frames_per_file: 1
