@@ -55,7 +55,7 @@ add_library(
     chartsBasebandReadout.cpp
     chartsTriggeredBasebandReadout.cpp
     chartsBasebandAntennaSelect.cpp
-    chartsBasebandCapture.cpp
+    chartsBasebandCaptureSelect.cpp
     BasebandWriter.cpp
     BaseWriter.cpp
     HFBWriter.cpp
