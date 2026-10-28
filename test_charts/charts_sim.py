@@ -39,6 +39,8 @@ from sim.astro import (
     resolve_beam_targets,
 )
 from sim.benchmark import run_direct_tracker_benchmark
+from sim.benchmark_vis_calibrator import format_markdown as format_vis_cal_markdown
+from sim.benchmark_vis_calibrator import run_benchmark as run_vis_cal_benchmark
 from sim.constants import (
     CHARTS_CHANNEL_WIDTH_MHZ,
     CHARTS_LATITUDE_DEG,
@@ -363,6 +365,15 @@ def main():
     bench_parser.add_argument("--out-json", type=str, default=None, help="Save JSON report")
     bench_parser.add_argument("--out-md", type=str, default=None, help="Save Markdown report")
 
+    # 6b. Visibility calibrator benchmark
+    vc_parser = subparsers.add_parser("bench-vis-cal", help="Benchmark the Astron correlator chain with and without cudaVisibilityCalibrator (Kotekan trackers + nvidia-smi)")
+    vc_parser.add_argument("--frames", type=int, default=3000, help="Frames replayed per run (5.12 ms each at real time)")
+    vc_parser.add_argument("--repetitions", type=int, default=3, help="Runs per variant, alternating order")
+    vc_parser.add_argument("--calibration-file", type=str, default=None, help="complex64 (n_freq, 528, 2, 2) table (default: random)")
+    vc_parser.add_argument("--work-dir", type=str, default=None, help="Scratch directory (default: temporary)")
+    vc_parser.add_argument("--output-dir", type=str, default=None, help="Write vis_calibrator_benchmark.{json,md} here")
+    vc_parser.add_argument("--kotekan-bin", type=str, default=None, help="Path to kotekan executable")
+
     # 7. Inspect subcommand
     insp_parser = subparsers.add_parser("inspect", help="Inspect correlator or beam tracker binary outputs")
     insp_parser.add_argument("--file", type=str, required=True, help="Path to .bin dump file")
@@ -616,6 +627,17 @@ def main():
             output_json=Path(args.out_json) if args.out_json else None,
             output_md=Path(args.out_md) if args.out_md else None,
         )
+
+    elif args.command == "bench-vis-cal":
+        report = run_vis_cal_benchmark(
+            num_frames=args.frames,
+            repetitions=args.repetitions,
+            calibration_file=Path(args.calibration_file) if args.calibration_file else None,
+            work_dir=Path(args.work_dir) if args.work_dir else None,
+            output_dir=Path(args.output_dir) if args.output_dir else None,
+            kotekan_bin=Path(args.kotekan_bin) if args.kotekan_bin else None,
+        )
+        print(format_vis_cal_markdown(report))
 
     elif args.command == "inspect":
         fpath = Path(args.file)

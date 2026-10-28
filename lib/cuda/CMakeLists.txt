@@ -51,6 +51,8 @@ add_library(
     cudaRFISKtilde.cpp
     cudaShuffleAstron.cu
     cudaCorrelatorAstron.cpp
+    cudaVisibilityCalibrator.cu
+    cudaVisibilityCalibrator.cpp
     cudaDirectBeamTracker.cu
     cudaDirectBeamTrackerCommand.cpp
     cudaAntennaMask.cu
