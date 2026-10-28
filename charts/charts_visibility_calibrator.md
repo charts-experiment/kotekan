@@ -1,125 +1,151 @@
-# Calibración de visibilities en el nodo: `cudaVisibilityCalibrator`
+# On-node visibility calibration: `cudaVisibilityCalibrator`
 
-Estado al 2026-10-27. Tarea de Notion: *Calibración en nodo* (sección *Calibración de correlator*), en el Registro de tareas.
+State as of 2026-10-28. Notion task: *Calibración en nodo* (section *Calibración de correlator*), in the task log. Summary for resuming work on another PC: `CLAUDE.md` at the repo root.
 
-## 1. Objetivo y decisiones de diseño
+**Status:** implemented, tested in simulation and deployed on the node. On real data the fringes look good and similar to the uncalibrated ones; the quantitative phase validation and the benchmark on the real system are still missing (§8).
 
-Aplicar en la GPU las gains instrumentales a las visibilities, justo después del correlador N2 Astron, sin tocar el kernel del correlador ni el baseband (que se calibra offline).
+## 1. Goal and design decisions
 
-| Decisión | Motivo |
+Apply the instrumental gains to the visibilities on the GPU, right after the N2 Astron correlator, without touching the correlator kernel or the baseband (which is calibrated offline).
+
+| Decision | Reason |
 |---|---|
-| Calibrar sobre la matriz de visibilities, no sobre los voltajes | Los voltajes son `int4+int4` y el kernel Astron ya es funcional con ese formato. Pasar a float y re-cuantizar sería fuente de errores. La salida del correlador ya es `int32`, que sí se puede operar. |
-| Un solo comando nuevo, `cudaVisibilityCalibrator`, entre `cudaCorrelatorAstron` y `cudaSyncOutput` | Mantiene la arquitectura modular. No cambia ningún stage ni config existente, y quien no agregue el comando no cambia nada. |
-| Los productos de baseline `1/(g_i g_j*)` se calculan offline en charts-utils | La GPU solo hace una multiplicación compleja por visibilidad. |
-| Calibración in-place en `int32`, factor `complex64`, redondeo al más cercano con saturación | `chartsAccumulate` y `rawFileWrite` no cambian (mismo frame size). Decidido con el usuario. |
-| Gains promedio en el tiempo (`nanmean`), una tabla estática | Se recalibra cada ~2 días, no en tiempo real. Conviene revisar `phase_scatter_deg` y `amp_scatter` de `cal_pipeline_gpu.py` para confirmar que el promedio es seguro. |
-| Gains NaN o cero dan factor 0 | Los datos marcados (`--flag-freqs`) se anulan en vez de propagar NaN. |
-| Antenas sin gains quedan con gain 1 | Pasan sin calibrar. Ojo: una baseline entre antena calibrada y no calibrada queda a medias. |
+| Calibrate the visibility matrix, not the voltages | Voltages are `int4+int4` and the Astron kernel already works with that format. Converting to float and re-quantising would add error. The correlator output is already `int32`, which can be operated on. |
+| One new command, `cudaVisibilityCalibrator`, between `cudaCorrelatorAstron` and `cudaSyncOutput` | Keeps the architecture modular. No existing stage or config changes, and whoever does not add the command sees no change. |
+| Baseline products `1/(g_i g_j*)` are computed offline in charts-utils | The GPU only does one complex multiplication per visibility. |
+| In-place `int32` calibration, `complex64` factor, round to nearest with saturation | `chartsAccumulate` and `rawFileWrite` do not change (same frame size). Agreed with the user. |
+| Time-averaged gains (`nanmean`), one static table | Recalibration happens every ~2 days, not in real time. Check `phase_scatter_deg` and `amp_scatter` from `cal_pipeline_gpu.py` to confirm the average is safe. |
+| NaN or zero gains give factor 0 | Flagged data (`--flag-freqs`) is zeroed instead of propagating NaN. |
+| Antennas without gains keep gain 1 | They pass uncalibrated. Note: a baseline between a calibrated and an uncalibrated antenna ends up half-calibrated. |
 
-## 2. Layout de datos (lo que hay que respetar)
+## 2. Data layout (must be respected)
 
-- Frame del correlador: `[freq_local][baseline][pol_a][pol_b][re, im]`, todo `int32`.
-- `baseline = recv_a*(recv_a+1)/2 + recv_b` con `recv_a >= recv_b` (triángulo inferior). Con 64 antenas: 32 receivers × 2 pols = 528 bloques, igual que `num_blocks`.
-- Elemento raw `r`: receiver `r//2`, pol `r%2`.
-- **Orden de antenas invertido:** la antena CHARTS `a` es el elemento raw `N-1-a` (`charts_utils/core/antenna_indices.py`).
-- Convención `V_ab = x_a · conj(x_b)`. `apply_gains` calcula `V/(g_i g_j*)`.
-- Dos shards de frecuencia (`corr_freq_0` y `corr_freq_1`), 336 canales cada uno. La tabla es de banda completa (672 canales) y cada comando toma su rebanada con `freq_offset` (0 y 336).
+- Correlator frame: `[freq_local][baseline][pol_a][pol_b][re, im]`, all `int32`.
+- `baseline = recv_a*(recv_a+1)/2 + recv_b` with `recv_a >= recv_b` (lower triangle). With 64 antennas: 32 receivers × 2 pols = 528 blocks, equal to `num_blocks`.
+- Raw element `r`: receiver `r//2`, pol `r%2`.
+- **Reversed antenna order:** CHARTS antenna `a` is raw element `N-1-a` (`charts_utils/core/antenna_indices.py`).
+- Convention `V_ab = x_a · conj(x_b)`. `apply_gains` computes `V/(g_i g_j*)`.
+- Two frequency shards (`corr_freq_0` and `corr_freq_1`), 336 channels each. The table covers the full band (672 channels) and each command takes its slice with `freq_offset` (0 and 336).
 
-## 3. Qué se implementó
+## 3. What was implemented
 
 ### kotekan (`/home/jpcontreras/kotekan`)
-- `lib/cuda/cudaVisibilityCalibrator.{hpp,cpp,cu}` y su registro en `lib/cuda/CMakeLists.txt`.
-  - Lee al iniciar un `.npy` `complex64` C-contiguo de forma `(n_freq, num_blocks, 2, 2)`, valida forma y rango de canales, y sube a la GPU solo su rebanada.
-  - Kernel: un hilo por visibilidad, `float32` con `fmaf`, redondeo `__float2int_rn` con saturación a `[-2^31, 2147483520]`.
-  - Sin `calibration_file` no lanza ningún kernel (pass-through).
-  - Exige `block_size: 2` y `num_data_sets: 1`; falla al iniciar si no se cumplen.
-  - Parámetros: `gpu_mem_correlation_matrix`, `num_local_freq`, `num_blocks`, `calibration_file` (opcional), `freq_offset` (default 0).
-- `charts/config/64antennas_corr_cal.yaml`: copia de `64antennas_corr.yaml` con el comando agregado en ambas listas, con `freq_offset` 0 y 336 y `calibration_file: /data/calibration/vis_cal_64.npy` (ruta de ejemplo, ajustar). El config original no se modificó.
+- `lib/cuda/cudaVisibilityCalibrator.{hpp,cpp,cu}` and its registration in `lib/cuda/CMakeLists.txt`.
+  - At start-up it reads a C-contiguous `complex64` `.npy` of shape `(n_freq, num_blocks, 2, 2)`, validates the shape and channel range, and uploads only its slice to the GPU.
+  - Kernel: one thread per visibility, `float32` with `fmaf`, `__float2int_rn` rounding with saturation to `[-2^31, 2147483520]`.
+  - Without `calibration_file` no kernel is launched (pass-through).
+  - Requires `block_size: 2` and `num_data_sets: 1`; fails at start-up otherwise.
+  - Parameters: `gpu_mem_correlation_matrix`, `num_local_freq`, `num_blocks`, `calibration_file` (optional), `freq_offset` (default 0).
+- `charts/config/64antennas_corr_cal.yaml`: copy of `64antennas_corr.yaml` with the command added to both command lists, with `freq_offset` 0 and 336 and `calibration_file: /data/calibration/vis_cal_64.npy` (example path, adjust). The original config was not modified.
+- `charts/config/64antennas_corr_trigger_cal.yaml`: correlator plus triggered baseband, with the calibrator in `commands_0/1`.
 
 ### charts-utils (`/home/jpcontreras/charts-utils`)
 - `charts_utils/cal/kotekan_calibration.py`:
-  - `expand_gains(gains, antennas, n_ant)` promedia el eje de tiempo si existe y rellena con 1 las antenas no resueltas.
-  - `gains_to_visibility_calibration(gains)` devuelve la tabla `complex64 (n_freq, 528, 2, 2)` en el layout del frame GPU.
+  - `expand_gains(gains, antennas, n_ant)` averages the time axis if present and fills unresolved antennas with 1.
+  - `gains_to_visibility_calibration(gains)` returns the `complex64 (n_freq, 528, 2, 2)` table in the GPU frame layout.
 - `scripts/kotekan_vis_calibrator.py` (CLI: `--gains`, `--antennas`, `--num-antennas`, `--output`).
-- `tests/test_kotekan_calibration.py` (6 tests; usa `apply_gains` y `gpu_corr_to_visibilities` como oráculo).
+- `tests/test_kotekan_calibration.py` (6 tests; uses `apply_gains` and `gpu_corr_to_visibilities` as the oracle).
 
-### Tests y benchmark (`test_charts/`)
-- `sim/corr_cal.py`: genera el YAML de replay (`rawFileRead → cudaProcess → sink`), lanza kotekan y decodifica frames.
-- `tests/test_visibility_calibrator.py`: 8 tests end-to-end contra el binario real y la GPU.
-- `sim/benchmark_vis_calibrator.py` y el subcomando `charts_sim.py bench-vis-cal`.
+### Tests and benchmark (`test_charts/`)
+- `sim/corr_cal.py`: builds the replay YAML (`rawFileRead → cudaProcess → sink`), launches kotekan and decodes frames.
+- `tests/test_visibility_calibrator.py`: 8 end-to-end tests against the real binary and the GPU.
+- `sim/benchmark_vis_calibrator.py` and the `charts_sim.py bench-vis-cal` subcommand.
 
-## 4. Cómo usarlo
+## 4. How to use it
 
 ```bash
-# 1. Resolver gains (charts-utils) y guardarlas promediadas
+# 1. Solve gains (charts-utils) and save them averaged
 python scripts/cal_pipeline_gpu.py --input <frames_dir> --save-avg-gains -o gains.npy ...
 
-# 2. Construir la tabla para la GPU (antenas del archivo en índices CHARTS)
-python scripts/kotekan_vis_calibrator.py -g gains.npy -ant 0,4,6,8 --num-antennas 64 -o vis_cal_64.npy
+# 2. Build the GPU table (antennas in the file, as CHARTS indices)
+#    Real gains used so far: gains_sun_transit_1027_interp.npy, (672, 4), antennas 0,5,32,37, reference antenna 5
+PYTHONPATH=~/charts-utils python ~/charts-utils/scripts/kotekan_vis_calibrator.py \
+  -g gains_sun_transit_1027_interp.npy -ant 0,5,32,37 --num-antennas 64 -o /data/calibration/vis_cal_64.npy
 
-# 3. Poner la ruta en charts/config/64antennas_corr_cal.yaml y correr kotekan con ese config
+# 3. Set the path in the config (calibration_file, in both commands) and run on the node
+sudo build/kotekan/kotekan -c charts/config/64antennas_corr_trigger_cal.yaml
 ```
 
-## 5. Cómo se validó
+To disable calibration, remove `calibration_file` (pass-through). Gain and table `.npy` files are not versioned: copy them with `scp`.
 
-Todo con el binario real en la RTX 5090.
+**Scope of the table.** Only 4 antennas are connected today (0, 5, 32, 37) and they are the ones with gains, so the table covers every product that carries signal: 10 counting the autos. Products with disconnected antennas are noise and their factor does not matter. A baseline between a calibrated antenna and one without gains would be multiplied by `1/g_i` (half-calibrated), but that only matters once more antennas are connected.
 
-| Chequeo | Resultado |
+**What to expect.** The table multiplies by up to ×3.25 in amplitude and corrects each antenna's phase relative to antenna 5. If the fringes look identical with and without calibration, measure it: see the quantitative validation in §8.1.
+
+## 5. How it was validated
+
+All with the real binary on the RTX 5090.
+
+| Check | Result |
 |---|---|
-| Sin tabla frente a no tener el comando | Bit-exacto |
-| GPU frente a `round(vis × tabla)` | Error máximo 0.71 cuentas (límite de `float32` con valores de ~10⁷) |
-| GPU frente a `apply_gains` de charts-utils, `freq_offset` 0 y 336 | Error relativo ~4×10⁻⁶ |
-| Saturación | Se satura en los límites de `int32`, sin dar la vuelta |
-| Tabla de forma incorrecta u offset fuera de rango | kotekan se detiene al iniciar con mensaje claro |
+| No table vs. no command at all | Bit-exact |
+| GPU vs. `round(vis × table)` | Maximum error 0.71 counts (`float32` limit with values of ~10⁷) |
+| GPU vs. charts-utils `apply_gains`, `freq_offset` 0 and 336 | Relative error ~4×10⁻⁶ |
+| Saturation | Saturates at the `int32` limits, no wrap-around |
+| Wrong table shape or out-of-range offset | kotekan stops at start-up with a clear message |
 
-Ejecutar los tests:
+Run the tests:
 
 ```bash
-export CHARTS_TEST_LD_LIBRARY_PATH=<dir con un libnvrtc que coincida con el driver>   # ver nota 7.1
+export CHARTS_TEST_LD_LIBRARY_PATH=<dir with a libnvrtc matching the driver>   # see note 7.1
 python -m pytest test_charts/tests/test_visibility_calibrator.py -q
-python -m pytest tests/test_kotekan_calibration.py -q      # en charts-utils
+python -m pytest tests/test_kotekan_calibration.py -q      # in charts-utils
 ```
 
-## 6. Rendimiento
+## 6. Performance
 
-`python test_charts/charts_sim.py bench-vis-cal --frames 4000 --repetitions 3 --output-dir <dir>` mide con los trackers de kotekan (`/trackers`, requiere `gpu.profiling: true`; guarda solo las últimas 100 muestras, así que se consulta repetidamente) y con `nvidia-smi` a 100 ms. Resultados (RTX 5090, 64 antenas, 336 canales, 1536 muestras/frame):
+`python test_charts/charts_sim.py bench-vis-cal --frames 4000 --repetitions 3 --output-dir <dir>` measures with kotekan's trackers (`/trackers`, needs `gpu.profiling: true`; it keeps only the last 100 samples, so it is polled repeatedly) and with `nvidia-smi` at 100 ms. Results (RTX 5090, 64 antennas, 336 channels, 1536 samples/frame):
 
-| | Sin calibrador | Con calibrador |
+| | Without calibrator | With calibrator |
 |---|---|---|
-| Correlador Astron | 194.4 µs | 194.3 µs |
-| **Calibrador** | no aplica | **5.8 µs** (p99 5.8, máx 7.2) |
-| Tiempo de kernels por frame | 225.8 µs | 231.5 µs |
-| Ritmo del pipeline (tiempo real: 195.3 Hz) | 238.6 Hz | 238.3 Hz |
-| GPU util / potencia / reloj SM | 22 % / 104 W / 2625 MHz | 22 % / 104 W / 2627 MHz |
-| Memoria GPU máx | 671 MiB | 689 MiB |
+| Astron correlator | 194.4 µs | 194.3 µs |
+| **Calibrator** | n/a | **5.8 µs** (p99 5.8, max 7.2) |
+| Kernel time per frame | 225.8 µs | 231.5 µs |
+| Pipeline rate (real time: 195.3 Hz) | 238.6 Hz | 238.3 Hz |
+| GPU util / power / SM clock | 22 % / 104 W / 2625 MHz | 22 % / 104 W / 2627 MHz |
+| Max GPU memory | 671 MiB | 689 MiB |
 
-El calibrador usa 0.11 % del período de frame y 3 % del tiempo del correlador. Los +18 MiB son la tabla.
+The calibrator uses 0.11 % of the frame period and 3 % of the correlator time. The +18 MiB is the table.
 
-Cuidado al interpretar:
-- `cudaSync*`, `cudaInputData` y `cudaOutputData` miden esperas y copias PCIe, no cómputo; por eso se suman aparte los kernels.
-- El benchmark repite el mismo frame, así que la tabla y los datos probablemente caben en el L2 (96 MB en la 5090). Con tráfico real podría subir algo (estimo hasta ~10 µs), sin cambiar la conclusión.
+Caveats when reading these numbers:
+- `cudaSync*`, `cudaInputData` and `cudaOutputData` measure waits and PCIe copies, not compute; kernels are therefore summed separately.
+- The benchmark repeats the same frame, so the table and data probably fit in L2 (96 MB on the 5090). With real traffic it could rise somewhat (estimated up to ~10 µs) without changing the conclusion.
 
-## 7. Problemas conocidos del entorno y del repo
+## 7. Known environment and repo issues
 
-1. **NVRTC más nuevo que el driver.** En esta máquina el driver es CUDA 13.2 y el toolkit 13.3. El correlador Astron, que compila en runtime, falla con *"PTX compiled with an unsupported toolchain"*, incluso sin el calibrador. Para las pruebas usé un `libnvrtc` 13.0 vía `LD_LIBRARY_PATH` (`CHARTS_TEST_LD_LIBRARY_PATH`). Falta una solución permanente: igualar driver y toolkit, o compilar a SASS en vez de PTX.
-2. **`create_correlator_yaml` de `test_charts/sim/pipeline.py` está desactualizado.** Usa claves viejas de `rawFileRead` (`prefix`, `out_buf`) y los stages sueltos en vez de `cudaProcess`, por lo que `charts_sim.py correlate` y `pipeline` no corren con el kotekan actual. `sim/corr_cal.py` genera una config vigente que se puede reutilizar.
-3. **Los frames del replay traen un prefijo de 4 bytes con metadata de tamaño 0**, y `charts_utils.core.io` espera ≥16 bytes. `load_corr_frame` en `sim/corr_cal.py` los lee con ese offset.
-4. **`test_live_control_cli.py::test_01_query_status` falla** por conexión rechazada, porque necesita un kotekan vivo. No se verificó si ya fallaba antes de estos cambios.
-5. **`test_charts/scratch_charts_sim/` aparece sin rastrear** en git (el `.gitignore` no lo cubre desde ese nivel).
+1. **NVRTC newer than the driver.** On this machine the driver is CUDA 13.2 and the toolkit 13.3. The Astron correlator, which compiles at runtime, fails with *"PTX compiled with an unsupported toolchain"*, even without the calibrator. For the tests I used a 13.0 `libnvrtc` through `LD_LIBRARY_PATH` (`CHARTS_TEST_LD_LIBRARY_PATH`). A permanent fix is still missing: match driver and toolkit, or compile to SASS instead of PTX.
+2. **`create_correlator_yaml` in `test_charts/sim/pipeline.py` is outdated.** It uses old `rawFileRead` keys (`prefix`, `out_buf`) and separate stages instead of `cudaProcess`, so `charts_sim.py correlate` and `pipeline` do not run with the current kotekan. `sim/corr_cal.py` generates a current config that can be reused.
+3. **Replay frames carry a 4-byte prefix with metadata size 0**, and `charts_utils.core.io` expects ≥16 bytes. `load_corr_frame` in `sim/corr_cal.py` reads them with that offset.
+4. **`test_live_control_cli.py::test_01_query_status` fails** with connection refused, because it needs a live kotekan. It was not checked whether it already failed before these changes.
+5. **`test_charts/scratch_charts_sim/` shows up untracked** in git (`.gitignore` does not cover it from that level).
 
-## 8. Próximos pasos
+### 7.6 Node deployment: what failed and how it was solved
 
-Ordenados por prioridad.
+1. `ERROR: Unrecognized Stage! (chartsTriggeredBasebandReadout)`: the branch was cut from an old `kotekan_charts`. `origin/kotekan_charts` was merged into `feat/vis-calibrator`. The merge also brought in the int32 overflow fix in `cudaShuffleAstron.cu`, needed for production frames (≈3.3 GB per shard).
+2. `Cannot find source file: chartsBasebandCapture.cpp` in `lib/stages/CMakeLists.txt`: an upstream error (the real file is `chartsBasebandCaptureSelect.cpp`). Fixed in commit `45324c173`. The fix still has to be ported to `kotekan_charts` and derived branches.
+3. Node notes: CUDA 12.8, NVCC 12.8.93, DPDK ON, HDF5 OFF, WERROR OFF.
 
-1. **Validación física con datos reales.** La simulación no inyecta gains por antena, así que solo se validó aritmética y layout. Falta comprobar en datos reales (o inyectando gains en el generador del sim) que las fases de la fuente de calibración quedan en ≈0 tras calibrar en el nodo, y compararlo con la calibración offline.
-2. **Confirmar con gains reales.** `gains_E_2026-10-19_with0.npy` tiene forma `(672, 4, 7)`: 4 antenas × 7 tiempos. El archivo no indica qué antenas son; las pruebas asumieron 0,4,6,8. Confirmar los índices, y revisar el rango de amplitudes (mín 0.0018, máx 18) para descartar saturación de `int32` en los autos.
-3. **Prueba en el nodo con `64antennas_corr_cal.yaml`.** Ajustar la ruta de la tabla, correr con captura real y comprobar que `chartsAccumulate`, `rawFileWrite` y los scripts de charts-utils (`plot_triangular_vis.py`, `cal_pipeline_gpu.py`) funcionan con la salida calibrada.
-4. **Medir rendimiento bajo carga real.** Repetir `bench-vis-cal` con el config de producción (2 shards, 15360 muestras por frame) y datos distintos entre frames, para descartar el efecto de L2.
-5. **Recarga en caliente por REST.** Hoy se recalibra reiniciando kotekan. Si hace falta, agregar un endpoint con doble buffer en GPU y swap al inicio de un frame.
-6. **Aplicar la misma idea al beamforming.** Según la tarea de Notion, en el tracking beam y el multi-beamforming las gains se multiplican en cada etapa, después de la cuantización interna. Es trabajo aparte.
-7. **Revisar el promedio de gains.** Con ventanas largas, `nanmean` de complejos puede reducir la amplitud si la fase deriva. Definir un umbral de `phase_scatter_deg` para aceptar una calibración.
-8. **Higiene del repo.**
-   - Reparar o retirar `create_correlator_yaml` (7.2) y resolver el NVRTC (7.1).
-   - Añadir `scratch_charts_sim/` al `.gitignore` (7.5).
-   - Hacer commit en kotekan (rama `kotekan_charts`) y en charts-utils, que tiene cambios sin commit ajenos a esto (`pyproject.toml`, `export_directions.py`).
-   - Actualizar la tarea *Calibración en nodo* en Notion con este estado.
+## 8. Next steps
+
+In priority order.
+
+1. **Physical validation on real data.** Done by eye: the fringes look good and similar to the uncalibrated ones, which with 4 calibrated antennas should be checked with numbers (amplitudes should change by up to ×3). The quantitative test is still missing. The simulation does not inject per-antenna gains, so it only validated arithmetic and layout.
+   - Use the calibration source (the Sun, `gains_sun_transit_1027_interp.npy`) and the products among antennas 0, 5, 32, 37.
+   - Record with and without `calibration_file` using the same config, or apply the table offline to uncalibrated frames.
+   - Criteria: source phase ≈0 with the table (and not without it); amplitude consistent with `apply_gains`; difference from the offline calibration ≈ quantisation noise (≤1 count per visibility).
+2. **Real gains.** Confirmed: antennas 0, 5, 32, 37, reference antenna 5, amplitude 0.55–3.09 (max factor ~3.25 in the table). No int32 saturation risk with those amplitudes. The old file `gains_E_2026-10-19_with0.npy` `(672, 4, 7)` has unidentified antennas and amplitudes 0.0018–18; do not use it without confirming them.
+3. **Node test.** First without `calibration_file` (must equal the run without the calibrator), then with the table. Check the start-up log (table shape, `freq_offset`) and that `chartsAccumulate`, `rawFileWrite` and the charts-utils scripts (`plot_triangular_vis.py`, `cal_pipeline_gpu.py`) work with the calibrated output.
+4. **Benchmark on the real system.** Repeat `bench-vis-cal` (or read `/trackers` with `gpu.profiling: true` on the production kotekan) with the production config: 2 shards, 15360/153600 samples per frame, data that differs between frames to rule out the L2 effect. Record:
+   - calibrator and correlator kernel time (µs/frame) and its ratio to the frame period;
+   - GPU utilisation, power and memory (`nvidia-smi`);
+   - dropped frames and buffer occupancy with and without the calibrator;
+   - the node's GPU and driver, and the correlator's fixed `-arch=compute_86` against the real GPU.
+   Write the numbers in the §6 table with the date and node.
+5. **Hot reload over REST.** Today recalibrating means restarting kotekan. If needed, add an endpoint with a double buffer on the GPU and a swap at the start of a frame.
+6. **Apply the same idea to beamforming.** Per the Notion task, in the tracking beam and multi-beamforming the gains are multiplied at each stage, after the internal quantisation. This is separate work.
+7. **Review the gain average.** With long windows, a complex `nanmean` can reduce the amplitude if the phase drifts. Define a `phase_scatter_deg` threshold to accept a calibration.
+8. **Repo hygiene.**
+   - Fix or remove `create_correlator_yaml` (7.2) and resolve NVRTC (7.1).
+   - Add `scratch_charts_sim/` to `.gitignore` (7.5).
+   - Commit charts-utils, which has uncommitted changes unrelated to this (`pyproject.toml`, `export_directions.py`).
+   - Update the *Calibración en nodo* task in Notion with this state.
