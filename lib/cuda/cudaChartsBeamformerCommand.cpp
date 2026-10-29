@@ -3,6 +3,7 @@
 #include "cudaChartsBeamformer.hpp"
 #include "chartsMetadata.hpp"
 #include "chartsPacketLoss.hpp"
+#include "chartsIntensityProduct.hpp"
 #include "chartsWeightsNpy.hpp"
 #include "cudaUtils.hpp"
 #include "kotekanLogging.hpp"
@@ -45,6 +46,10 @@ public:
     std::size_t exposure_bytes = 0;
     std::string weights_summary; // set for .npy weights, logged by the command
     bool legacy_bin_weights = false;
+    nlohmann::json weights_identity; // recorded in the product descriptor
+    double freq_zero_hz = 300e6;
+    double freq_step_hz = 300e3;
+    std::size_t quant_param_bytes = 0;
 
     ComplexFloat* device_weights = nullptr;
     std::uint8_t* device_history_samples = nullptr;
@@ -127,8 +132,8 @@ public:
         }
         CHECK_CUDA_ERROR(cudaEventCreateWithFlags(&workspace_ready, cudaEventDisableTiming));
 
-        const double freq_zero_hz = cfg.get_default<double>(name, "frequency_zero_hz", 300e6);
-        const double freq_step_hz = cfg.get_default<double>(name, "frequency_step_hz", 300e3);
+        freq_zero_hz = cfg.get_default<double>(name, "frequency_zero_hz", 300e6);
+        freq_step_hz = cfg.get_default<double>(name, "frequency_step_hz", 300e3);
         const float spacing_m = cfg.get_default<float>(name, "spacing_m", 0.6F);
         const float beam_l_step = cfg.get_default<float>(name, "beam_l_step", 0.01F);
 
@@ -161,6 +166,16 @@ public:
                     const auto bytes = read_whole_file(weights_file);
                     host_weights = parse_npy_complex64(bytes, expect);
                     check_npy_sha256(bytes, info.sha256);
+                    weights_identity = {{"source", "npy"},
+                                        {"file", weights_file},
+                                        {"descriptor", descriptor_file},
+                                        {"sha256", info.sha256},
+                                        {"sha256_verified", true},
+                                        {"builder_version", descriptor["version"]},
+                                        {"calibrated", info.calibrated},
+                                        {"calibration_note", info.calibration_note},
+                                        {"flagged_channel_antennas",
+                                         info.flagged_channel_antennas}};
                     weights_summary = fmt::format(
                         "{} shard {} {}: calibrated={} flagged_channel_antennas={} sha256={} "
                         "note='{}'",
@@ -178,12 +193,26 @@ public:
                 host_weights.resize(expected_count);
                 std::memcpy(host_weights.data(), bytes.data(), bytes.size());
                 legacy_bin_weights = true;
+                weights_identity = {{"source", "legacy_bin"},
+                                    {"file", weights_file},
+                                    {"sha256", detail::sha256_hex(bytes.data(), bytes.size())},
+                                    {"sha256_verified", false},
+                                    {"sha256_origin", "computed from the loaded bytes; no "
+                                                      "declared hash to check against"},
+                                    {"calibrated", nullptr},
+                                    {"note", "no descriptor: conventions and calibration "
+                                             "are not declared"}};
             }
             host_weights = repack_weights_to_tiled(host_weights, beamform_dims);
         } else {
             const auto positions = default_positions(n_ant, spacing_m);
             const auto directions = default_beam_grid(n_beams, beam_l_step, 0.0F);
             const auto freqs = shard_frequencies_hz(mode, shard_id, freq_zero_hz, freq_step_hz);
+            weights_identity = {{"source", "generated_default_geometry"},
+                                {"calibrated", false},
+                                {"spacing_m", spacing_m},
+                                {"beam_l_step", beam_l_step},
+                                {"note", "diagnostic only; never use for sky pointing"}};
             host_weights = generate_tiled_weights(beamform_dims, positions, freqs, directions);
         }
 
@@ -210,10 +239,11 @@ public:
         if (quantize_int8) {
             device_fp32_scratch = static_cast<float*>(
                 device.get_gpu_memory(name + "/fp32_scratch", fp32_intensity_bytes));
-            const std::size_t param_bytes =
+            quant_param_bytes =
                 quantization_parameter_count(output_dims) * sizeof(Int8QuantizationParameters);
+            // Used only when the parameters are not exported (gpu_mem_quant_params unset).
             device_quant_params = static_cast<Int8QuantizationParameters*>(
-                device.get_gpu_memory(name + "/quant_params", param_bytes));
+                device.get_gpu_memory(name + "/quant_params", quant_param_bytes));
         }
     }
 
@@ -298,6 +328,66 @@ public:
 
         register_gpu_buffer_user({voltage_name, true, true, false});
         register_gpu_buffer_user({intensity_name, true, false, true});
+
+        // int8 offset/scale per 1x16x16 chunk, exported per frame like exposure: a per-slot
+        // GPU array copied by an ordinary cudaOutputData into out_buf_quant_params. GPU memory
+        // names are shared per gpu_id, so each shard needs its own gpu_mem_quant_params.
+        quant_params_name = cfg.get_default<std::string>(name, "gpu_mem_quant_params", "");
+        const std::string quant_buf_name =
+            cfg.get_default<std::string>(name, "out_buf_quant_params", "");
+        if (!state->quantize_int8) {
+            require(quant_params_name.empty() && quant_buf_name.empty(),
+                    "gpu_mem_quant_params/out_buf_quant_params require output_format: int8");
+        } else if (quant_params_name.empty()) {
+            require(quant_buf_name.empty(), "out_buf_quant_params requires gpu_mem_quant_params");
+            if (inst == 0)
+                WARN("CHARTS int8 output without exported offset/scale "
+                     "(gpu_mem_quant_params unset): codes cannot be reconstructed as intensity");
+        } else {
+            require(quant_params_name != voltage_name && quant_params_name != intensity_name
+                        && quant_params_name != missing_name
+                        && quant_params_name != exposure_name,
+                    "gpu_mem_quant_params must be distinct from the other GPU names");
+            require(!quant_buf_name.empty(), "gpu_mem_quant_params requires out_buf_quant_params");
+            auto* quant_buf = buffers.get_buffer(quant_buf_name);
+            require(quant_buf && quant_buf->frame_size == state->quant_param_bytes,
+                    "quant params host buffer frame_size mismatch");
+            d_quant_params = static_cast<Int8QuantizationParameters*>(
+                device.get_gpu_memory_array(quant_params_name, inst, _gpu_buffer_depth,
+                                            state->quant_param_bytes));
+            register_gpu_buffer_user({quant_params_name, true, false, true});
+        }
+
+        const std::string descriptor_file =
+            cfg.get_default<std::string>(name, "product_descriptor_file", "");
+        if (inst == 0 && !descriptor_file.empty()) {
+            ProductDescription product;
+            product.fine = state->mode == BeamformerInputMode::ChannelizedFine;
+            product.int8 = state->quantize_int8;
+            product.shard_id = state->shard_id;
+            product.raw_n_time = state->raw_n_time;
+            product.integration_spectra = state->integration_spectra;
+            product.n_time = state->output_dims.n_time;
+            product.n_freq = state->output_dims.n_freq;
+            product.n_beams = state->output_dims.n_beams;
+            product.n_elements = state->beamform_dims.n_ant;
+            product.freq_zero_hz = state->freq_zero_hz;
+            product.freq_step_hz = state->freq_step_hz;
+            product.frequencies_hz = shard_frequencies_hz(state->mode, state->shard_id,
+                                                          state->freq_zero_hz,
+                                                          state->freq_step_hz);
+            product.quantize_clamp = state->pfb_quantize_clamp;
+            product.weights = state->weights_identity;
+            product.intensity_buffer = out_buf_name;
+            product.exposure_buffer = state->packet_loss_enabled
+                                          ? cfg.get<std::string>(name, "out_buf_exposure")
+                                          : "";
+            product.exposure_bytes = state->exposure_bytes;
+            product.quant_params_buffer = quant_params_name.empty() ? "" : quant_buf_name;
+            product.quant_param_count = quantization_parameter_count(state->output_dims);
+            write_product_descriptor(descriptor_file, product);
+            INFO("CHARTS product descriptor written to {:s}", descriptor_file);
+        }
         set_command_type(gpuCommandType::KERNEL);
         require(cuda_stream_id >= 2, "CHARTS compute requires stream >= 2 for cudaSyncOutput");
     }
@@ -420,13 +510,16 @@ public:
         if (state->quantize_int8) {
             launch_quantize_integrated_intensity(
                 stream, fp32_target, static_cast<std::int8_t*>(d_output),
-                state->device_quant_params, state->output_dims);
+                d_quant_params ? d_quant_params : state->device_quant_params,
+                state->output_dims);
         }
 
         if (meta) {
             device.claim_gpu_memory_array_metadata(intensity_name, gpu_frame_id, meta);
             if (state->packet_loss_enabled)
                 device.claim_gpu_memory_array_metadata(exposure_name, gpu_frame_id, meta);
+            if (d_quant_params)
+                device.claim_gpu_memory_array_metadata(quant_params_name, gpu_frame_id, meta);
         }
         CHECK_CUDA_ERROR(cudaEventRecord(state->workspace_ready, stream));
         state->workspace_submitted = true;
@@ -439,6 +532,7 @@ private:
     std::string intensity_name;
     std::string missing_name;
     std::string exposure_name;
+    std::string quant_params_name;
     std::size_t mask_shard_id = 0;
     std::int64_t associated_seq = -1;
     Buffer* voltage_buf = nullptr;
@@ -448,6 +542,7 @@ private:
     void* d_output = nullptr;
     const std::uint8_t* d_missing = nullptr;
     void* d_exposure = nullptr;
+    Int8QuantizationParameters* d_quant_params = nullptr;
 };
 
 REGISTER_CUDA_COMMAND_WITH_STATE(cudaChartsBeamformerCommand, chartsBeamformerState);
