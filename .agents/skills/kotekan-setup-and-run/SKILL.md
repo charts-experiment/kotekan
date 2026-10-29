@@ -41,8 +41,8 @@ nvcc --version   # Recommended: CUDA 12.4+ or CUDA 13.1+
 ```bash
 mkdir -p ~/charts_workspace && cd ~/charts_workspace
 
-# 1. Clone kotekan (charts branch)
-git clone -b kotekan_charts https://github.com/fmpalmab/kotekan.git
+# 1. Clone kotekan (charts development branch)
+git clone -b kotekan_charts_next https://github.com/charts-experiment/kotekan.git
 
 # 2. Clone charts-constants into the same directory
 git clone https://github.com/charts-experiment/charts-constants.git
@@ -166,7 +166,8 @@ python test_charts/charts_sim.py pipeline --preset 1min --profile day
 # 3. Dry-run test (verifies data generation and configs without GPU execution):
 python test_charts/charts_sim.py pipeline --preset quick --dry-run
 
-# 4. Slurm execution on Trillium cluster (switch to kotekan_charts_trillium branch):
+# 4. Slurm execution on Trillium cluster (the test_charts/slurm/ launchers exist only on the
+#    kotekan_charts_trillium branch; they are not present on kotekan_charts_next):
 git checkout kotekan_charts_trillium
 sbatch test_charts/slurm/trillium_pipeline.slurm
 ```
