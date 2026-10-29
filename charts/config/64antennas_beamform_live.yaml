@@ -1,0 +1,354 @@
+##########################################################################################
+# CHARTS 64-antenna live beamformer: DPDK -> rfsocHandlerShuffle -> zeroSamples ->
+# cudaChartsBeamformerCommand (fine U=32, K=10, int8 + offset/scale) -> rawFileWrite.
+# Both shards (coarse 0..335 on NIC port 0, 336..671 on port 1), T_raw = 15360 (51.2 ms).
+#
+#
+# Per shard and frame the run writes (native rawFileWrite records, raw chartsMetadata first):
+#   intensity.shard<s>  int8 [48][10752][64]        33 030 144 B
+#   qparams.shard<s>    float32 (offset, scale) x 129024   1 032 192 B
+#   exposure.shard<s>   uint8 [48][336] valid spectra       16 128 B
+# plus intensity.shard<s>.product.json (charts-intensity-product-v1, written at start).
+# Decode with test_charts/sim/intensity_product.py.
+#
+# Output rate is ~0.67 GB/s per shard, so the default output is tmpfs and the run is
+# short: run_frames = 200 (10.2 s, ~6.8 GB per shard). Copy the results to /data after.
+##########################################################################################
+type: config
+log_level: info
+cpu_affinity: [6, 7, 8, 9]
+
+num_elements: 64
+element_order: charts_logical
+n_channels_per_packet: 168
+local_subbands_per_packet: 2
+num_local_freq: 336
+num_beams: 64
+
+spectra_per_second: 300000.0
+samples_per_data_set: 15360          # T_raw: 51.2 ms per frame
+frame_arrival_period: samples_per_data_set / spectra_per_second
+bytes_per_dataset: n_channels_per_packet * local_subbands_per_packet * samples_per_data_set
+
+buffer_depth: 10                     # host rings (>= gpu_buffer_depth)
+gpu_buffer_depth: 3
+capture_n_frames: 0                  # handler runs until Kotekan exits
+run_frames: 200                      # frames written per shard before Kotekan exits
+
+# Fine mode, K=10: 15360/32 = 480 fine spectra -> 48 windows; 10752 fine channels.
+intensity_frame_bytes: 48 * 10752 * num_beams
+qparams_frame_bytes: 48 * (10752 / 16) * (num_beams / 16) * 8
+exposure_frame_bytes: 48 * num_local_freq
+
+output_dir: &output_dir /dev/shm/charts_bf_live
+
+run_metadata:
+  kotekan_stage: runMetadataWriter
+  base_dir: *output_dir
+  num_antennas: num_elements
+  signal_antennas: [4, 5]            # EDIT: working antennas (charts_logical)
+
+main_pool:
+  kotekan_metadata_pool: chartsMetadata
+  num_metadata_objects: 256
+
+##########################################################################################
+# Buffers
+##########################################################################################
+network_capture_buf_0:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: bytes_per_dataset * num_elements
+  numa_node: 0
+  metadata_pool: main_pool
+  zero_new_frames: true
+
+mask_buffer_zeros_0:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: samples_per_data_set
+  numa_node: 0
+  metadata_pool: main_pool
+
+network_capture_buf_1:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: bytes_per_dataset * num_elements
+  numa_node: 0
+  metadata_pool: main_pool
+  zero_new_frames: true
+
+mask_buffer_zeros_1:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: samples_per_data_set
+  numa_node: 0
+  metadata_pool: main_pool
+
+intensity_buf_0:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: intensity_frame_bytes
+  numa_node: 0
+  metadata_pool: main_pool
+
+qparams_buf_0:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: qparams_frame_bytes
+  numa_node: 0
+  metadata_pool: main_pool
+
+exposure_buf_0:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: exposure_frame_bytes
+  numa_node: 0
+  metadata_pool: main_pool
+
+intensity_buf_1:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: intensity_frame_bytes
+  numa_node: 0
+  metadata_pool: main_pool
+
+qparams_buf_1:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: qparams_frame_bytes
+  numa_node: 0
+  metadata_pool: main_pool
+
+exposure_buf_1:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: exposure_frame_bytes
+  numa_node: 0
+  metadata_pool: main_pool
+
+##########################################################################################
+# Ingest
+##########################################################################################
+dpdk:
+  kotekan_stage: dpdkCore
+  lcore_cpu_map: [3, 5]              # lcore 3 -> port 0, lcore 5 -> port 1
+  main_lcore_cpu: 4
+  lcore_port_map:
+    - [0]
+    - [1]
+  max_rx_pkt_len: 9000
+  num_mbufs: 9600
+  mbuf_data_size: 9216
+
+  handlers:
+    - dpdk_handler: rfsocHandlerShuffle
+      out_buffer: network_capture_buf_0
+      alignment: samples_per_data_set
+      mask_buf: mask_buffer_zeros_0
+      first_subband: 0
+      coarse_freq_start: 0
+      num_local_freq: 336
+
+    - dpdk_handler: rfsocHandlerShuffle
+      out_buffer: network_capture_buf_1
+      alignment: samples_per_data_set
+      mask_buf: mask_buffer_zeros_1
+      first_subband: 2
+      coarse_freq_start: 336
+      num_local_freq: 336
+
+zero_samples:
+  kotekan_stage: zeroSamples
+  out_buf: network_capture_buf_0
+  lost_samples_buf: mask_buffer_zeros_0
+  zero_value: 0                      # signed int4 zero (the default 0x88 is (-8,-8))
+  sample_size: num_local_freq * num_elements
+
+zero_samples_1:
+  kotekan_stage: zeroSamples
+  out_buf: network_capture_buf_1
+  lost_samples_buf: mask_buffer_zeros_1
+  zero_value: 0
+  sample_size: num_local_freq * num_elements
+
+##########################################################################################
+# GPU beamformer, one cudaProcess per shard on the same GPU (distinct gpu_mem names).
+# Streams: H2D 0, CHARTS command 2, all D2H copies 1.
+##########################################################################################
+gpu_beamformer_0:
+  kotekan_stage: cudaProcess
+  gpu_id: 0
+  buffer_depth: gpu_buffer_depth
+  in_buffers:
+    raw: network_capture_buf_0
+    missing: mask_buffer_zeros_0
+  out_buffers:
+    intensity: intensity_buf_0
+    qparams: qparams_buf_0
+    exposure: exposure_buf_0
+  commands:
+    - name: cudaInputData
+      in_buf: raw
+      gpu_mem: charts.voltage.shard0
+      cuda_stream: 0
+    - name: cudaInputData
+      in_buf: missing
+      gpu_mem: charts.missing.shard0
+      cuda_stream: 0
+    - name: cudaSyncInput
+    - name: cudaChartsBeamformerCommand
+      input_mode: fine
+      output_format: int8
+      in_buf: raw
+      out_buf: intensity
+      shard_id: 0
+      gpu_mem_voltage: charts.voltage.shard0
+      gpu_mem_intensity: charts.intensity.shard0
+      in_buf_missing: missing
+      mask_shard_id: 0
+      gpu_mem_missing: charts.missing.shard0
+      out_buf_exposure: exposure
+      gpu_mem_exposure: charts.exposure.shard0
+      gpu_mem_quant_params: charts.qparams.shard0
+      out_buf_quant_params: qparams
+      product_descriptor_file: /dev/shm/charts_bf_live/intensity.shard0.product.json
+      # weights_file: /data/beamform/weights/weights_fine_shard0.npy
+      # weights_descriptor: /data/beamform/weights/weights_fine_shard0.json
+      cuda_stream: 2
+    - name: cudaSyncOutput
+    - name: cudaOutputData
+      in_buf: raw
+      gpu_mem: charts.intensity.shard0
+      out_buf: intensity
+      cuda_stream: 1
+    - name: cudaOutputData
+      in_buf: raw
+      gpu_mem: charts.exposure.shard0
+      out_buf: exposure
+      cuda_stream: 1
+    - name: cudaOutputData
+      in_buf: raw
+      gpu_mem: charts.qparams.shard0
+      out_buf: qparams
+      cuda_stream: 1
+
+gpu_beamformer_1:
+  kotekan_stage: cudaProcess
+  gpu_id: 0
+  buffer_depth: gpu_buffer_depth
+  in_buffers:
+    raw: network_capture_buf_1
+    missing: mask_buffer_zeros_1
+  out_buffers:
+    intensity: intensity_buf_1
+    qparams: qparams_buf_1
+    exposure: exposure_buf_1
+  commands:
+    - name: cudaInputData
+      in_buf: raw
+      gpu_mem: charts.voltage.shard1
+      cuda_stream: 0
+    - name: cudaInputData
+      in_buf: missing
+      gpu_mem: charts.missing.shard1
+      cuda_stream: 0
+    - name: cudaSyncInput
+    - name: cudaChartsBeamformerCommand
+      input_mode: fine
+      output_format: int8
+      in_buf: raw
+      out_buf: intensity
+      shard_id: 1
+      gpu_mem_voltage: charts.voltage.shard1
+      gpu_mem_intensity: charts.intensity.shard1
+      in_buf_missing: missing
+      mask_shard_id: 1
+      gpu_mem_missing: charts.missing.shard1
+      out_buf_exposure: exposure
+      gpu_mem_exposure: charts.exposure.shard1
+      gpu_mem_quant_params: charts.qparams.shard1
+      out_buf_quant_params: qparams
+      product_descriptor_file: /dev/shm/charts_bf_live/intensity.shard1.product.json
+      # weights_file: /data/beamform/weights/weights_fine_shard1.npy
+      # weights_descriptor: /data/beamform/weights/weights_fine_shard1.json
+      cuda_stream: 2
+    - name: cudaSyncOutput
+    - name: cudaOutputData
+      in_buf: raw
+      gpu_mem: charts.intensity.shard1
+      out_buf: intensity
+      cuda_stream: 1
+    - name: cudaOutputData
+      in_buf: raw
+      gpu_mem: charts.exposure.shard1
+      out_buf: exposure
+      cuda_stream: 1
+    - name: cudaOutputData
+      in_buf: raw
+      gpu_mem: charts.qparams.shard1
+      out_buf: qparams
+      cuda_stream: 1
+
+##########################################################################################
+# Writers (one frame per file; Kotekan exits after run_frames files on each writer)
+##########################################################################################
+write_intensity_0:
+  kotekan_stage: rawFileWrite
+  in_buf: intensity_buf_0
+  base_dir: *output_dir
+  file_name: intensity.shard0
+  file_ext: bin
+  prefix_hostname: false
+  num_frames_per_file: 1
+  exit_after_n_files: run_frames
+
+write_qparams_0:
+  kotekan_stage: rawFileWrite
+  in_buf: qparams_buf_0
+  base_dir: *output_dir
+  file_name: qparams.shard0
+  file_ext: bin
+  prefix_hostname: false
+  num_frames_per_file: 1
+  exit_after_n_files: run_frames
+
+write_exposure_0:
+  kotekan_stage: rawFileWrite
+  in_buf: exposure_buf_0
+  base_dir: *output_dir
+  file_name: exposure.shard0
+  file_ext: bin
+  prefix_hostname: false
+  num_frames_per_file: 1
+  exit_after_n_files: run_frames
+
+write_intensity_1:
+  kotekan_stage: rawFileWrite
+  in_buf: intensity_buf_1
+  base_dir: *output_dir
+  file_name: intensity.shard1
+  file_ext: bin
+  prefix_hostname: false
+  num_frames_per_file: 1
+  exit_after_n_files: run_frames
+
+write_qparams_1:
+  kotekan_stage: rawFileWrite
+  in_buf: qparams_buf_1
+  base_dir: *output_dir
+  file_name: qparams.shard1
+  file_ext: bin
+  prefix_hostname: false
+  num_frames_per_file: 1
+  exit_after_n_files: run_frames
+
+write_exposure_1:
+  kotekan_stage: rawFileWrite
+  in_buf: exposure_buf_1
+  base_dir: *output_dir
+  file_name: exposure.shard1
+  file_ext: bin
+  prefix_hostname: false
+  num_frames_per_file: 1
+  exit_after_n_files: run_frames
