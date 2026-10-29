@@ -3,10 +3,12 @@
 #include "cudaChartsBeamformer.hpp"
 #include "chartsMetadata.hpp"
 #include "chartsPacketLoss.hpp"
+#include "chartsWeightsNpy.hpp"
 #include "cudaUtils.hpp"
 #include "kotekanLogging.hpp"
 
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <memory>
 #include <optional>
@@ -41,6 +43,8 @@ public:
     std::size_t output_bytes = 0;
     bool packet_loss_enabled = false;
     std::size_t exposure_bytes = 0;
+    std::string weights_summary; // set for .npy weights, logged by the command
+    bool legacy_bin_weights = false;
 
     ComplexFloat* device_weights = nullptr;
     std::uint8_t* device_history_samples = nullptr;
@@ -133,14 +137,48 @@ public:
         if (!weights_file.empty()) {
             const std::size_t expected_count =
                 beamform_dims.n_beams * beamform_dims.n_freq * beamform_dims.n_ant;
-            host_weights.resize(expected_count);
-            std::ifstream in(weights_file, std::ios::binary);
-            require(bool(in), "cannot open weights_file");
-            in.read(reinterpret_cast<char*>(host_weights.data()),
-                    static_cast<std::streamsize>(expected_count * sizeof(ComplexFloat)));
-            require(in.gcount()
-                        == static_cast<std::streamsize>(expected_count * sizeof(ComplexFloat)),
-                    "weights_file byte size mismatch");
+            const bool is_npy = weights_file.size() > 4
+                                && weights_file.compare(weights_file.size() - 4, 4, ".npy") == 0;
+            if (is_npy) {
+                // Combined gain-correction and steering coefficients from
+                // charts/scripts/build_beamformer_weights.py. A descriptor is required.
+                const NpyWeightsExpectation expect{
+                    mode == BeamformerInputMode::ChannelizedFine ? "fine" : "coarse", shard_id,
+                    beamform_dims.n_beams, beamform_dims.n_freq, beamform_dims.n_ant};
+                const std::string descriptor_file = cfg.get_default<std::string>(
+                    name, "weights_descriptor",
+                    weights_file.substr(0, weights_file.size() - 4) + ".json");
+                nlohmann::json descriptor;
+                try {
+                    std::ifstream din(descriptor_file);
+                    require(bool(din), "cannot open weights_descriptor");
+                    din >> descriptor;
+                    const NpyWeightsInfo info = validate_weights_descriptor(descriptor, expect);
+                    check_descriptor_frequency(
+                        descriptor,
+                        shard_frequencies_hz(mode, shard_id, freq_zero_hz, freq_step_hz),
+                        freq_zero_hz, freq_step_hz);
+                    const auto bytes = read_whole_file(weights_file);
+                    host_weights = parse_npy_complex64(bytes, expect);
+                    check_npy_sha256(bytes, info.sha256);
+                    weights_summary = fmt::format(
+                        "{} shard {} {}: calibrated={} flagged_channel_antennas={} sha256={} "
+                        "note='{}'",
+                        weights_file, shard_id, expect.mode, info.calibrated,
+                        info.flagged_channel_antennas, info.sha256, info.calibration_note);
+                } catch (const nlohmann::json::exception& e) {
+                    throw std::invalid_argument(std::string("weights_descriptor: ") + e.what());
+                }
+            } else {
+                // Legacy raw complex64 payload: the size must match exactly (a .npy renamed
+                // to .bin or a file for another mode/shard is rejected).
+                const auto bytes = read_whole_file(weights_file);
+                require(bytes.size() == expected_count * sizeof(ComplexFloat),
+                        "weights_file byte size mismatch");
+                host_weights.resize(expected_count);
+                std::memcpy(host_weights.data(), bytes.data(), bytes.size());
+                legacy_bin_weights = true;
+            }
             host_weights = repack_weights_to_tiled(host_weights, beamform_dims);
         } else {
             const auto positions = default_positions(n_ant, spacing_m);
@@ -195,6 +233,11 @@ public:
         voltage_name(cfg.get_default<std::string>(name, "gpu_mem_voltage", "voltage")),
         intensity_name(cfg.get_default<std::string>(name, "gpu_mem_intensity", "intensity")) {
         require(bool(state), "missing chartsBeamformerState");
+        if (inst == 0 && !state->weights_summary.empty())
+            INFO("CHARTS weights loaded from .npy: {:s}", state->weights_summary);
+        if (inst == 0 && state->legacy_bin_weights)
+            WARN("CHARTS weights loaded from a raw .bin: no descriptor, version or SHA-256 "
+                 "check; prefer the .npy produced by build_beamformer_weights.py");
         require(voltage_name != intensity_name,
                 "gpu_mem_voltage and gpu_mem_intensity must be distinct");
 
