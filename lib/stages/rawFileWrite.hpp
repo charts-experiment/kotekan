@@ -60,6 +60,7 @@ private:
     // Prefix file name with hostname or not
     bool _prefix_hostname;
     uint32_t _skip_frames = 0;
+    uint32_t _write_every_n_frames = 1;
     bool _skip_zero_frames = false;
 };
 

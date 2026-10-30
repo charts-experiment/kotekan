@@ -48,6 +48,8 @@ rawFileWrite::rawFileWrite(Config& config, const std::string& unique_name,
     _prefix_hostname = config.get_default<bool>(unique_name, "prefix_hostname", true);
     _exit_after_n_files = config.get_default<uint32_t>(unique_name, "exit_after_n_files", 0);
     _skip_frames = config.get_default<uint32_t>(unique_name, "skip_frames", 0);
+    _write_every_n_frames =
+        std::max<uint32_t>(1, config.get_default<uint32_t>(unique_name, "write_every_n_frames", 1));
     _skip_zero_frames = config.get_default<bool>(unique_name, "skip_zero_frames", false);
     // Opt-in escape from the NDArray refusal below. The refusal exists because the frame
     // descriptor is set dynamically and is not written to the file, so a reader cannot
@@ -69,6 +71,7 @@ void rawFileWrite::main_thread() {
     uint32_t frame_id = 0;
     uint32_t frame_ctr = 0;
     uint32_t frames_skipped = 0;
+    uint64_t post_skip_frames = 0;
     uint8_t* frame = nullptr;
     char hostname[64];
     gethostname(hostname, 64);
@@ -132,6 +135,14 @@ void rawFileWrite::main_thread() {
                 frame_id = (frame_id + 1) % buf->num_frames;
                 continue;
             }
+        }
+
+        // Spaced / decimated frame writing: write 1 frame every _write_every_n_frames frames
+        const uint64_t cur_valid_idx = post_skip_frames++;
+        if (_write_every_n_frames > 1 && (cur_valid_idx % _write_every_n_frames) != 0) {
+            buf->mark_frame_empty(unique_name, frame_id);
+            frame_id = (frame_id + 1) % buf->num_frames;
+            continue;
         }
 
         // Start timing the write time
