@@ -860,7 +860,7 @@ cudaEvent_t cudaAntennaMaskCommand::execute(cudaPipelineState& /*pipestate*/,
                     coh_thresh = 1.15f * med_coh;
 
                     const float med_pb = compute_median(all_pb);
-                    effective_dead_th = std::max(current_cfg.dead_power_threshold, med_pb);
+                    effective_dead_th = std::max(current_cfg.dead_power_threshold, 0.80f * med_pb);
                 }
             }
         }
