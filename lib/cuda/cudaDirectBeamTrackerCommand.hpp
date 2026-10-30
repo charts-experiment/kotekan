@@ -145,6 +145,7 @@ private:
     // Complex antenna gains (charts-utils .npy, v_obs = g v); empty: no calibration
     std::string _gains_file;
     int32_t _gains_first_channel = 0;
+    std::vector<int> _gains_antennas;
 
     // Power reduction buffers
     float* _d_beam_power = nullptr;

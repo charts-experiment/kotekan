@@ -112,7 +112,8 @@ LoadingRef parse_loading_ref(const std::string& name) {
 }
 
 std::vector<cplx> load_gains_npy(const std::string& path, int first_channel, int num_freq,
-                                 int num_elements) {
+                                 int num_elements,
+                                 const std::vector<int>& antenna_subset) {
     std::ifstream in(path, std::ios::binary);
     if (!in)
         throw std::runtime_error("charts_mvdr: cannot open gains file " + path);
@@ -160,22 +161,53 @@ std::vector<cplx> load_gains_npy(const std::string& path, int first_channel, int
     if (std::sscanf(shape.c_str(), " (%ld, %ld%n", &rows, &cols, &used) != 2
         || shape.compare(used, 1, ")") != 0)
         throw std::runtime_error("charts_mvdr: gains must be a 2D array (n_freq, n_ant): " + path);
-    if (cols != num_elements)
-        throw std::runtime_error("charts_mvdr: gains file has a different number of elements: "
-                                 + path);
+
+    std::vector<int> col_map;
+    if (cols == num_elements) {
+        if (!antenna_subset.empty() && static_cast<long>(antenna_subset.size()) == cols) {
+            col_map = antenna_subset;
+        } else {
+            col_map.resize(cols);
+            for (long c = 0; c < cols; ++c)
+                col_map[c] = static_cast<int>(c);
+        }
+    } else if (!antenna_subset.empty() && static_cast<long>(antenna_subset.size()) == cols) {
+        col_map = antenna_subset;
+    } else if (antenna_subset.empty() && cols == 4 && num_elements == 64) {
+        col_map = {0, 5, 32, 37};
+    } else {
+        throw std::runtime_error("charts_mvdr: gains file " + path + " has " + std::to_string(cols)
+                                 + " columns, expected " + std::to_string(num_elements)
+                                 + " or matching antenna_subset of size "
+                                 + std::to_string(antenna_subset.size()));
+    }
+
+    for (int ant : col_map) {
+        if (ant < 0 || ant >= num_elements)
+            throw std::runtime_error("charts_mvdr: antenna index " + std::to_string(ant)
+                                     + " in col_map out of range [0, "
+                                     + std::to_string(num_elements) + ") for gains file " + path);
+    }
+
     if (first_channel < 0 || first_channel + num_freq > rows)
         throw std::runtime_error("charts_mvdr: gains file does not cover the channels: " + path);
-    std::vector<cplx> out(static_cast<std::size_t>(num_freq) * num_elements);
+
+    std::vector<cplx> out(static_cast<std::size_t>(num_freq) * num_elements, cplx(0.0, 0.0));
     in.seekg(static_cast<std::streamoff>(first_channel) * cols * bytes, std::ios::cur);
-    for (auto& v : out) {
-        if (bytes == 8) {
-            float re_im[2];
-            in.read(reinterpret_cast<char*>(re_im), 8);
-            v = cplx(re_im[0], re_im[1]);
-        } else {
-            double re_im[2];
-            in.read(reinterpret_cast<char*>(re_im), 16);
-            v = cplx(re_im[0], re_im[1]);
+    for (int f = 0; f < num_freq; ++f) {
+        for (long c = 0; c < cols; ++c) {
+            cplx val;
+            if (bytes == 8) {
+                float re_im[2];
+                in.read(reinterpret_cast<char*>(re_im), 8);
+                val = cplx(re_im[0], re_im[1]);
+            } else {
+                double re_im[2];
+                in.read(reinterpret_cast<char*>(re_im), 16);
+                val = cplx(re_im[0], re_im[1]);
+            }
+            const int ant = col_map[c];
+            out[static_cast<std::size_t>(f) * num_elements + ant] = val;
         }
     }
     if (!in)

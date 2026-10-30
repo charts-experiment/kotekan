@@ -52,11 +52,13 @@ struct MvdrParams {
 /// Frame indices k with guard < |k - t| <= half_window inside [0, last_index].
 std::vector<int64_t> window_indices(int64_t t, int64_t last_index, int half_window, int guard);
 
-/// Read complex gains from a NumPy .npy file of shape (n_freq_file, num_elements), dtype
-/// complex64 or complex128, little-endian, C order (charts-utils cal_pipeline_gpu
-/// --save-avg-gains). Returns channels [first_channel, first_channel + num_freq) row-major.
+/// Read complex gains from a NumPy .npy file of shape (n_freq_file, num_elements) or
+/// (n_freq_file, subset_size) with antenna_subset, dtype complex64 or complex128,
+/// little-endian, C order (charts-utils cal_pipeline_gpu --save-avg-gains). Returns channels
+/// [first_channel, first_channel + num_freq) row-major for all num_elements antennas.
 std::vector<cplx> load_gains_npy(const std::string& path, int first_channel, int num_freq,
-                                 int num_elements);
+                                 int num_elements,
+                                 const std::vector<int>& antenna_subset = {});
 
 /// Logical antenna of each correlator element: e (ascending) or n - 1 - e (descending, the
 /// order of CHARTS baseband frames and the cudaDirectBeamTracker default).

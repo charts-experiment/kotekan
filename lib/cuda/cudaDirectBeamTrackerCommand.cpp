@@ -190,6 +190,7 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
     _gains_first_channel = config.get_default<int>(
         unique_name, "gains_first_channel",
         static_cast<int>(std::lround((_freq_start_hz - 300.0e6) / _freq_step_hz)));
+    _gains_antennas = config.get_default<std::vector<int>>(unique_name, "gains_antennas", {});
 
     std::shared_ptr<TrackerGroup> group;
     {
@@ -925,7 +926,8 @@ void cudaDirectBeamTrackerCommand::upload_calibration_gains(const DirectBeamTrac
     // y = sum_e w_e v_e, so they need the corrector 1 / g of each element (v_obs = g v);
     // non-finite or zero gains drop the element (corrector 0).
     const auto gains = charts_mvdr::load_gains_npy(_gains_file, _gains_first_channel,
-                                                   _num_local_freq, _num_antennas);
+                                                   _num_local_freq, _num_antennas,
+                                                   _gains_antennas);
     std::vector<int> elem_to_ant(static_cast<std::size_t>(_num_elements));
     for (int r = 0; r < _num_elements; ++r)
         elem_to_ant[r] = static_cast<int>(cfg.raw_elem_to_physical_ant(r));

@@ -1,0 +1,511 @@
+---
+# ==============================================================================
+# CHARTS 64-Antenna DPDK -> 4-Beam Direct Tracker: Solar Transit "Traffic Cameras"
+# ==============================================================================
+# - Observation objective: Test the Direct Beam Tracker and calibrated gains with
+#   the Sun over a 3-hour transit window (~12:00 to 15:00 CLST).
+# - Strategy: Stationary "Traffic Camera" beams. Instead of dynamically tracking the
+#   Sun, 4 stationary beams are placed at fixed local sky coordinates (l0, m0) that
+#   the Sun transits consecutively.
+# - Array Layout: Physical East-West baseline with 4 calibrated antennas:
+#     * Ant 0:  x = 0.0 m (reference)
+#     * Ant 5:  x = 0.6 m (slot 1)
+#     * Ant 32: x = 3.6 m (slot 6)
+#     * Ant 37: x = 4.2 m (slot 7)
+# - Default Calibration Gains: charts/config/gains/gains_sun_transit_1027_interp.npy
+# - Traffic Camera Beams (30 min spacing along the Sun's transit trajectory):
+#     * Beam 0 (12:45 CLST): l0 = +0.1773, m0 = +0.3247, n0 = 0.9290 (Alt 68.3 deg)
+#     * Beam 1 (13:15 CLST): l0 = +0.0512, m0 = +0.3329, n0 = 0.9416 (Alt 70.3 deg)
+#     * Beam 2 (13:45 CLST): l0 = -0.0757, m0 = +0.3319, n0 = 0.9403 (Alt 70.1 deg)
+#     * Beam 3 (14:15 CLST): l0 = -0.2014, m0 = +0.3218, n0 = 0.9252 (Alt 67.7 deg)
+# - Spaced rawFileWrite (1 frame dumped every 15 minutes to prevent disk overflow):
+#     * write_every_n_frames: 17578 (~15 min cadence @ 51.2 ms/frame)
+#     * exit_after_n_files: 13 (13 files * 330.3 MB/epoch = 4.29 GB total for 3 hours)
+#     * base_dir: /data/tracker/dump_sun_transit
+# ==============================================================================
+
+type: config
+log_level: info
+
+# CPU Thread Affinity (isolates Kotekan host pipeline from DPDK lcores [3, 4, 5])
+cpu_affinity: [6, 7, 8, 9]
+
+# ------------------------------------------------------------------------------
+# Array Dimensions & Sampling Parameters
+# ------------------------------------------------------------------------------
+num_elements: 64                  # 64 Antennas (8x8 physical grid or custom layout)
+n_channels_per_packet: 168        # RFSoC packet channel packing
+local_subbands_per_packet: 2      # 2 subbands per NIC port
+num_local_freq: 336               # 168 * 2 = 336 coarse channels per NIC stream (672 total)
+
+# Timing & Frame Arrival (RFSoC 300 MSPS PFB -> 10/3 us per sample)
+sample_period_s: 3.333333333333e-6
+
+# Frame Batch: 15,360 samples = 51.2 ms per frame
+samples_per_data_set: 15360
+frame_arrival_period: samples_per_data_set * sample_period_s
+bytes_per_dataset: n_channels_per_packet * local_subbands_per_packet * samples_per_data_set
+capture_n_frames: 0               # Continuous streaming; clean exit driven by exit_after_n_files: 13
+
+# Memory & Buffer Management
+buffer_depth: 20                  # Host RAM frame queue depth (~6.6 GB total queue per NIC)
+gpu_buffer_depth: 3               # GPU VRAM frame queue depth (~1.0 GB VRAM per GPU stream)
+
+# Array Geometry & 4-Beam Setup
+spacing_m: 0.6                    # Default spacing (overridden by custom_antenna_positions)
+max_beams: 4                      # 4 concurrent beam slots (Traffic Cameras 0..3)
+initial_active_beams: 4           # All 4 beams active on startup
+sizeof_complex_float: 8           # float2 (4-byte real + 4-byte imag) per formed beam sample
+
+# ------------------------------------------------------------------------------
+# Metadata Pool
+# ------------------------------------------------------------------------------
+main_pool:
+    kotekan_metadata_pool: chartsMetadata
+    num_metadata_objects: buffer_depth * 15
+
+# ------------------------------------------------------------------------------
+# Host Buffer Definitions (Formed Beams Only for Disk Recording)
+# ------------------------------------------------------------------------------
+network_capture_buf_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: bytes_per_dataset * num_elements # ~330.3 MB per frame
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+mask_buffer_zeros_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set
+    numa_node: 0
+    metadata_pool: main_pool
+
+network_capture_buf_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: bytes_per_dataset * num_elements # ~330.3 MB per frame
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+mask_buffer_zeros_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set
+    numa_node: 0
+    metadata_pool: main_pool
+
+# Output Formed Beams Buffer for Stream 0 [time][freq][max_beams=4] of float2
+host_formed_beams_buffer_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float # 165,150,720 B (~165.15 MB)
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+# Output Formed Beams Buffer for Stream 1 [time][freq][max_beams=4] of float2
+host_formed_beams_buffer_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float # 165,150,720 B (~165.15 MB)
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+# ------------------------------------------------------------------------------
+# Network Ingest Stage: DPDK Core (Dual Port)
+# ------------------------------------------------------------------------------
+dpdk:
+    kotekan_stage: dpdkCore
+    lcore_cpu_map: [3, 5]          # Worker lcores 3 and 5 for ports 0 and 1
+    main_lcore_cpu: 4              # Main DPDK coordinator thread
+    lcore_port_map:
+        - [0]                      # lcore 3 handles NIC port 0
+        - [1]                      # lcore 5 handles NIC port 1
+    max_rx_pkt_len: 9000
+    rx_ring_size: 4096
+    num_mbufs: 65536
+    mbuf_data_size: 9216
+
+    handlers:
+        - dpdk_handler: rfsocHandlerShuffle
+          out_buffer: network_capture_buf_0
+          alignment: 15360
+          mask_buf: mask_buffer_zeros_0
+          first_subband: 0
+          coarse_freq_start: 0
+          num_local_freq: 336
+
+        - dpdk_handler: rfsocHandlerShuffle
+          out_buffer: network_capture_buf_1
+          alignment: 15360
+          mask_buf: mask_buffer_zeros_1
+          first_subband: 2
+          coarse_freq_start: 336
+          num_local_freq: 336
+
+# ------------------------------------------------------------------------------
+# Dropped Packet Zeroing Stages
+# ------------------------------------------------------------------------------
+zero_samples_0:
+    kotekan_stage: zeroSamples
+    out_buf: network_capture_buf_0
+    lost_samples_buf: mask_buffer_zeros_0
+    zero_value: 0
+    sample_size: 21504             # num_elements (64) * num_local_freq (336)
+
+zero_samples_1:
+    kotekan_stage: zeroSamples
+    out_buf: network_capture_buf_1
+    lost_samples_buf: mask_buffer_zeros_1
+    zero_value: 0
+    sample_size: 21504             # num_elements (64) * num_local_freq (336)
+
+# ------------------------------------------------------------------------------
+# GPU Direct 4-Beam Tracker & Antenna Health Stages
+# ------------------------------------------------------------------------------
+gpu:
+    profiling: true
+    log_profiling: false
+
+  # Command Pipeline for Stream 0 (Frequencies 0..335, 300.0 - 400.5 MHz)
+    commands_0: &command_list_0
+        - name: cudaInputData
+          in_buf: host_voltage
+          gpu_mem: voltage_0
+        - name: cudaSyncInput
+
+        - name: cudaAntennaMaskCommand
+          gpu_mem_voltage: voltage_0
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          buffer_depth: 3
+          antenna_order: "descending"
+          active_antennas: [0, 5, 32, 37]
+          auto_detect_enabled: false   # Strict mask to the 4 calibrated physical antennas
+          blank_voltages_enabled: false
+          dead_power_threshold: 1.0
+          sat_power_threshold: 80.0
+          clip_fraction_threshold: 0.15
+          min_kurtosis_threshold: 1.2
+          max_kurtosis_threshold: 6.5
+          revival_frames: 1
+
+    # Direct Fused 4-Beam Tracker Kernel (4 Stationary Traffic Cameras)
+        - name: cudaDirectBeamTrackerCommand
+          gpu_mem_voltage: voltage_0
+          gpu_mem_formed_beams: formed_beams_0
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          spacing_m: 0.6
+          antenna_order: "descending"
+          active_antennas: [0, 5, 32, 37]
+          custom_antenna_positions:
+            - [0.0, 0.0, 0.0]  # Ant 0 (x=0.0m)
+            - [0.0, 0.0, 0.0]  # Ant 1
+            - [0.0, 0.0, 0.0]  # Ant 2
+            - [0.0, 0.0, 0.0]  # Ant 3
+            - [0.0, 0.0, 0.0]  # Ant 4
+            - [0.6, 0.0, 0.0]  # Ant 5 (slot 1, x=0.6m)
+            - [0.0, 0.0, 0.0]  # Ant 6
+            - [0.0, 0.0, 0.0]  # Ant 7
+            - [0.0, 0.0, 0.0]  # Ant 8
+            - [0.0, 0.0, 0.0]  # Ant 9
+            - [0.0, 0.0, 0.0]  # Ant 10
+            - [0.0, 0.0, 0.0]  # Ant 11
+            - [0.0, 0.0, 0.0]  # Ant 12
+            - [0.0, 0.0, 0.0]  # Ant 13
+            - [0.0, 0.0, 0.0]  # Ant 14
+            - [0.0, 0.0, 0.0]  # Ant 15
+            - [0.0, 0.0, 0.0]  # Ant 16
+            - [0.0, 0.0, 0.0]  # Ant 17
+            - [0.0, 0.0, 0.0]  # Ant 18
+            - [0.0, 0.0, 0.0]  # Ant 19
+            - [0.0, 0.0, 0.0]  # Ant 20
+            - [0.0, 0.0, 0.0]  # Ant 21
+            - [0.0, 0.0, 0.0]  # Ant 22
+            - [0.0, 0.0, 0.0]  # Ant 23
+            - [0.0, 0.0, 0.0]  # Ant 24
+            - [0.0, 0.0, 0.0]  # Ant 25
+            - [0.0, 0.0, 0.0]  # Ant 26
+            - [0.0, 0.0, 0.0]  # Ant 27
+            - [0.0, 0.0, 0.0]  # Ant 28
+            - [0.0, 0.0, 0.0]  # Ant 29
+            - [0.0, 0.0, 0.0]  # Ant 30
+            - [0.0, 0.0, 0.0]  # Ant 31
+            - [3.6, 0.0, 0.0]  # Ant 32 (slot 6, x=3.6m)
+            - [0.0, 0.0, 0.0]  # Ant 33
+            - [0.0, 0.0, 0.0]  # Ant 34
+            - [0.0, 0.0, 0.0]  # Ant 35
+            - [0.0, 0.0, 0.0]  # Ant 36
+            - [4.2, 0.0, 0.0]  # Ant 37 (slot 7, x=4.2m)
+            - [0.0, 0.0, 0.0]  # Ant 38
+            - [0.0, 0.0, 0.0]  # Ant 39
+            - [0.0, 0.0, 0.0]  # Ant 40
+            - [0.0, 0.0, 0.0]  # Ant 41
+            - [0.0, 0.0, 0.0]  # Ant 42
+            - [0.0, 0.0, 0.0]  # Ant 43
+            - [0.0, 0.0, 0.0]  # Ant 44
+            - [0.0, 0.0, 0.0]  # Ant 45
+            - [0.0, 0.0, 0.0]  # Ant 46
+            - [0.0, 0.0, 0.0]  # Ant 47
+            - [0.0, 0.0, 0.0]  # Ant 48
+            - [0.0, 0.0, 0.0]  # Ant 49
+            - [0.0, 0.0, 0.0]  # Ant 50
+            - [0.0, 0.0, 0.0]  # Ant 51
+            - [0.0, 0.0, 0.0]  # Ant 52
+            - [0.0, 0.0, 0.0]  # Ant 53
+            - [0.0, 0.0, 0.0]  # Ant 54
+            - [0.0, 0.0, 0.0]  # Ant 55
+            - [0.0, 0.0, 0.0]  # Ant 56
+            - [0.0, 0.0, 0.0]  # Ant 57
+            - [0.0, 0.0, 0.0]  # Ant 58
+            - [0.0, 0.0, 0.0]  # Ant 59
+            - [0.0, 0.0, 0.0]  # Ant 60
+            - [0.0, 0.0, 0.0]  # Ant 61
+            - [0.0, 0.0, 0.0]  # Ant 62
+            - [0.0, 0.0, 0.0]  # Ant 63
+          max_beams: 4
+          initial_active_beams: 4
+          buffer_depth: 3
+          time_chunk_size: 256
+          time_unroll: 4
+          beam_tile_size: 4
+          enable_cuda_graph: false
+          gains_file: /home/fpalma/kotekan/charts/config/gains/gains_sun_transit_1027_interp.npy
+          gains_antennas: [0, 5, 32, 37]
+          enable_grid_mode: false
+          grid_step: 0.02
+      # Carén Observatory Site Coordinates
+          site_lat_deg: -33.4211146
+          site_lon_deg: -70.8634710
+          site_alt_m: 458.0
+      # Frequency band for Stream 0 (300.0 - 400.5 MHz)
+          freq_start_hz: 300000000.0
+          freq_step_hz: 300000.0
+      # Stationary Traffic Camera Beams (Stationary Topocentric Coordinates l0, m0)
+      # Beam 0: 12:45 CLST Sun transit point (Alt 68.3 deg, Az 28.6 deg)
+          source_l0: 0.1773
+          source_m0: 0.3247
+      # Beam 1: 13:15 CLST Sun transit point (Alt 70.3 deg, Az 8.8 deg)
+          source_l0_1: 0.0512
+          source_m0_1: 0.3329
+      # Beam 2: 13:45 CLST Sun transit point (Alt 70.1 deg, Az 347.2 deg)
+          source_l0_2: -0.0757
+          source_m0_2: 0.3319
+      # Beam 3: 14:15 CLST Sun transit point (Alt 67.7 deg, Az 328.0 deg)
+          source_l0_3: -0.2014
+          source_m0_3: 0.3218
+
+        - name: cudaSyncOutput
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: formed_beams_0
+          out_buf: host_formed_beams
+
+  # Command Pipeline for Stream 1 (Frequencies 336..671, 400.8 - 501.3 MHz)
+    commands_1: &command_list_1
+        - name: cudaInputData
+          in_buf: host_voltage
+          gpu_mem: voltage_1
+        - name: cudaSyncInput
+
+        - name: cudaAntennaMaskCommand
+          gpu_mem_voltage: voltage_1
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          buffer_depth: 3
+          antenna_order: "descending"
+          active_antennas: [0, 5, 32, 37]
+          auto_detect_enabled: false
+          blank_voltages_enabled: false
+          dead_power_threshold: 1.0
+          sat_power_threshold: 80.0
+          clip_fraction_threshold: 0.15
+          min_kurtosis_threshold: 1.2
+          max_kurtosis_threshold: 6.5
+          revival_frames: 1
+
+    # Direct Fused 4-Beam Tracker Kernel (4 Stationary Traffic Cameras)
+        - name: cudaDirectBeamTrackerCommand
+          gpu_mem_voltage: voltage_1
+          gpu_mem_formed_beams: formed_beams_1
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          spacing_m: 0.6
+          antenna_order: "descending"
+          active_antennas: [0, 5, 32, 37]
+          custom_antenna_positions:
+            - [0.0, 0.0, 0.0]  # Ant 0 (x=0.0m)
+            - [0.0, 0.0, 0.0]  # Ant 1
+            - [0.0, 0.0, 0.0]  # Ant 2
+            - [0.0, 0.0, 0.0]  # Ant 3
+            - [0.0, 0.0, 0.0]  # Ant 4
+            - [0.6, 0.0, 0.0]  # Ant 5 (slot 1, x=0.6m)
+            - [0.0, 0.0, 0.0]  # Ant 6
+            - [0.0, 0.0, 0.0]  # Ant 7
+            - [0.0, 0.0, 0.0]  # Ant 8
+            - [0.0, 0.0, 0.0]  # Ant 9
+            - [0.0, 0.0, 0.0]  # Ant 10
+            - [0.0, 0.0, 0.0]  # Ant 11
+            - [0.0, 0.0, 0.0]  # Ant 12
+            - [0.0, 0.0, 0.0]  # Ant 13
+            - [0.0, 0.0, 0.0]  # Ant 14
+            - [0.0, 0.0, 0.0]  # Ant 15
+            - [0.0, 0.0, 0.0]  # Ant 16
+            - [0.0, 0.0, 0.0]  # Ant 17
+            - [0.0, 0.0, 0.0]  # Ant 18
+            - [0.0, 0.0, 0.0]  # Ant 19
+            - [0.0, 0.0, 0.0]  # Ant 20
+            - [0.0, 0.0, 0.0]  # Ant 21
+            - [0.0, 0.0, 0.0]  # Ant 22
+            - [0.0, 0.0, 0.0]  # Ant 23
+            - [0.0, 0.0, 0.0]  # Ant 24
+            - [0.0, 0.0, 0.0]  # Ant 25
+            - [0.0, 0.0, 0.0]  # Ant 26
+            - [0.0, 0.0, 0.0]  # Ant 27
+            - [0.0, 0.0, 0.0]  # Ant 28
+            - [0.0, 0.0, 0.0]  # Ant 29
+            - [0.0, 0.0, 0.0]  # Ant 30
+            - [0.0, 0.0, 0.0]  # Ant 31
+            - [3.6, 0.0, 0.0]  # Ant 32 (slot 6, x=3.6m)
+            - [0.0, 0.0, 0.0]  # Ant 33
+            - [0.0, 0.0, 0.0]  # Ant 34
+            - [0.0, 0.0, 0.0]  # Ant 35
+            - [0.0, 0.0, 0.0]  # Ant 36
+            - [4.2, 0.0, 0.0]  # Ant 37 (slot 7, x=4.2m)
+            - [0.0, 0.0, 0.0]  # Ant 38
+            - [0.0, 0.0, 0.0]  # Ant 39
+            - [0.0, 0.0, 0.0]  # Ant 40
+            - [0.0, 0.0, 0.0]  # Ant 41
+            - [0.0, 0.0, 0.0]  # Ant 42
+            - [0.0, 0.0, 0.0]  # Ant 43
+            - [0.0, 0.0, 0.0]  # Ant 44
+            - [0.0, 0.0, 0.0]  # Ant 45
+            - [0.0, 0.0, 0.0]  # Ant 46
+            - [0.0, 0.0, 0.0]  # Ant 47
+            - [0.0, 0.0, 0.0]  # Ant 48
+            - [0.0, 0.0, 0.0]  # Ant 49
+            - [0.0, 0.0, 0.0]  # Ant 50
+            - [0.0, 0.0, 0.0]  # Ant 51
+            - [0.0, 0.0, 0.0]  # Ant 52
+            - [0.0, 0.0, 0.0]  # Ant 53
+            - [0.0, 0.0, 0.0]  # Ant 54
+            - [0.0, 0.0, 0.0]  # Ant 55
+            - [0.0, 0.0, 0.0]  # Ant 56
+            - [0.0, 0.0, 0.0]  # Ant 57
+            - [0.0, 0.0, 0.0]  # Ant 58
+            - [0.0, 0.0, 0.0]  # Ant 59
+            - [0.0, 0.0, 0.0]  # Ant 60
+            - [0.0, 0.0, 0.0]  # Ant 61
+            - [0.0, 0.0, 0.0]  # Ant 62
+            - [0.0, 0.0, 0.0]  # Ant 63
+          max_beams: 4
+          initial_active_beams: 4
+          buffer_depth: 3
+          time_chunk_size: 256
+          time_unroll: 4
+          beam_tile_size: 4
+          enable_cuda_graph: false
+          gains_file: /home/fpalma/kotekan/charts/config/gains/gains_sun_transit_1027_interp.npy
+          gains_antennas: [0, 5, 32, 37]
+          enable_grid_mode: false
+          grid_step: 0.02
+      # Carén Observatory Site Coordinates
+          site_lat_deg: -33.4211146
+          site_lon_deg: -70.8634710
+          site_alt_m: 458.0
+      # Frequency band for Stream 1 (400.8 - 501.3 MHz)
+          freq_start_hz: 400800000.0
+          freq_step_hz: 300000.0
+      # Stationary Traffic Camera Beams (Stationary Topocentric Coordinates l0, m0)
+      # Beam 0: 12:45 CLST Sun transit point (Alt 68.3 deg, Az 28.6 deg)
+          source_l0: 0.1773
+          source_m0: 0.3247
+      # Beam 1: 13:15 CLST Sun transit point (Alt 70.3 deg, Az 8.8 deg)
+          source_l0_1: 0.0512
+          source_m0_1: 0.3329
+      # Beam 2: 13:45 CLST Sun transit point (Alt 70.1 deg, Az 347.2 deg)
+          source_l0_2: -0.0757
+          source_m0_2: 0.3319
+      # Beam 3: 14:15 CLST Sun transit point (Alt 67.7 deg, Az 328.0 deg)
+          source_l0_3: -0.2014
+          source_m0_3: 0.3218
+
+        - name: cudaSyncOutput
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: formed_beams_1
+          out_buf: host_formed_beams
+
+stages:
+    gpu_0:
+        kotekan_stage: cudaProcess
+        device: 0
+        cuda_stream_base: 0
+        in_buf:
+            host_voltage: network_capture_buf_0
+        out_buf:
+            host_formed_beams: host_formed_beams_buffer_0
+        gpu_commands: *command_list_0
+
+    gpu_1:
+        kotekan_stage: cudaProcess
+        device: 0
+        cuda_stream_base: 1
+        in_buf:
+            host_voltage: network_capture_buf_1
+        out_buf:
+            host_formed_beams: host_formed_beams_buffer_1
+        gpu_commands: *command_list_1
+
+# ------------------------------------------------------------------------------
+# REST Inspection Stages
+# ------------------------------------------------------------------------------
+inspect_beams_0:
+    kotekan_stage: restInspectFrame
+    in_buf: host_formed_beams_buffer_0
+    len: 4194304
+
+inspect_beams_1:
+    kotekan_stage: restInspectFrame
+    in_buf: host_formed_beams_buffer_1
+    len: 4194304
+
+# ------------------------------------------------------------------------------
+# Spaced Formed Beams Disk Recording Stages (1 frame every 15 min -> 13 files = 3 hours)
+# ------------------------------------------------------------------------------
+raw_file_write_beams_0:
+    kotekan_stage: rawFileWrite
+    in_buf: host_formed_beams_buffer_0
+    base_dir: /data/tracker/dump_sun_transit
+    file_name: formed_beams_sun_traffic_cams_freq0
+    file_ext: bin
+    prefix_hostname: false
+    skip_frames: 20
+    write_every_n_frames: 17578
+    num_frames_per_file: 1
+    exit_after_n_files: 13
+
+raw_file_write_beams_1:
+    kotekan_stage: rawFileWrite
+    in_buf: host_formed_beams_buffer_1
+    base_dir: /data/tracker/dump_sun_transit
+    file_name: formed_beams_sun_traffic_cams_freq1
+    file_ext: bin
+    prefix_hostname: false
+    skip_frames: 20
+    write_every_n_frames: 17578
+    num_frames_per_file: 1
+    exit_after_n_files: 13
