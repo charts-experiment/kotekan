@@ -2,7 +2,7 @@
 # ==============================================================================
 # CHARTS 64-Antenna DPDK -> Direct Beam Tracker, Run A: NO antenna masking
 # ==============================================================================
-# Derived from 64antennas_direct_tracker_record.yaml. Single beam on PKS 2255-282.
+# Derived from 64antennas_direct_tracker_record.yaml. Single beam on Grus Quartet (NGC 7582).
 # cudaAntennaMaskCommand removed: tracker antenna_mask stays all-ones, so all 64
 # inputs are summed. The alive-antenna set is only known to the mask command, so
 # the baseband saved here is raw 64-antenna stream 0 (select alive antennas offline).
@@ -40,7 +40,7 @@ gpu_buffer_depth: 3               # GPU VRAM frame queue depth (~1.0 GB VRAM per
 # Array Geometry & Beam Setup
 spacing_m: 0.6                    # Physical antenna spacing in meters
 max_beams: 1                      # Concurrent beam slots (0)
-initial_active_beams: 1           # Active beams on startup (PKS 2255-282)
+initial_active_beams: 1           # Active beams on startup (Grus Quartet / NGC 7582)
 sizeof_complex_float: 8           # float2 (4-byte real + 4-byte imag) per formed beam sample
 
 # ------------------------------------------------------------------------------
@@ -91,7 +91,7 @@ mask_buffer_zeros_1:
 host_formed_beams_buffer_0:
     kotekan_buffer: standard
     num_frames: buffer_depth
-    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float # ~82.58 MB
+    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float # ~41.29 MB
     numa_node: 0
     metadata_pool: main_pool
     zero_new_frames: true
@@ -101,7 +101,7 @@ host_formed_beams_buffer_0:
 host_formed_beams_buffer_1:
     kotekan_buffer: standard
     num_frames: buffer_depth
-    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float # ~82.58 MB
+    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float # ~41.29 MB
     numa_node: 0
     metadata_pool: main_pool
     zero_new_frames: true
@@ -193,9 +193,9 @@ gpu:
       # Frequency band for Stream 0
           freq_start_hz: 300000000.0 # 300.0 MHz base
           freq_step_hz: 300000.0   # 300 kHz channel spacing
-      # Beam 0: PKS 2255-282 (Piscis Austrinus blazar, transits ~22:10 CLST at 84 deg alt)
-          source_ra_deg: 344.5248
-          source_dec_deg: -27.9725
+      # Beam 0: Grus Quartet / NGC 7582 (PKS 2315-426, transits ~22:30 CLST at 81.1 deg alt)
+          source_ra_deg: 349.5979
+          source_dec_deg: -42.3706
 
         - name: cudaSyncOutput
         - name: cudaOutputData
@@ -234,9 +234,9 @@ gpu:
       # Frequency band for Stream 1 (starts at 300 MHz + 336 * 300 kHz = 400.8 MHz)
           freq_start_hz: 400800000.0 # 400.8 MHz base
           freq_step_hz: 300000.0
-      # Beam 0: PKS 2255-282 (Piscis Austrinus blazar, transits ~22:10 CLST at 84 deg alt)
-          source_ra_deg: 344.5248
-          source_dec_deg: -27.9725
+      # Beam 0: Grus Quartet / NGC 7582 (PKS 2315-426, transits ~22:30 CLST at 81.1 deg alt)
+          source_ra_deg: 349.5979
+          source_dec_deg: -42.3706
 
         - name: cudaSyncOutput
         - name: cudaOutputData

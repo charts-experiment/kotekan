@@ -93,11 +93,15 @@ private:
     AntennaRawStats* _d_raw_stats = nullptr;
     float* _d_antenna_powers = nullptr;
     std::uint32_t* _d_antenna_clips = nullptr;
+    float* _d_chan_power = nullptr;
+    float* _d_chan_coh = nullptr;
     int* _d_bad_antennas = nullptr;
     int* _d_alive_antennas = nullptr;
 
     // Pinned host memory for single-DMA telemetry transfer
     AntennaRawStats* _h_raw_stats = nullptr;
+    float* _h_chan_power = nullptr;
+    float* _h_chan_coh = nullptr;
 
     std::vector<int> _current_bad_indices;
     std::vector<int> _current_alive_indices;

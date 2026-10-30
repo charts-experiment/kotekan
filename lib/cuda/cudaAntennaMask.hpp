@@ -81,6 +81,8 @@ struct AntennaHealthMetrics {
     float clipping_fraction = 0.0f; ///< Fraction of nibbles hitting 4-bit rails (+7 or -8)
     float kurtosis = 2.0f;       ///< Complex kurtosis: E[|z|^4] / (E[|z|^2])^2 (~2.0 for Gaussian)
     float iq_imbalance = 0.0f;   ///< |E[re^2] - E[im^2]| / E[re^2 + im^2]
+    float coherence = 0.0f;      ///< Mean cross-antenna spatial coherence across frequency channels
+    float passband_power = 0.0f; ///< 75th-percentile per-channel passband power (ADC^2)
     float robust_z_score = 0.0f; ///< |P - Median(P)| / (1.4826 * MAD)
     std::uint32_t clipped_count = 0; ///< Absolute count of clipped nibbles in frame
     AntennaHealthStatus status = AntennaHealthStatus::HEALTHY;
@@ -198,6 +200,16 @@ void launch_extract_alive_antennas(const int4x2_t* __restrict__ d_voltages,
                                    const int* __restrict__ d_alive_antennas, int num_to_extract,
                                    int max_alive_antennas, std::size_t total_spectra,
                                    std::size_t n_ant, cudaStream_t stream);
+
+/**
+ * @brief Per-channel passband power and cross-antenna spatial coherence inspection kernel.
+ *        Populates d_chan_power [n_freq * n_elem] and d_chan_coh [n_freq * n_elem].
+ */
+void launch_inspect_channel_coherence(const int4x2_t* __restrict__ d_voltages,
+                                      float* __restrict__ d_chan_power,
+                                      float* __restrict__ d_chan_coh, std::size_t n_time,
+                                      std::size_t n_freq, std::size_t n_elem, cudaStream_t stream,
+                                      bool is_swapped_withoffset = false);
 
 /**
  * @brief Chaos-engineering fault injection kernel (dead=1, rail_sat=2, dc_stuck=3, rfi_spike=4).

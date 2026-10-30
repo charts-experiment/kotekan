@@ -1299,9 +1299,16 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
                 current_frame = charts_meta->get_fpga_seq_num() / _samples_per_data_set;
             }
             if (charts_meta->has_time0_fpga() && charts_meta->has_fpga_seq_num()) {
-                frame_timestamp_utc = charts_meta->get_time0_fpga()
-                                      + static_cast<double>(charts_meta->get_fpga_seq_num()) * _sample_period_s;
-            } else if (charts_meta->has_first_packet_recv_time()) {
+                const std::int64_t t0_raw = charts_meta->get_time0_fpga();
+                if (t0_raw > 1000000000000LL) {
+                    frame_timestamp_utc = static_cast<double>(t0_raw) * 1.0e-6;
+                } else if (!charts_meta->has_first_packet_recv_time()) {
+                    frame_timestamp_utc =
+                        static_cast<double>(t0_raw)
+                        + static_cast<double>(charts_meta->get_fpga_seq_num()) * _sample_period_s;
+                }
+            }
+            if (frame_timestamp_utc <= 0.0 && charts_meta->has_first_packet_recv_time()) {
                 timeval tv = charts_meta->get_first_packet_recv_time();
                 double t_pkt = static_cast<double>(tv.tv_sec) + static_cast<double>(tv.tv_usec) * 1e-6;
                 if (_initial_utc_start_time <= 0.0) _initial_utc_start_time = t_pkt;

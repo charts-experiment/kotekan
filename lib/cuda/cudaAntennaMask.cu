@@ -412,4 +412,154 @@ void launch_inject_faults(
         d_fault_types, total_spectra, n_ant, seed);
 }
 
+template <bool SWAPPED_WITH_OFFSET = false>
+__global__ void __launch_bounds__(64, 4)
+inspect_channel_coherence_kernel(
+    const std::uint8_t* __restrict__ raw_bytes,
+    float* __restrict__ d_chan_power,
+    float* __restrict__ d_chan_coh,
+    std::size_t n_time,
+    std::size_t n_freq,
+    std::size_t n_elem)
+{
+    constexpr int MAX_COH_ANT = 64;
+    constexpr int MAX_COH_SAMPLES = 256;
+
+    __shared__ std::int8_t s_re[MAX_COH_SAMPLES][MAX_COH_ANT];
+    __shared__ std::int8_t s_im[MAX_COH_SAMPLES][MAX_COH_ANT];
+    __shared__ float s_pwr[MAX_COH_ANT];
+    __shared__ float s_kurt[MAX_COH_ANT];
+    __shared__ std::uint8_t s_valid[MAX_COH_ANT];
+    __shared__ int s_valid_t;
+
+    const unsigned int f = blockIdx.x;
+    const unsigned int a = threadIdx.x;
+    if (f >= n_freq) return;
+
+    if (a == 0) {
+        s_valid_t = 0;
+    }
+    __syncthreads();
+
+    const std::size_t target_t = (n_time < static_cast<std::size_t>(MAX_COH_SAMPLES))
+                                     ? n_time
+                                     : static_cast<std::size_t>(MAX_COH_SAMPLES);
+    const std::size_t raw_step = (target_t > 0) ? (n_time / target_t) : 1;
+    const std::size_t t_step = (raw_step > 1) ? raw_step : 1;
+
+    unsigned int sum_p = 0U;
+    unsigned int sum_p2 = 0U;
+
+    for (std::size_t idx = 0; idx < target_t; ++idx) {
+        const std::size_t t = idx * t_step;
+        if (t >= n_time) break;
+
+        int re = 0;
+        int im = 0;
+        if (a < n_elem) {
+            const std::size_t offset = (t * n_freq + f) * n_elem + a;
+            const std::uint32_t byte_val = __ldg(&raw_bytes[offset]);
+            decode_int4x2_fast<SWAPPED_WITH_OFFSET>(byte_val, re, im);
+        }
+
+        const int row_non_zero = __syncthreads_or((re != 0) || (im != 0));
+        if (row_non_zero != 0) {
+            const int slot = s_valid_t;
+            if (slot < MAX_COH_SAMPLES) {
+                if (a < MAX_COH_ANT) {
+                    s_re[slot][a] = static_cast<std::int8_t>(re);
+                    s_im[slot][a] = static_cast<std::int8_t>(im);
+                }
+                const unsigned int p = static_cast<unsigned int>(re * re + im * im);
+                sum_p += p;
+                sum_p2 += p * p;
+            }
+            __syncthreads();
+            if (a == 0 && s_valid_t < MAX_COH_SAMPLES) {
+                s_valid_t++;
+            }
+            __syncthreads();
+        }
+    }
+
+    const int valid_t = s_valid_t;
+    float p_a = 0.0f;
+    float k_a = 0.0f;
+    if (a < n_elem && valid_t > 0) {
+        p_a = static_cast<float>(sum_p) / static_cast<float>(valid_t);
+        const float m4 = static_cast<float>(sum_p2) / static_cast<float>(valid_t);
+        k_a = (p_a > 1e-4f) ? (m4 / (p_a * p_a)) : 0.0f;
+    }
+
+    if (a < MAX_COH_ANT) {
+        s_pwr[a] = p_a;
+        s_kurt[a] = k_a;
+        s_valid[a] = (a < n_elem && p_a > 0.5f && p_a < 12.0f && k_a < 2.8f) ? 1U : 0U;
+    }
+    __syncthreads();
+
+    float max_coh = 0.0f;
+    if (a < n_elem && valid_t > 0 && p_a > 0.5f) {
+        const int lim =
+            (n_elem < static_cast<std::size_t>(MAX_COH_ANT)) ? static_cast<int>(n_elem) : MAX_COH_ANT;
+        for (int b = 0; b < lim; ++b) {
+            if (b == static_cast<int>(a) || s_valid[b] == 0U) continue;
+            // Exclude same-RFSoC ADC-tile interleaving crosstalk partners (|a - b| % 8 == 0)
+            if (n_elem == 64 && ((a / 32U) == (static_cast<unsigned int>(b) / 32U))) {
+                const int diff = (static_cast<int>(a) > b) ? (static_cast<int>(a) - b) : (b - static_cast<int>(a));
+                if ((diff & 7) == 0) continue;
+            }
+
+            int re_ab = 0;
+            int im_ab = 0;
+            for (int t = 0; t < valid_t; ++t) {
+                const int ra = static_cast<int>(s_re[t][a]);
+                const int ia = static_cast<int>(s_im[t][a]);
+                const int rb = static_cast<int>(s_re[t][b]);
+                const int ib = static_cast<int>(s_im[t][b]);
+                re_ab += ra * rb + ia * ib;
+                im_ab += ia * rb - ra * ib;
+            }
+            const float mag = sqrtf(static_cast<float>(re_ab) * static_cast<float>(re_ab)
+                                    + static_cast<float>(im_ab) * static_cast<float>(im_ab));
+            const float denom = static_cast<float>(valid_t) * sqrtf(p_a * s_pwr[b]);
+            if (denom > 1e-6f) {
+                const float coh = mag / denom;
+                if (coh > max_coh) {
+                    max_coh = coh;
+                }
+            }
+        }
+    }
+
+    if (a < n_elem) {
+        const std::size_t out_idx = static_cast<std::size_t>(f) * n_elem + a;
+        d_chan_power[out_idx] = p_a;
+        d_chan_coh[out_idx] = max_coh;
+    }
+}
+
+void launch_inspect_channel_coherence(
+    const int4x2_t* __restrict__ d_voltages,
+    float* __restrict__ d_chan_power,
+    float* __restrict__ d_chan_coh,
+    std::size_t n_time,
+    std::size_t n_freq,
+    std::size_t n_elem,
+    cudaStream_t stream,
+    bool is_swapped_withoffset)
+{
+    if (n_time == 0 || n_freq == 0 || n_elem == 0 || n_elem > 64) return;
+    const auto* raw_bytes = reinterpret_cast<const std::uint8_t*>(d_voltages);
+    const dim3 grid(static_cast<unsigned int>(n_freq));
+    const dim3 block(64U);
+    if (is_swapped_withoffset) {
+        inspect_channel_coherence_kernel<true><<<grid, block, 0, stream>>>(
+            raw_bytes, d_chan_power, d_chan_coh, n_time, n_freq, n_elem);
+    } else {
+        inspect_channel_coherence_kernel<false><<<grid, block, 0, stream>>>(
+            raw_bytes, d_chan_power, d_chan_coh, n_time, n_freq, n_elem);
+    }
+}
+
 } // namespace kotekan
