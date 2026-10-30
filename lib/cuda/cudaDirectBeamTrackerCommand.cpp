@@ -163,6 +163,8 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
         config.get_default<bool>(unique_name, "enable_weight_bislc", false);
     const float bislc_diag =
         config.get_default<float>(unique_name, "bislc_diagonal_loading", 1.0e-4f);
+    const bool coherent_gain_normalization =
+        config.get_default<bool>(unique_name, "coherent_gain_normalization", false);
 
     _gpu_mem_voltage = config.get_default<std::string>(unique_name, "gpu_mem_voltage", "voltage");
     _gpu_mem_formed_beams =
@@ -230,6 +232,7 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
         group->config.taper_pedestal = taper_pedestal;
         group->config.enable_weight_bislc = enable_weight_bislc;
         group->config.bislc_diagonal_loading = bislc_diag;
+        group->config.coherent_gain_normalization = coherent_gain_normalization;
         group->config.spacing_m = _spacing_m;
         group->config.time_chunk_size = _time_chunk_size;
         group->config.time_unroll = _time_unroll;

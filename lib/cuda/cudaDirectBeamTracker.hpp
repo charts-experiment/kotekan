@@ -141,6 +141,10 @@ struct DirectBeamTrackerConfig {
     float taper_pedestal = 0.25f;
     bool enable_weight_bislc = false;
     float bislc_diagonal_loading = 1.0e-4f;
+    // false: sum(w^2) = 1 per pol (noise power independent of the number of active antennas).
+    // true: sum(w) = 1 per pol (a source gives the same beam amplitude for any number of active
+    // antennas; the noise power scales as 1/N). Do not combine with enable_weight_bislc.
+    bool coherent_gain_normalization = false;
 
     std::array<std::uint8_t, MAX_DIRECT_ANTENNAS> antenna_mask;
     std::array<float3, MAX_DIRECT_ANTENNAS> antenna_positions;
@@ -214,7 +218,8 @@ struct DirectBeamTrackerConfig {
         const float rx = std::max(1e-6f, 0.5f * (max_x - min_x));
         const float ry = std::max(1e-6f, 0.5f * (max_y - min_y));
 
-        // 2. Evaluate unnormalized 2D window t_a and accumulate sum(t_a^2) per polarization
+        // 2. Evaluate unnormalized 2D window t_a and accumulate sum(t_a^2) (or sum(t_a) when
+        //    coherent_gain_normalization is set) per polarization
         double sum_sq_pol[2] = {0.0, 0.0};
         std::size_t active_cnt = 0;
 
@@ -232,14 +237,20 @@ struct DirectBeamTrackerConfig {
 
             normalized_taper_weights[r] = ta;
             const std::size_t pol = raw_elem_to_pol(r) & 1U;
-            sum_sq_pol[pol] += static_cast<double>(ta) * static_cast<double>(ta);
+            sum_sq_pol[pol] += coherent_gain_normalization
+                                   ? static_cast<double>(ta)
+                                   : static_cast<double>(ta) * static_cast<double>(ta);
         }
         num_active_antennas = active_cnt;
 
-        // 3. L2 normalization per polarization: guarantees sum_{a in pol} norm_taper[a]^2 == 1.0
-        const float inv_norm_pol[2] = {
-            (sum_sq_pol[0] > 0.0) ? static_cast<float>(1.0 / std::sqrt(sum_sq_pol[0])) : 0.0f,
-            (sum_sq_pol[1] > 0.0) ? static_cast<float>(1.0 / std::sqrt(sum_sq_pol[1])) : 0.0f};
+        // 3. Normalization per polarization: sum_{a in pol} norm_taper[a]^2 == 1.0 (default), or
+        //    sum_{a in pol} norm_taper[a] == 1.0 with coherent_gain_normalization
+        const auto inv_norm = [this](double s) {
+            if (s <= 0.0)
+                return 0.0f;
+            return static_cast<float>(coherent_gain_normalization ? 1.0 / s : 1.0 / std::sqrt(s));
+        };
+        const float inv_norm_pol[2] = {inv_norm(sum_sq_pol[0]), inv_norm(sum_sq_pol[1])};
 
         for (std::size_t r = 0; r < elem_limit; ++r) {
             if (antenna_mask[r] != 0) {
