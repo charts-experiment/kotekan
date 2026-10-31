@@ -24,45 +24,8 @@ _test_charts_dir = os.path.dirname(os.path.abspath(__file__))
 if _test_charts_dir not in sys.path:
     sys.path.insert(0, _test_charts_dir)
 
-from constants import C_LIGHT, DEFAULT_SPACING_M
-
-
-def unpack_int4x2(
-    u8_array: np.ndarray, format_type: str = "twos_complement"
-) -> np.ndarray:
-    """
-    Unpacks 4-bit complex int4x2 values (real and imag nibbles) to complex64.
-    Supports both standard 2's complement and offset-binary ('int4x2_swapped_withoffset').
-    """
-    if "offset" in format_type.lower():
-        # Offset binary where 8 corresponds to 0 (-8..+7 mapped to 0..15)
-        # Note: in swapped_withoffset, real is low nibble, imag is high nibble
-        real = (u8_array & 0x0F).astype(np.float32) - 8.0
-        imag = (u8_array >> 4).astype(np.float32) - 8.0
-    else:
-        # Standard Two's complement sign extension for 4-bit values [-8..+7]
-        r = (u8_array & 0x0F).astype(np.int8)
-        i = (u8_array >> 4).astype(np.int8)
-        r[r >= 8] -= 16
-        i[i >= 8] -= 16
-        real = r.astype(np.float32)
-        imag = i.astype(np.float32)
-
-    return real + 1j * imag
-
-
-def get_antenna_positions(num_antennas: int, spacing_m: float = DEFAULT_SPACING_M):
-    """
-    Returns (pos_x, pos_y) arrays for 64 (8x8) or 256 (16x16) rectangular grid.
-    """
-    if num_antennas <= 64:
-        cols = np.arange(num_antennas) & 7
-        rows = np.arange(num_antennas) >> 3
-    else:
-        cols = np.arange(num_antennas) & 15
-        rows = np.arange(num_antennas) >> 4
-
-    return cols * spacing_m, rows * spacing_m
+from constants import C_LIGHT, DEFAULT_SPACING_M, get_antenna_positions
+from sim.writer import unpack_int4x2
 
 
 def beamform_synthesize(

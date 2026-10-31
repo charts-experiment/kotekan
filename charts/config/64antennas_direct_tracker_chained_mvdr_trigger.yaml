@@ -213,9 +213,9 @@ gpu:
           source_ra_deg_1: 128.8361
           source_dec_deg_1: -45.1764
           # Beam 2: Reference Beam 2 (Fornax A)
-          source_ra_deg_2: 50.6750
-          source_dec_deg_2: -37.2083
-          # Beam 3: Off-Axis Sidelobe/RFI Reference Beam
+          source_ra_deg_2: 50.6738
+          source_dec_deg_2: -37.2082
+          # Beam 3: Off-Axis Sidelobe Reference Beam (Pictor A West Lobe)
           source_ra_deg_3: 79.7500
           source_dec_deg_3: -45.7667
 
@@ -304,8 +304,9 @@ gpu:
           source_dec_deg: -29.0078
           source_ra_deg_1: 128.8361
           source_dec_deg_1: -45.1764
-          source_ra_deg_2: 50.6750
-          source_dec_deg_2: -37.2083
+          source_ra_deg_2: 50.6738
+          source_dec_deg_2: -37.2082
+          # Beam 3: Off-Axis Sidelobe Reference Beam (Pictor A West Lobe)
           source_ra_deg_3: 79.7500
           source_dec_deg_3: -45.7667
 
@@ -352,6 +353,8 @@ gpu:
     gpu_0:
         kotekan_stage: cudaProcess
         gpu_id: 0
+        cuda_stream_base: 0
+        num_cuda_streams: 6
         buffer_depth: 3
         commands: *command_list_0
         in_buffers:
@@ -362,6 +365,8 @@ gpu:
     gpu_1:
         kotekan_stage: cudaProcess
         gpu_id: 0
+        cuda_stream_base: 1
+        num_cuda_streams: 6
         buffer_depth: 3
         commands: *command_list_1
         in_buffers:

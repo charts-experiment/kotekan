@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from .constants import (
     CHARTS_LATITUDE_DEG,
     CHARTS_LONGITUDE_DEG,
+    EARTH_ROT_RATE_RAD_S,
     SAMPLE_RATE_HZ,
 )
 
@@ -76,6 +77,30 @@ CELESTIAL_CATALOG: Dict[str, CelestialSource] = {
         source_type="calibrator",
         description="Giant radio galaxy with bright relativistic jets",
     ),
+    "FornaxA": CelestialSource(
+        name="Fornax A (NGC 1316)",
+        ra_deg=50.6738,
+        dec_deg=-37.2082,
+        flux_jy_400=540.0,
+        source_type="calibrator",
+        description="Giant southern radio galaxy in Fornax cluster",
+    ),
+    "FornaxA_West": CelestialSource(
+        name="Fornax A West Lobe",
+        ra_deg=50.3583,
+        dec_deg=-37.2082,
+        flux_jy_400=280.0,
+        source_type="calibrator",
+        description="Western synchrotron radio lobe of Fornax A",
+    ),
+    "FornaxA_East": CelestialSource(
+        name="Fornax A East Lobe",
+        ra_deg=50.9750,
+        dec_deg=-37.2082,
+        flux_jy_400=260.0,
+        source_type="calibrator",
+        description="Eastern synchrotron radio lobe of Fornax A",
+    ),
     "PictorA": CelestialSource(
         name="Pictor A",
         ra_deg=79.9572,
@@ -83,6 +108,22 @@ CELESTIAL_CATALOG: Dict[str, CelestialSource] = {
         flux_jy_400=380.0,
         source_type="calibrator",
         description="Powerful FR II radio galaxy in southern sky",
+    ),
+    "PictorA_West": CelestialSource(
+        name="Pictor A West Lobe",
+        ra_deg=79.6000,
+        dec_deg=-45.7788,
+        flux_jy_400=190.0,
+        source_type="calibrator",
+        description="Western relativistic lobe of Pictor A",
+    ),
+    "PictorA_East": CelestialSource(
+        name="Pictor A East Lobe",
+        ra_deg=80.3000,
+        dec_deg=-45.7788,
+        flux_jy_400=190.0,
+        source_type="calibrator",
+        description="Eastern relativistic lobe of Pictor A",
     ),
     "PuppisA": CelestialSource(
         name="Puppis A",
@@ -247,25 +288,37 @@ def datetime_to_julian_date(dt: datetime.datetime) -> float:
     return 2440587.5 + dt.timestamp() / 86400.0
 
 
-def datetime_to_lst_hours(
-    dt: datetime.datetime, longitude_deg: float = CHARTS_LONGITUDE_DEG,
-) -> float:
-    """Computes Local Sidereal Time (LST) in hours.
-
-    Mathematically identical to Kotekan C++ astrometry formula in:
-      - lib/cuda/cudaBeamTrackerCommand.cpp
-      - lib/cuda/cudaDirectBeamTrackerCommand.cpp
-    """
-    unix_s = dt.timestamp()
+def unix_to_gmst_hours(unix_s: float) -> float:
+    """Computes Greenwich Mean Sidereal Time (GMST) in hours from Unix timestamp."""
     d = unix_s / 86400.0 - 10957.5
     gmst_hours = (18.697374558 + 24.06570982441908 * d) % 24.0
     if gmst_hours < 0.0:
         gmst_hours += 24.0
+    return gmst_hours
 
+
+def unix_to_lst_hours(
+    unix_s: float, longitude_deg: float = CHARTS_LONGITUDE_DEG,
+) -> float:
+    """Computes Local Sidereal Time (LST) in hours from Unix timestamp seconds.
+
+    Mathematically identical to Kotekan C++ astrometry formula in:
+      - lib/cuda/cudaBeamTrackerCommand.cpp
+      - lib/cuda/cudaDirectBeamTrackerCommand.cpp
+      - lib/core/chartsConstants.hpp
+    """
+    gmst_hours = unix_to_gmst_hours(unix_s)
     lst_hours = (gmst_hours + longitude_deg / 15.0) % 24.0
     if lst_hours < 0.0:
         lst_hours += 24.0
     return lst_hours
+
+
+def datetime_to_lst_hours(
+    dt: datetime.datetime, longitude_deg: float = CHARTS_LONGITUDE_DEG,
+) -> float:
+    """Computes Local Sidereal Time (LST) in hours."""
+    return unix_to_lst_hours(dt.timestamp(), longitude_deg)
 
 
 def equatorial_to_horizontal(
@@ -353,8 +406,8 @@ def compute_direction_rates(
     dec_rad = math.radians(dec_deg)
     lat_rad = math.radians(lat_deg)
 
-    # Earth rotation angular velocity: omega = 2*pi / 86164.0905 s (sidereal day)
-    omega = 2.0 * math.pi / 86164.090535
+    # Earth rotation angular velocity (canonical rad/s)
+    omega = EARTH_ROT_RATE_RAD_S
 
     # d(l)/dt = -cos(dec) * cos(ha) * omega
     dl_dt = -math.cos(dec_rad) * math.cos(ha_rad) * omega

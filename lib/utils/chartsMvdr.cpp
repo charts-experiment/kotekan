@@ -256,12 +256,17 @@ std::vector<std::complex<float>> calibration_correctors(const std::vector<cplx>&
             if (a < 0 || a >= num_ant)
                 throw std::invalid_argument("charts_mvdr: element maps outside the gains file");
             const cplx g = gains[static_cast<std::size_t>(f) * num_ant + a];
-            const bool ok = std::isfinite(g.real()) && std::isfinite(g.imag()) && std::abs(g) > 0.0;
-            const cplx v = ok ? 1.0 / g : cplx(0.0, 0.0);
-            if (!ok)
+            const double ag = std::abs(g);
+            const bool ok = std::isfinite(g.real()) && std::isfinite(g.imag()) && std::isnormal(ag)
+                            && (ag > 1e-30);
+            const cplx v = ok ? (1.0 / g) : cplx(0.0, 0.0);
+            const bool v_ok = ok && std::isfinite(static_cast<float>(v.real()))
+                              && std::isfinite(static_cast<float>(v.imag()));
+            if (!v_ok)
                 ++dropped;
             out[static_cast<std::size_t>(f) * n_elem + e] =
-                std::complex<float>(static_cast<float>(v.real()), static_cast<float>(v.imag()));
+                v_ok ? std::complex<float>(static_cast<float>(v.real()), static_cast<float>(v.imag()))
+                     : std::complex<float>(0.0f, 0.0f);
         }
     if (num_dropped)
         *num_dropped = dropped;

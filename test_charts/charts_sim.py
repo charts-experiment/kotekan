@@ -19,6 +19,7 @@ Commands:
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import shutil
@@ -521,8 +522,19 @@ def main():
     add_scenario_arguments(gen_parser)
 
     # Catalog subcommand
-    subparsers.add_parser(
+    cat_parser = subparsers.add_parser(
         "catalog", help="List confirmed targets and transit ephemeris"
+    )
+    cat_parser.add_argument(
+        "--visible-now",
+        action="store_true",
+        help="List only sources currently visible above elevation threshold",
+    )
+    cat_parser.add_argument(
+        "--min-alt",
+        type=float,
+        default=10.0,
+        help="Minimum elevation angle in degrees for visibility (default: 10.0)",
     )
 
     # 3. Reference Library subcommand
@@ -766,23 +778,42 @@ def main():
                 )
 
     elif args.command == "catalog":
-        summary = catalog_transit_summary()
-        print("=" * 105)
-        print(
-            " CHARTS CONFIRMED CELESTIAL TARGETS & TRANSIT EPHEMERIS (SIMBAD-VERIFIED)"
-        )
-        print("=" * 105)
-        print(
-            f" {'Target Label':<28} {'RA (deg)':>9} {'Dec (deg)':>10} {'Transit UTC':>20} {'Transit Loc':>13} {'Max Alt':>8} {'Vis (h)':>8}"
-        )
-        print("-" * 105)
-        for t in summary:
-            utc_str = t["transit_utc"].replace("T", " ")[:19]
+        if getattr(args, "visible_now", False):
+            now_dt = datetime.now(timezone.utc)
+            visible = find_visible_sources(now_dt, min_elevation_deg=args.min_alt)
+            print("=" * 105)
             print(
-                f" {t['label']:<28} {t['ra_deg']:>9.4f} {t['dec_deg']:>10.4f} "
-                f"{utc_str:>20} {t['transit_local']:>13} {t['max_alt_deg']:>6.1f} deg {t['hours_above_mask']:>7.2f}h"
+                f" CHARTS CURRENTLY VISIBLE TARGETS (UTC: {now_dt.strftime('%Y-%m-%d %H:%M:%S')}, Min Alt >= {args.min_alt:.1f}°)"
             )
-        print("=" * 105)
+            print("=" * 105)
+            print(
+                f" {'Target Name':<32} {'RA (deg)':>9} {'Dec (deg)':>10} {'Azimuth':>9} {'Altitude':>10} {'Flux @ 400M':>12}"
+            )
+            print("-" * 105)
+            for s in visible:
+                print(
+                    f" {s['name']:<32} {s['ra_deg']:>9.4f} {s['dec_deg']:>10.4f} "
+                    f"{s['azimuth_deg']:>8.1f}° {s['elevation_deg']:>9.1f}° {s['flux_jy']:>10.1f} Jy"
+                )
+            print("=" * 105)
+        else:
+            summary = catalog_transit_summary()
+            print("=" * 105)
+            print(
+                " CHARTS CONFIRMED CELESTIAL TARGETS & TRANSIT EPHEMERIS (SIMBAD-VERIFIED)"
+            )
+            print("=" * 105)
+            print(
+                f" {'Target Label':<28} {'RA (deg)':>9} {'Dec (deg)':>10} {'Transit UTC':>20} {'Transit Loc':>13} {'Max Alt':>8} {'Vis (h)':>8}"
+            )
+            print("-" * 105)
+            for t in summary:
+                utc_str = t["transit_utc"].replace("T", " ")[:19]
+                print(
+                    f" {t['label']:<28} {t['ra_deg']:>9.4f} {t['dec_deg']:>10.4f} "
+                    f"{utc_str:>20} {t['transit_local']:>13} {t['max_alt_deg']:>6.1f} deg {t['hours_above_mask']:>7.2f}h"
+                )
+            print("=" * 105)
 
     elif args.command == "reference":
         if args.action == "list":

@@ -31,7 +31,7 @@ def create_tracker_gains_yaml(
     gains_first_channel: Optional[int] = None,
     num_elements: int = 64,
     num_local_freq: int = 336,
-    samples_per_data_set: int = 1536,
+    samples_per_data_set: int = 15360,
     freq_start_hz: float = 300.0e6,
     freq_step_hz: float = 300.0e3,
     antenna_order: str = "descending",
@@ -79,7 +79,7 @@ buffer_depth: {buffer_depth}
 sizeof_complex_float: 8
 
 main_pool:
-  kotekan_metadata_pool: chordMetadata
+  kotekan_metadata_pool: chartsMetadata
   num_metadata_objects: 30
 
 network_capture_buf:

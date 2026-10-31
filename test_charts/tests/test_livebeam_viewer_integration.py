@@ -18,6 +18,10 @@ import time
 import urllib.request
 from pathlib import Path
 
+import pytest
+pytest.importorskip("twisted")
+pytest.importorskip("autobahn")
+
 
 def get_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:

@@ -89,6 +89,7 @@ from constants import (
     CHARTS_LONGITUDE_DEG,
     DEFAULT_FREQUENCY_START_MHZ,
     DEFAULT_SPACING_M,
+    EARTH_ROT_RATE_RAD_S,
     FPGA_TIME_RESOLUTION_US,
     LOCAL_FREQUENCY_CHANNELS,
 )
@@ -302,8 +303,8 @@ def simulate_transit_visibilities(
     two_pi = 2.0 * np.pi
     c_inv = 1.0 / C_LIGHT
 
-    # Sidereal rate: Earth rotates at 360 deg / 86164 s = 7.292115e-5 rad/s
-    omega_earth = 7.292115e-5
+    # Sidereal rate (canonical rad/s)
+    omega_earth = EARTH_ROT_RATE_RAD_S
     # Transit drift: l(t) shifts primarily East-West with time
     dl_dt = np.cos(np.radians(target["dec_deg"])) * omega_earth
 

@@ -40,6 +40,7 @@ from constants import (
     DEFAULT_SPACING_M,
     FPGA_TIME_RESOLUTION_S,
     LOCAL_FREQUENCY_CHANNELS,
+    get_antenna_positions as get_antenna_positions_2d,
 )
 from kotekan_tracker_control import KotekanTrackerClient
 
@@ -48,13 +49,8 @@ def get_antenna_positions(
     n_ant: int, spacing_m: float = DEFAULT_SPACING_M
 ) -> np.ndarray:
     """Antenna coordinates matching Kotekan V5 geometry."""
-    if n_ant <= 64:
-        cols = np.arange(n_ant) & 7
-        rows = np.arange(n_ant) >> 3
-    else:
-        cols = np.arange(n_ant) & 15
-        rows = np.arange(n_ant) >> 4
-    return np.column_stack([cols * spacing_m, rows * spacing_m, np.zeros(n_ant)])
+    px, py = get_antenna_positions_2d(n_ant, spacing_m)
+    return np.column_stack([px, py, np.zeros(n_ant)])
 
 
 def generate_replay_raw_input(

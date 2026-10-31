@@ -131,7 +131,8 @@ inline void compute_celestial_trajectory(double ra_deg, double dec_deg, double l
 
     constexpr double DEG_TO_RAD = M_PI / 180.0;
     constexpr double HOURS_TO_RAD = M_PI / 12.0;
-    constexpr double EARTH_ROT_RATE_RAD_S = 7.292115e-5; // rad / s
+    constexpr double EARTH_ROT_RATE_RAD_S =
+        charts::constants::earth_rotation_rate_rad_per_s; // rad / s
 
     const double ha_rad = lst_hours * HOURS_TO_RAD - ra_deg * DEG_TO_RAD;
     const double dec_rad = dec_deg * DEG_TO_RAD;

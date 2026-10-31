@@ -1,3 +1,4 @@
+#include "chartsConstants.hpp"
 #include "cudaBiSLCCommand.hpp"
 
 #include "cudaBiSLC.hpp"
@@ -72,8 +73,10 @@ cudaBiSLCCommand::cudaBiSLCCommand(Config& config, const std::string& unique_nam
     _gpu_mem_cleaned_beams =
         config.get_default<std::string>(unique_name, "gpu_mem_cleaned_beams", "cleaned_beams");
 
-    const double freq_start_hz = config.get_default<double>(unique_name, "freq_start_hz", 300.0e6);
-    const double freq_step_hz = config.get_default<double>(unique_name, "freq_step_hz", 300.0e3);
+    const double freq_start_hz = config.get_default<double>(
+        unique_name, "freq_start_hz", charts::constants::subband0_freq_start_hz);
+    const double freq_step_hz = config.get_default<double>(
+        unique_name, "freq_step_hz", charts::constants::coarse_channel_bw_hz);
 
     _frequencies_hz.resize(static_cast<std::size_t>(_num_local_freq));
     for (int f = 0; f < _num_local_freq; ++f) {

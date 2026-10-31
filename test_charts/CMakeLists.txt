@@ -90,4 +90,12 @@ if(CUDAToolkit_FOUND)
                                                         ${CMAKE_CURRENT_SOURCE_DIR}/../lib/utils/chartsMvdr.cpp)
     target_link_libraries(test_chained_mask_tracker_mvdr_suite PRIVATE CUDA::cudart Threads::Threads)
     target_include_directories(test_chained_mask_tracker_mvdr_suite PRIVATE ${COMMON_INCLUDE_DIRS})
+
+    # 1. Dynamic Gains Loader & Calibration Math Unit Test Suite
+    add_executable(test_phase1_gains_loader test_phase1_gains_loader.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/../lib/utils/chartsMvdr.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/../lib/core/kotekanLogging.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/../lib/core/errors.c)
+    target_link_libraries(test_phase1_gains_loader PRIVATE Threads::Threads)
+    target_include_directories(test_phase1_gains_loader PRIVATE ${COMMON_INCLUDE_DIRS})
 endif()

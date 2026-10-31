@@ -200,7 +200,7 @@ def schedule_random_events(
 
         if ev_type == "frb":
             dm = float(rng.uniform(100.0, 350.0))
-            sweep_s = 4148.8 * dm * (1.0 / (300.0 ** 2) - 1.0 / (400.5 ** 2))
+            sweep_s = K_DM * dm * (1.0 / (300.0 ** 2) - 1.0 / (400.5 ** 2))
             width_ms = float(rng.uniform(1.2, 3.5))
             amp = float(rng.uniform(2.8, 4.5))
             ra_deg = float(rng.uniform(0.0, 360.0))

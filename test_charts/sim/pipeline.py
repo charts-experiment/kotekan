@@ -93,7 +93,7 @@ sizeof_int: 4
 buffer_depth: {buffer_depth}
 
 main_pool:
-  kotekan_metadata_pool: chordMetadata
+  kotekan_metadata_pool: chartsMetadata
   num_metadata_objects: 30
 
 network_capture_buf:
@@ -347,7 +347,7 @@ buffer_depth: {buffer_depth}
 sizeof_complex_float: 8
 
 main_pool:
-  kotekan_metadata_pool: chordMetadata
+  kotekan_metadata_pool: chartsMetadata
   num_metadata_objects: 30
 
 network_capture_buf:
@@ -450,7 +450,7 @@ sizeof_int: 4
 buffer_depth: {buffer_depth}
 
 main_pool:
-  kotekan_metadata_pool: chordMetadata
+  kotekan_metadata_pool: chartsMetadata
   num_metadata_objects: 30
 
 network_capture_buf:

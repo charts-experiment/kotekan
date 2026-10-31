@@ -1,3 +1,4 @@
+#include "chartsConstants.hpp"
 #include "cudaAntennaMaskCommand.hpp"
 
 #include "chartsMetadata.hpp"
@@ -81,13 +82,14 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
         config.get_default<std::string>(unique_name, "gpu_mem_alive_voltages", "");
     _max_alive_antennas = config.get_default<int>(unique_name, "max_alive_antennas", _num_elements);
     _antenna_order = config.get_default<std::string>(unique_name, "antenna_order", "descending");
-    _freq_start_hz = config.get_default<double>(unique_name, "freq_start_hz", 300.0e6);
+    _freq_start_hz = config.get_default<double>(
+        unique_name, "freq_start_hz", charts::constants::subband0_freq_start_hz);
     int default_subband = (_freq_start_hz > 350.0e6) ? 1 : 0;
     if (!config.exists(unique_name, "subband") && !config.exists(unique_name, "freq_start_hz")) {
         if (_gpu_mem_voltage.find("_1") != std::string::npos
             || unique_name.find("_1") != std::string::npos) {
             default_subband = 1;
-            _freq_start_hz = 400.8e6;
+            _freq_start_hz = charts::constants::subband1_freq_start_hz;
         }
     }
     _subband_id = config.get_default<int>(unique_name, "subband", default_subband);
@@ -319,7 +321,7 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
                 } else {
                     nlohmann::json sub;
                     sub["subband"] = 0;
-                    sub["freq_start_hz"] = 300.0e6;
+                    sub["freq_start_hz"] = charts::constants::subband0_freq_start_hz;
                     nlohmann::json act_mask = nlohmann::json::array();
                     nlohmann::json pwr_rms = nlohmann::json::array();
                     nlohmann::json clp_frac = nlohmann::json::array();

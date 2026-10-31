@@ -452,23 +452,25 @@ gpu:
 stages:
     gpu_0:
         kotekan_stage: cudaProcess
-        device: 0
+        gpu_id: 0
         cuda_stream_base: 0
-        in_buf:
+        buffer_depth: 3
+        commands: *command_list_0
+        in_buffers:
             host_voltage: network_capture_buf_0
-        out_buf:
+        out_buffers:
             host_formed_beams: host_formed_beams_buffer_0
-        gpu_commands: *command_list_0
 
     gpu_1:
         kotekan_stage: cudaProcess
-        device: 0
+        gpu_id: 0
         cuda_stream_base: 1
-        in_buf:
+        buffer_depth: 3
+        commands: *command_list_1
+        in_buffers:
             host_voltage: network_capture_buf_1
-        out_buf:
+        out_buffers:
             host_formed_beams: host_formed_beams_buffer_1
-        gpu_commands: *command_list_1
 
 # ------------------------------------------------------------------------------
 # REST Inspection Stages

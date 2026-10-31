@@ -154,7 +154,7 @@ sizeof_int: 4
 buffer_depth: {buffer_depth}
 
 main_pool:
-  kotekan_metadata_pool: chordMetadata
+  kotekan_metadata_pool: chartsMetadata
   num_metadata_objects: {2 * corr_frames + 20}
 
 network_capture_buf:

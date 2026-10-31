@@ -51,11 +51,14 @@ from constants import (
     DEFAULT_FREQUENCY_START_HZ,
     DEFAULT_FREQUENCY_START_MHZ,
     DEFAULT_SPACING_M,
+    EARTH_ROT_RATE_RAD_S,
     FPGA_TIME_RESOLUTION_S,
     FPGA_TIME_RESOLUTION_US,
     LOCAL_FREQUENCY_CHANNELS,
     get_default_charts_h5_path,
+    get_antenna_positions as get_antenna_positions_2d,
 )
+from sim.writer import unpack_int4x2 as unpack_4bit_complex
 
 # Standard Astronomical Radio Sources in the Southern & Equatorial Sky
 ASTRONOMICAL_CATALOG = [
@@ -97,28 +100,12 @@ ASTRONOMICAL_CATALOG = [
 ]
 
 
-def unpack_4bit_complex(u8_array: np.ndarray) -> np.ndarray:
-    """Unpack int4x2_t (4-bit real in bits 0-3, 4-bit imag in bits 4-7) to complex64."""
-    real = (u8_array & 0x0F).astype(np.int8)
-    imag = (u8_array >> 4).astype(np.int8)
-    real[real >= 8] -= 16
-    imag[imag >= 8] -= 16
-    return real.astype(np.float32) + 1j * imag.astype(np.float32)
-
-
 def get_antenna_positions(
     num_antennas: int, spacing_m: float = DEFAULT_SPACING_M
 ) -> np.ndarray:
     """Computes (x, y, z) coordinates for 32, 64, 128, or 256 array layout."""
-    if num_antennas <= 64:
-        cols = np.arange(num_antennas) & 7
-        rows = np.arange(num_antennas) >> 3
-    else:
-        cols = np.arange(num_antennas) & 15
-        rows = np.arange(num_antennas) >> 4
-    return np.column_stack(
-        [cols * spacing_m, rows * spacing_m, np.zeros(num_antennas, dtype=np.float32)]
-    )
+    px, py = get_antenna_positions_2d(num_antennas, spacing_m)
+    return np.column_stack([px, py, np.zeros(num_antennas, dtype=np.float32)])
 
 
 def compute_topocentric_coordinates(
@@ -247,8 +234,8 @@ def simulate_24h_beam_tracker(
     dump_duration_ms = n_time * sample_cadence_us / 1000.0  # 51.2 ms for 15360
     windows_per_dump = n_time // integration_spectra  # 48 windows
 
-    # Sidereal rate: omega_earth = 7.292115e-5 rad/s
-    omega_earth_rad_s = 7.292115e-5
+    # Sidereal rate (canonical rad/s)
+    omega_earth_rad_s = EARTH_ROT_RATE_RAD_S
     # Angular shift per single 3.33 us sample
     angular_shift_per_sample_rad = omega_earth_rad_s * (sample_cadence_us * 1e-6)
     # Angular shift per 320-spectra (1.067 ms) integration window

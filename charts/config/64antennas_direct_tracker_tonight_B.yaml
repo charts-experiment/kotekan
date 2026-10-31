@@ -312,6 +312,8 @@ gpu:
     gpu_0:
         kotekan_stage: cudaProcess
         gpu_id: 0
+        cuda_stream_base: 0
+        num_cuda_streams: 6
         buffer_depth: 3
         commands: *command_list_0
         in_buffers:
@@ -323,6 +325,8 @@ gpu:
     gpu_1:
         kotekan_stage: cudaProcess
         gpu_id: 0
+        cuda_stream_base: 1
+        num_cuda_streams: 6
         buffer_depth: 3
         commands: *command_list_1
         in_buffers:

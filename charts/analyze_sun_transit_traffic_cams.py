@@ -25,9 +25,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
 import numpy as np
 
 # Observational Parameters
@@ -118,12 +122,18 @@ def analyze_traffic_camera_dumps(dump_dir: Path, out_dir: Path) -> dict:
         print(f"No dumps found in {dump_dir}. Check pipeline run status.")
         return {"status": "NO_DATA", "num_epochs": 0}
 
-    epochs: List[EpochDump] = []
-    num_epochs = min(len(f0_files), len(f1_files))
+    f0_by_seq = {p.name.split("_")[-1]: p for p in f0_files}
+    f1_by_seq = {p.name.split("_")[-1]: p for p in f1_files}
+    common_seqs = sorted(set(f0_by_seq.keys()) & set(f1_by_seq.keys()))
 
-    for idx in range(num_epochs):
-        p0 = f0_files[idx]
-        p1 = f1_files[idx]
+    if len(common_seqs) < max(len(f0_files), len(f1_files)):
+        print(f"Warning: dual-stream count mismatch (Stream 0: {len(f0_files)}, Stream 1: {len(f1_files)}). Pairing {len(common_seqs)} synchronized epochs by sequence tag.")
+
+    epochs: List[EpochDump] = []
+
+    for idx, seq in enumerate(common_seqs):
+        p0 = f0_by_seq[seq]
+        p1 = f1_by_seq[seq]
 
         res0 = parse_raw_file_write_frame(p0, STREAM_PAYLOAD_BYTES)
         res1 = parse_raw_file_write_frame(p1, STREAM_PAYLOAD_BYTES)
@@ -165,80 +175,83 @@ def analyze_traffic_camera_dumps(dump_dir: Path, out_dir: Path) -> dict:
     # Total broadband power for each beam vs epoch: mean over frequency -> (N, 4)
     broadband_power = np.array([np.mean(e.mean_power, axis=1) for e in epochs])  # (N, 4)
 
-    # 1. Generate Multi-Beam Transit Light Curve Plot
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    axes = axes.flatten()
+    if HAS_MATPLOTLIB:
+        # 1. Generate Multi-Beam Transit Light Curve Plot
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        axes = axes.flatten()
 
-    colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
-    for b in range(NUM_BEAMS):
-        cam = TRAFFIC_CAMS[b]
-        ax = axes[b]
-        ax.plot(elapsed_hours, broadband_power[:, b], "o-", color=colors[b], linewidth=2, label=f"Beam {b}")
-        peak_idx = np.argmax(broadband_power[:, b])
-        ax.axvline(elapsed_hours[peak_idx], color="r", linestyle="--", alpha=0.7, label=f"Peak Epoch {peak_idx}")
-        ax.set_title(f"{cam['name']}: l={cam['l0']:+.4f}, m={cam['m0']:+.4f}", fontsize=11, fontweight="bold")
-        ax.set_xlabel("Elapsed Time (hours)", fontsize=10)
-        ax.set_ylabel("Broadband Beam Power (arb. linear)", fontsize=10)
-        ax.grid(True, linestyle=":", alpha=0.6)
-        ax.legend(fontsize=9)
+        colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
+        for b in range(NUM_BEAMS):
+            cam = TRAFFIC_CAMS[b]
+            ax = axes[b]
+            ax.plot(elapsed_hours, broadband_power[:, b], "o-", color=colors[b], linewidth=2, label=f"Beam {b}")
+            peak_idx = np.argmax(broadband_power[:, b])
+            ax.axvline(elapsed_hours[peak_idx], color="r", linestyle="--", alpha=0.7, label=f"Peak Epoch {peak_idx}")
+            ax.set_title(f"{cam['name']}: l={cam['l0']:+.4f}, m={cam['m0']:+.4f}", fontsize=11, fontweight="bold")
+            ax.set_xlabel("Elapsed Time (hours)", fontsize=10)
+            ax.set_ylabel("Broadband Beam Power (arb. linear)", fontsize=10)
+            ax.grid(True, linestyle=":", alpha=0.6)
+            ax.legend(fontsize=9)
 
-    plt.tight_layout()
-    lightcurve_path = out_dir / "sun_traffic_cameras_lightcurves.png"
-    plt.savefig(lightcurve_path, dpi=200)
-    plt.close()
-    print(f"Saved light curves to {lightcurve_path}")
+        plt.tight_layout()
+        lightcurve_path = out_dir / "sun_traffic_cameras_lightcurves.png"
+        plt.savefig(lightcurve_path, dpi=200)
+        plt.close()
+        print(f"Saved light curves to {lightcurve_path}")
 
-    # 2. Generate Comparative Transit Envelope Plot
-    plt.figure(figsize=(10, 6))
-    for b in range(NUM_BEAMS):
-        cam = TRAFFIC_CAMS[b]
-        # Normalize to peak for comparative shape inspection
-        p_max = np.max(broadband_power[:, b]) if np.max(broadband_power[:, b]) > 0 else 1.0
-        plt.plot(elapsed_hours, broadband_power[:, b] / p_max, "o-", label=f"{cam['name']}", linewidth=2.5)
+        # 2. Generate Comparative Transit Envelope Plot
+        plt.figure(figsize=(10, 6))
+        for b in range(NUM_BEAMS):
+            cam = TRAFFIC_CAMS[b]
+            # Normalize to peak for comparative shape inspection
+            p_max = np.max(broadband_power[:, b]) if np.max(broadband_power[:, b]) > 0 else 1.0
+            plt.plot(elapsed_hours, broadband_power[:, b] / p_max, "o-", label=f"{cam['name']}", linewidth=2.5)
 
-    plt.title("Solar Transit Traffic Cameras: Comparative Normalized Envelopes", fontsize=12, fontweight="bold")
-    plt.xlabel("Elapsed Time (hours)", fontsize=11)
-    plt.ylabel("Normalized Beam Power (P / P_max)", fontsize=11)
-    plt.grid(True, linestyle="--", alpha=0.5)
-    plt.legend(fontsize=10)
-    plt.tight_layout()
-    comparative_path = out_dir / "sun_traffic_cameras_normalized_comparison.png"
-    plt.savefig(comparative_path, dpi=200)
-    plt.close()
-    print(f"Saved comparative envelopes to {comparative_path}")
+        plt.title("Solar Transit Traffic Cameras: Comparative Normalized Envelopes", fontsize=12, fontweight="bold")
+        plt.xlabel("Elapsed Time (hours)", fontsize=11)
+        plt.ylabel("Normalized Beam Power (P / P_max)", fontsize=11)
+        plt.grid(True, linestyle="--", alpha=0.5)
+        plt.legend(fontsize=10)
+        plt.tight_layout()
+        comparative_path = out_dir / "sun_traffic_cameras_normalized_comparison.png"
+        plt.savefig(comparative_path, dpi=200)
+        plt.close()
+        print(f"Saved comparative envelopes to {comparative_path}")
 
-    # 3. Generate Full-Band Spectrogram Waterfall for each Beam
-    fig, axes = plt.subplots(4, 1, figsize=(12, 12), sharex=True)
-    freqs_mhz = np.linspace(300.0, 501.3, TOTAL_FREQ)
+        # 3. Generate Full-Band Spectrogram Waterfall for each Beam
+        fig, axes = plt.subplots(4, 1, figsize=(12, 12), sharex=True)
+        freqs_mhz = np.linspace(300.0, 501.3, TOTAL_FREQ)
 
-    for b in range(NUM_BEAMS):
-        cam = TRAFFIC_CAMS[b]
-        # Spectrogram: shape (N, TOTAL_FREQ)
-        spec = np.array([e.mean_power[b, :] for e in epochs])
-        # Logarithmic scale (dB relative to median)
-        spec_db = 10.0 * np.log10(np.maximum(spec, 1e-12))
-        med_db = np.median(spec_db)
+        for b in range(NUM_BEAMS):
+            cam = TRAFFIC_CAMS[b]
+            # Spectrogram: shape (N, TOTAL_FREQ)
+            spec = np.array([e.mean_power[b, :] for e in epochs])
+            # Logarithmic scale (dB relative to median)
+            spec_db = 10.0 * np.log10(np.maximum(spec, 1e-12))
+            med_db = np.median(spec_db)
 
-        im = axes[b].imshow(
-            spec_db.T,
-            aspect="auto",
-            origin="lower",
-            extent=[elapsed_hours[0], elapsed_hours[-1], freqs_mhz[0], freqs_mhz[-1]],
-            cmap="viridis",
-            vmin=med_db - 3.0,
-            vmax=med_db + 15.0,
-        )
-        axes[b].set_ylabel("Freq (MHz)", fontsize=10)
-        axes[b].set_title(f"{cam['name']} Full-Band Dynamic Spectrum", fontsize=11, fontweight="bold")
-        cbar = plt.colorbar(im, ax=axes[b], pad=0.01)
-        cbar.set_label("dB", fontsize=9)
+            im = axes[b].imshow(
+                spec_db.T,
+                aspect="auto",
+                origin="lower",
+                extent=[elapsed_hours[0], elapsed_hours[-1], freqs_mhz[0], freqs_mhz[-1]],
+                cmap="viridis",
+                vmin=med_db - 3.0,
+                vmax=med_db + 15.0,
+            )
+            axes[b].set_ylabel("Freq (MHz)", fontsize=10)
+            axes[b].set_title(f"{cam['name']} Full-Band Dynamic Spectrum", fontsize=11, fontweight="bold")
+            cbar = plt.colorbar(im, ax=axes[b], pad=0.01)
+            cbar.set_label("dB", fontsize=9)
 
-    axes[-1].set_xlabel("Elapsed Time (hours)", fontsize=11)
-    plt.tight_layout()
-    waterfall_path = out_dir / "sun_traffic_cameras_spectrograms.png"
-    plt.savefig(waterfall_path, dpi=200)
-    plt.close()
-    print(f"Saved spectrograms to {waterfall_path}")
+        axes[-1].set_xlabel("Elapsed Time (hours)", fontsize=11)
+        plt.tight_layout()
+        waterfall_path = out_dir / "sun_traffic_cameras_spectrograms.png"
+        plt.savefig(waterfall_path, dpi=200)
+        plt.close()
+        print(f"Saved spectrograms to {waterfall_path}")
+    else:
+        print("Note: matplotlib not found; skipped image generation (lightcurves, envelopes, spectrograms).")
 
     # Produce structured report
     report = {

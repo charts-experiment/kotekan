@@ -223,6 +223,90 @@ class KotekanTrackerClient:
         payload = {"active_elements": active_elements}
         return self._post("/beam_tracker/set_antenna_mask", payload)
 
+    def set_taper(
+        self,
+        taper_type: str = "boxcar",
+        taper_pedestal: float = 1.0,
+        enable_weight_bislc: bool = False,
+        bislc_diagonal_loading: float = 1e-3,
+    ) -> str:
+        """Configure spatial windowing / taper and fused weight-space BiSLC unmixing."""
+        payload = {
+            "taper_type": str(taper_type),
+            "taper_pedestal": float(taper_pedestal),
+            "enable_weight_bislc": bool(enable_weight_bislc),
+            "bislc_diagonal_loading": float(bislc_diagonal_loading),
+        }
+        return self._post("/beam_tracker/set_taper", payload)
+
+    def get_bislc_status(self) -> Dict[str, Any]:
+        """Query /bislc/status for GPU-inverted beam unmixing metrics."""
+        return self._get("/bislc/status")
+
+    def enable_bislc(
+        self, enabled: bool = True, diagonal_loading: Optional[float] = None
+    ) -> str:
+        """Enable or disable BiSLC beam unmixing stage."""
+        msg = self._post("/bislc/enable", {"enabled": bool(enabled)})
+        if diagonal_loading is not None:
+            self._post(
+                "/bislc/set_diagonal_loading",
+                {"diagonal_loading": float(diagonal_loading)},
+            )
+        return msg
+
+    def get_transient_trigger_status(self) -> Dict[str, Any]:
+        """Query /transient_trigger/status for SK and cross-correlation counters."""
+        return self._get("/transient_trigger/status")
+
+    def set_transient_trigger_thresholds(
+        self,
+        sk_threshold: Optional[float] = None,
+        rfi_threshold: Optional[float] = None,
+        min_flagged_channels: Optional[int] = None,
+        cooldown_frames: Optional[int] = None,
+    ) -> str:
+        """Update live transient trigger thresholds."""
+        payload: Dict[str, Any] = {}
+        if sk_threshold is not None:
+            payload["sk_threshold"] = float(sk_threshold)
+        if rfi_threshold is not None:
+            payload["rfi_threshold"] = float(rfi_threshold)
+        if min_flagged_channels is not None:
+            payload["min_flagged_channels"] = int(min_flagged_channels)
+        if cooldown_frames is not None:
+            payload["cooldown_frames"] = int(cooldown_frames)
+        return self._post("/transient_trigger/set_thresholds", payload)
+
+    def get_telemetry(self) -> Dict[str, Any]:
+        """Query /direct_beam_tracker/telemetry (or /direct_tracker/telemetry)."""
+        try:
+            return self._get("/direct_beam_tracker/telemetry")
+        except Exception:
+            return self._get("/direct_tracker/telemetry")
+
+    def get_beam_power(self) -> Dict[str, Any]:
+        """Query /beam_tracker/beam_power for detected beam power across channels."""
+        try:
+            return self._get("/beam_tracker/beam_power")
+        except Exception:
+            return self._get("/direct_tracker/beam_power")
+
+    def get_targets(self) -> Dict[str, Any]:
+        """Query /beam_tracker/targets for active beam pointing directions."""
+        try:
+            return self._get("/beam_tracker/targets")
+        except Exception:
+            return self._get("/direct_tracker/targets")
+
+    def set_subframe_interpolation(self, enabled: bool = True) -> str:
+        """Enable or disable subframe phase interpolation."""
+        payload = {"enabled": bool(enabled)}
+        try:
+            return self._post("/beam_tracker/set_interpolation", payload)
+        except Exception:
+            return self._post("/direct_tracker/set_interpolation", payload)
+
 
 def render_ascii_skymap(trajectories: List[Dict[str, Any]], active_beams: int) -> str:
     """Render a 2D ASCII hemisphere sky map with beam positions."""
@@ -982,6 +1066,93 @@ def main():
         "reset-mask", help="Reset all antenna masks to active (/antenna_mask/reset)"
     )
 
+    # Taper & Fused BiSLC control command
+    p_taper = subparsers.add_parser(
+        "taper", help="Configure spatial windowing / taper and fused weight-space BiSLC"
+    )
+    p_taper.add_argument(
+        "--type",
+        choices=["boxcar", "hamming", "hann", "blackman", "gaussian"],
+        default="boxcar",
+        help="Window function type (default: boxcar)",
+    )
+    p_taper.add_argument(
+        "--pedestal",
+        type=float,
+        default=1.0,
+        help="Taper edge pedestal ratio (0.0=full taper, 1.0=boxcar)",
+    )
+    p_taper.add_argument(
+        "--enable-weight-bislc",
+        action="store_true",
+        help="Enable fused weight-space BiSLC unmixing",
+    )
+    p_taper.add_argument(
+        "--diag-loading",
+        type=float,
+        default=1e-3,
+        help="Diagonal loading regularizer for BiSLC inversion",
+    )
+
+    # BiSLC unmixing stage command
+    p_bislc = subparsers.add_parser("bislc", help="Query or control GPU BiSLC stage")
+    p_bislc.add_argument(
+        "--status", action="store_true", help="Print /bislc/status JSON"
+    )
+    p_bislc.add_argument(
+        "--enable", action="store_true", help="Enable BiSLC beam unmixing"
+    )
+    p_bislc.add_argument(
+        "--disable", action="store_true", help="Disable BiSLC beam unmixing"
+    )
+    p_bislc.add_argument(
+        "--diag-loading",
+        type=float,
+        default=None,
+        help="Set diagonal loading value",
+    )
+
+    # Transient trigger command
+    p_trig = subparsers.add_parser(
+        "trigger", help="Query or control GPU transient trigger stage"
+    )
+    p_trig.add_argument(
+        "--status", action="store_true", help="Print /transient_trigger/status"
+    )
+    p_trig.add_argument(
+        "--sk-threshold", type=float, default=None, help="Spectral Kurtosis threshold"
+    )
+    p_trig.add_argument(
+        "--rfi-threshold", type=float, default=None, help="Inter-beam cross-corr threshold"
+    )
+    p_trig.add_argument(
+        "--min-channels", type=int, default=None, help="Minimum flagged channels"
+    )
+    p_trig.add_argument(
+        "--cooldown", type=int, default=None, help="Cooldown frames after trigger"
+    )
+
+    # Telemetry command
+    subparsers.add_parser(
+        "telemetry", help="Query structured live telemetry (/direct_beam_tracker/telemetry)"
+    )
+
+    # Beam power command
+    subparsers.add_parser(
+        "beam-power", help="Query detected beam power across channels (/beam_tracker/beam_power)"
+    )
+
+    # Subframe interpolation command
+    p_interp = subparsers.add_parser(
+        "interpolation", help="Enable or disable subframe phase interpolation"
+    )
+    p_interp.add_argument(
+        "--enable", action="store_true", help="Enable subframe phase interpolation"
+    )
+    p_interp.add_argument(
+        "--disable", action="store_true", help="Disable subframe phase interpolation"
+    )
+
     args = parser.parse_args()
     client = KotekanTrackerClient(host=args.host, port=args.port)
 
@@ -1053,6 +1224,83 @@ def main():
             freq_step_mhz=args.freq_step,
             bins=args.bins,
         )
+    elif args.command == "taper":
+        try:
+            resp = client.set_taper(
+                taper_type=args.type,
+                taper_pedestal=args.pedestal,
+                enable_weight_bislc=args.enable_weight_bislc,
+                bislc_diagonal_loading=args.diag_loading,
+            )
+            print(f"Success: {resp}")
+        except Exception as e:
+            print(f"[ERROR] Failed to set taper: {e}")
+    elif args.command == "bislc":
+        try:
+            if args.enable:
+                resp = client.enable_bislc(True, args.diag_loading)
+                print(f"Success: {resp}")
+            elif args.disable:
+                resp = client.enable_bislc(False, args.diag_loading)
+                print(f"Success: {resp}")
+            elif args.diag_loading is not None:
+                resp = client._post(
+                    "/bislc/set_diagonal_loading",
+                    {"diagonal_loading": float(args.diag_loading)},
+                )
+                print(f"Success: {resp}")
+            else:
+                st = client.get_bislc_status()
+                print(json.dumps(st, indent=2))
+        except Exception as e:
+            print(f"[ERROR] Failed to query/control BiSLC: {e}")
+    elif args.command == "trigger":
+        try:
+            if any(
+                x is not None
+                for x in [
+                    args.sk_threshold,
+                    args.rfi_threshold,
+                    args.min_channels,
+                    args.cooldown,
+                ]
+            ):
+                resp = client.set_transient_trigger_thresholds(
+                    sk_threshold=args.sk_threshold,
+                    rfi_threshold=args.rfi_threshold,
+                    min_flagged_channels=args.min_channels,
+                    cooldown_frames=args.cooldown,
+                )
+                print(f"Success: {resp}")
+            else:
+                st = client.get_transient_trigger_status()
+                print(json.dumps(st, indent=2))
+        except Exception as e:
+            print(f"[ERROR] Failed to query/control trigger: {e}")
+    elif args.command == "telemetry":
+        try:
+            tel = client.get_telemetry()
+            print(json.dumps(tel, indent=2))
+        except Exception as e:
+            print(f"[ERROR] Failed to query telemetry: {e}")
+    elif args.command == "beam-power":
+        try:
+            bp = client.get_beam_power()
+            print(json.dumps(bp, indent=2))
+        except Exception as e:
+            print(f"[ERROR] Failed to query beam power: {e}")
+    elif args.command == "interpolation":
+        try:
+            if args.enable:
+                resp = client.set_subframe_interpolation(True)
+                print(f"Success: {resp}")
+            elif args.disable:
+                resp = client.set_subframe_interpolation(False)
+                print(f"Success: {resp}")
+            else:
+                print("Specify --enable or --disable")
+        except Exception as e:
+            print(f"[ERROR] Failed to set interpolation: {e}")
     elif args.command == "interactive":
         interactive_mode(client)
 

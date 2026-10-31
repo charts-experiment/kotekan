@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib
 import logging
 import math
+import os
 from pathlib import Path
 import sys
 from typing import Any, Dict, List, Tuple
@@ -84,6 +85,7 @@ C_LIGHT: float = float(_get_external("C_LIGHT", 299_792_458.0))
 SPEED_OF_LIGHT: float = C_LIGHT
 SPEED_OF_LIGHT_M_PER_S: float = C_LIGHT
 K_BOLTZMANN: float = 1.380649e-23
+EARTH_ROT_RATE_RAD_S: float = 7.292115e-5
 
 
 # ---------------------------------------------------------------------------
@@ -189,3 +191,15 @@ def get_frequency_channels_mhz(
 ) -> np.ndarray:
     """Returns array of channel center frequencies in MHz."""
     return f_start_mhz + np.arange(num_channels, dtype=np.float64) * df_mhz
+
+
+def get_default_charts_h5_path() -> Path:
+    """Returns default path to CHARTS virtual baseband HDF5 file."""
+    env_path = os.environ.get("CHARTS_DEFAULT_H5")
+    if env_path:
+        return Path(env_path)
+    return (
+        Path(__file__).resolve().parent.parent
+        / "scratch_charts_sim"
+        / "baseband_virtual.h5"
+    )

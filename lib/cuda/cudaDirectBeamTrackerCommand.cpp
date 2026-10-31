@@ -181,15 +181,18 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
 
     _rest_prefix = config.get_default<std::string>(
         unique_name, "rest_prefix", _grid_mode_enabled ? "/grid_tracker" : "/direct_tracker");
-    _freq_start_hz = config.get_default<double>(unique_name, "freq_start_hz", 300.0e6);
-    _freq_step_hz = config.get_default<double>(unique_name, "freq_step_hz", 300.0e3);
+    _freq_start_hz = config.get_default<double>(
+        unique_name, "freq_start_hz", charts::constants::subband0_freq_start_hz);
+    _freq_step_hz = config.get_default<double>(
+        unique_name, "freq_step_hz", charts::constants::coarse_channel_bw_hz);
 
     // Calibration: gains file indexed (channel, physical antenna), row 0 at 300 MHz in steps of
     // freq_step_hz unless gains_first_channel is given (sharded nodes slice the full band).
     _gains_file = config.get_default<std::string>(unique_name, "gains_file", "");
     _gains_first_channel = config.get_default<int>(
         unique_name, "gains_first_channel",
-        static_cast<int>(std::lround((_freq_start_hz - 300.0e6) / _freq_step_hz)));
+        static_cast<int>(std::lround(
+            (_freq_start_hz - charts::constants::subband0_freq_start_hz) / _freq_step_hz)));
     _gains_antennas = config.get_default<std::vector<int>>(unique_name, "gains_antennas", {});
 
     std::shared_ptr<TrackerGroup> group;

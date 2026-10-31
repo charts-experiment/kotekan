@@ -50,15 +50,10 @@ from constants import (
     K_DM,
     get_default_charts_h5_path,
 )
+from sim.writer import unpack_int4x2
 
-
-def unpack_4bit_complex(u8_array: np.ndarray) -> np.ndarray:
-    """Unpack int4x2_t packed byte array to complex64 array."""
-    real = (u8_array & 0x0F).astype(np.int8)
-    imag = (u8_array >> 4).astype(np.int8)
-    real[real >= 8] -= 16
-    imag[imag >= 8] -= 16
-    return real.astype(np.float32) + 1j * imag.astype(np.float32)
+# Canonical alias
+unpack_4bit_complex = unpack_int4x2
 
 
 def compute_dispersion_delay_samples(

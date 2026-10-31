@@ -1,6 +1,7 @@
 #include "chartsFEngineSim.hpp"
 
 #include "StageFactory.hpp"
+#include "chartsConstants.hpp"
 #include "chordMetadata.hpp"
 #include "kotekanLogging.hpp"
 
@@ -16,9 +17,9 @@ using kotekan::Stage;
 REGISTER_KOTEKAN_STAGE(chartsFEngineSim);
 
 namespace {
-constexpr double C_LIGHT = 299792458.0;
+constexpr double C_LIGHT = kotekan::charts::constants::speed_of_light_m_per_s;
 constexpr double PI = 3.14159265358979323846;
-constexpr double K_DM = 4148.808; // s * MHz^2 / (pc * cm^-3)
+constexpr double K_DM = kotekan::charts::constants::k_dm;
 
 struct TargetInfo {
     const char* name;
@@ -43,9 +44,9 @@ const TargetInfo* lookup_target(const std::string& scenario_name) {
         {"psr_j0437", {"PSR J0437-4715", 69.316, -47.252, 2.8, 2.64, 0.0, 0.0, false}},
         {"psr_j1644", {"PSR J1644-4559", 251.205, -45.987, 2.5, 478.0, 0.0, 0.0, false}},
         {"psr_j0737", {"PSR J0737-3039", 114.463, -30.661, 2.2, 48.9, 0.0, 0.0, false}},
-        {"zenith", {"Zenith Calibration", 24.346, -33.4211146, 3.0, 0.0, 0.0, 0.0, false}},
+        {"zenith", {"Zenith Calibration", 24.346, kotekan::charts::constants::charts_caren_lat_deg, 3.0, 0.0, 0.0, 0.0, false}},
         {"frb", {"Fast Radio Burst", 150.0, -35.0, 6.0, 300.0, 0.0, 0.0, true}},
-        {"rfi_leo", {"RFI LEO Satellite", 0.0, -33.4211146, 15.0, 0.0, 5.0e-5, 2.5e-5, false}}};
+        {"rfi_leo", {"RFI LEO Satellite", 0.0, kotekan::charts::constants::charts_caren_lat_deg, 15.0, 0.0, 5.0e-5, 2.5e-5, false}}};
 
     std::string key = scenario_name;
     // Normalize key: remove _no_noise, _with_noise, _saturated
@@ -99,11 +100,21 @@ chartsFEngineSim::chartsFEngineSim(Config& config, const std::string& unique_nam
     _samples_per_data_set = config.get_default<int>(unique_name, "samples_per_data_set", 1536);
     _num_frames = config.get_default<int>(unique_name, "num_frames", 1);
 
-    _freq_start_mhz = config.get_default<double>(unique_name, "freq_start_mhz", 300.0);
-    _delta_freq_mhz = config.get_default<double>(unique_name, "delta_freq_mhz", 0.3);
-    _delta_time_us = config.get_default<double>(unique_name, "delta_time_us", 10.0 / 3.0);
-    _spacing_m = config.get_default<double>(unique_name, "spacing_m", 0.6);
-    _site_lat_deg = config.get_default<double>(unique_name, "site_lat_deg", -33.4211146);
+    _freq_start_mhz = config.get_default<double>(
+        unique_name, "freq_start_mhz",
+        kotekan::charts::constants::subband0_freq_start_hz / 1e6);
+    _delta_freq_mhz = config.get_default<double>(
+        unique_name, "delta_freq_mhz",
+        kotekan::charts::constants::charts_channel_width_mhz);
+    _delta_time_us = config.get_default<double>(
+        unique_name, "delta_time_us",
+        kotekan::charts::constants::fpga_time_resolution_s * 1e6);
+    _spacing_m = config.get_default<double>(
+        unique_name, "spacing_m",
+        kotekan::charts::constants::charts_default_spacing_m);
+    _site_lat_deg = config.get_default<double>(
+        unique_name, "site_lat_deg",
+        kotekan::charts::constants::charts_caren_lat_deg);
     _seed = config.get_default<int>(unique_name, "seed", 42);
     _frb_dm = config.get_default<double>(unique_name, "frb_dm", 2.0);
     _frb_arrival_time_s = config.get_default<double>(unique_name, "frb_arrival_time_s", 0.005);

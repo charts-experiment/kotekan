@@ -1,3 +1,4 @@
+#include "chartsConstants.hpp"
 #include "cudaBeamTrackerCommand.hpp"
 
 #include "cudaBeamTrackerV5.hpp"
@@ -504,8 +505,10 @@ cudaBeamTrackerCommand::cudaBeamTrackerCommand(Config& config, const std::string
         }
     }
 
-    const double freq_start_hz = config.get_default<double>(unique_name, "freq_start_hz", 300.0e6);
-    const double freq_step_hz = config.get_default<double>(unique_name, "freq_step_hz", 300.0e3);
+    const double freq_start_hz = config.get_default<double>(
+        unique_name, "freq_start_hz", charts::constants::subband0_freq_start_hz);
+    const double freq_step_hz = config.get_default<double>(
+        unique_name, "freq_step_hz", charts::constants::coarse_channel_bw_hz);
 
     _frequencies_hz.resize(static_cast<std::size_t>(_num_local_freq));
     for (int f = 0; f < _num_local_freq; ++f) {

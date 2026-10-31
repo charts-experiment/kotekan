@@ -229,7 +229,7 @@ gpu:
           time_unroll: 4
           beam_tile_size: 4        # Fuses beams in warp registers; cuts VRAM bandwidth by 4x
           enable_cuda_graph: false # Direct launch takes <3 us; graphs unnecessary and unsafe in multi-threaded stages
-          gains_file: /home/fpalma/kotekan/charts/config/gains/gains_sun_transit_1027_interp.npy
+          gains_file: charts/config/gains/gains_sun_transit_1027_interp.npy
           gains_antennas: [0, 5, 32, 37]
           enable_grid_mode: false
           grid_step: 0.02
@@ -252,10 +252,10 @@ gpu:
           in_buf: host_voltage
           gpu_mem: formed_beams_0
           out_buf: host_formed_beams
-        - name: cudaOutputData
-          in_buf: host_voltage
-          gpu_mem: alive_voltages_0
-          out_buf: host_alive_voltages
+      # - name: cudaOutputData
+      #   in_buf: host_voltage
+      #   gpu_mem: alive_voltages_0
+      #   out_buf: host_alive_voltages
 
   # Command Pipeline for Stream 1 (Frequencies 336..671, 400.8 - 501.3 MHz)
     commands_1: &command_list_1
@@ -300,7 +300,7 @@ gpu:
           time_unroll: 4
           beam_tile_size: 4
           enable_cuda_graph: false
-          gains_file: /home/fpalma/kotekan/charts/config/gains/gains_sun_transit_1027_interp.npy
+          gains_file: charts/config/gains/gains_sun_transit_1027_interp.npy
           gains_antennas: [0, 5, 32, 37]
           enable_grid_mode: false
           grid_step: 0.02
@@ -323,33 +323,35 @@ gpu:
           in_buf: host_voltage
           gpu_mem: formed_beams_1
           out_buf: host_formed_beams
-        - name: cudaOutputData
-          in_buf: host_voltage
-          gpu_mem: alive_voltages_1
-          out_buf: host_alive_voltages
+      # - name: cudaOutputData
+      #   in_buf: host_voltage
+      #   gpu_mem: alive_voltages_1
+      #   out_buf: host_alive_voltages
 
   # GPU Processors: can target GPU 0 (or split across gpu_id 0 and 1 on dual-GPU nodes)
     gpu_0:
         kotekan_stage: cudaProcess
         gpu_id: 0
+        cuda_stream_base: 0
+        num_cuda_streams: 6
         buffer_depth: 3
         commands: *command_list_0
         in_buffers:
             host_voltage: network_capture_buf_0
         out_buffers:
             host_formed_beams: host_formed_beams_buffer_0
-            host_alive_voltages: host_alive_voltages_buffer_0
 
     gpu_1:
         kotekan_stage: cudaProcess
         gpu_id: 0
+        cuda_stream_base: 1
+        num_cuda_streams: 6
         buffer_depth: 3
         commands: *command_list_1
         in_buffers:
             host_voltage: network_capture_buf_1
         out_buffers:
             host_formed_beams: host_formed_beams_buffer_1
-            host_alive_voltages: host_alive_voltages_buffer_1
 
 # ------------------------------------------------------------------------------
 # Monitoring & Sinks
