@@ -99,6 +99,7 @@ test_charts/dumps/
 !tests/boost/testdata/**
 test_charts/data/*
 !test_charts/data/.gitkeep
+solar_drift_scan_data/
 
 # Python cache & environment
 __pycache__/
