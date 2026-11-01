@@ -169,6 +169,8 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
         config.get_default<float>(unique_name, "bislc_diagonal_loading", 1.0e-4f);
     const bool coherent_gain_normalization =
         config.get_default<bool>(unique_name, "coherent_gain_normalization", false);
+    const bool normalize_weights =
+        config.get_default<bool>(unique_name, "normalize_weights", true);
 
     _gpu_mem_voltage = config.get_default<std::string>(unique_name, "gpu_mem_voltage", "voltage");
     _gpu_mem_formed_beams =
@@ -241,6 +243,7 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
         group->config.enable_weight_bislc = enable_weight_bislc;
         group->config.bislc_diagonal_loading = bislc_diag;
         group->config.coherent_gain_normalization = coherent_gain_normalization;
+        group->config.normalize_weights = normalize_weights;
         group->config.spacing_m = _spacing_m;
         group->config.time_chunk_size = _time_chunk_size;
         group->config.time_unroll = _time_unroll;
@@ -394,27 +397,29 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                     float lx = group->config.targets[beam_id].direction.x;
                     float my = group->config.targets[beam_id].direction.y;
 
-                    if (j.contains("l0"))
-                        lx = j["l0"];
-                    else if (j.contains("l"))
-                        lx = j["l"];
+                    const auto& src = (j.contains("target") && j["target"].is_object()) ? j["target"] : j;
 
-                    if (j.contains("m0"))
-                        my = j["m0"];
-                    else if (j.contains("m"))
-                        my = j["m"];
+                    if (src.contains("l0"))
+                        lx = src["l0"];
+                    else if (src.contains("l"))
+                        lx = src["l"];
+
+                    if (src.contains("m0"))
+                        my = src["m0"];
+                    else if (src.contains("m"))
+                        my = src["m"];
 
                     float lx1 = lx;
                     float my1 = my;
-                    if (j.contains("l1"))
-                        lx1 = j["l1"];
-                    if (j.contains("m1"))
-                        my1 = j["m1"];
-                    if (j.contains("dl")) {
-                        lx1 = lx + static_cast<float>(j["dl"]) * group->config.samples_per_data_set;
+                    if (src.contains("l1"))
+                        lx1 = src["l1"];
+                    if (src.contains("m1"))
+                        my1 = src["m1"];
+                    if (src.contains("dl")) {
+                        lx1 = lx + static_cast<float>(src["dl"]) * group->config.samples_per_data_set;
                     }
-                    if (j.contains("dm")) {
-                        my1 = my + static_cast<float>(j["dm"]) * group->config.samples_per_data_set;
+                    if (src.contains("dm")) {
+                        my1 = my + static_cast<float>(src["dm"]) * group->config.samples_per_data_set;
                     }
 
                     const float tsq = lx * lx + my * my;
@@ -612,6 +617,9 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                     if (j.contains("bislc_diagonal_loading")) {
                         group->config.bislc_diagonal_loading = j["bislc_diagonal_loading"];
                     }
+                    if (j.contains("normalize_weights")) {
+                        group->config.normalize_weights = j["normalize_weights"];
+                    }
                     group->config.recompute_normalized_taper();
                     group->config.mask_generation++;
                     group->config.config_generation++;
@@ -656,6 +664,15 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                 reply["taper_pedestal"] = group->config.taper_pedestal;
                 reply["enable_weight_bislc"] = group->config.enable_weight_bislc;
                 reply["bislc_diagonal_loading"] = group->config.bislc_diagonal_loading;
+                reply["normalize_weights"] = group->config.normalize_weights;
+                reply["coherent_gain_normalization"] = group->config.coherent_gain_normalization;
+                {
+                    std::vector<float> tw;
+                    for (std::size_t i = 0; i < std::min<std::size_t>(8, group->config.total_elements()); ++i) {
+                        tw.push_back(group->config.normalized_taper_weights[i]);
+                    }
+                    reply["taper_weights_sample"] = tw;
+                }
                 reply["grid_mode_enabled"] = group->config.enable_grid_mode;
                 reply["grid_points"] = group->config.num_grid_points;
                 reply["spacing_m"] = group->config.spacing_m;
@@ -835,6 +852,7 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                 reply["subframe_interpolation"] = group->config.enable_subframe_interpolation;
                 reply["taper_type"] = taper_type_to_string(group->config.taper_type);
                 reply["weight_bislc"] = group->config.enable_weight_bislc;
+                reply["normalize_weights"] = group->config.normalize_weights;
 
                 std::uint64_t latest_frame = 0;
                 double latest_timestamp = 0.0;

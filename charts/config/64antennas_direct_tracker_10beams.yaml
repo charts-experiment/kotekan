@@ -203,6 +203,7 @@ host_alive_voltages_buffer_1:
 # ------------------------------------------------------------------------------
 dpdk:
     kotekan_stage: dpdkCore
+    lcore_start_delay: 10
     lcore_cpu_map: [3, 5]          # Worker lcores 3 and 5 for ports 0 and 1
     main_lcore_cpu: 4              # Main DPDK coordinator thread
     lcore_port_map:
@@ -296,6 +297,7 @@ gpu:
           buffer_depth: 3
           time_chunk_size: 256
           time_unroll: 4
+          normalize_weights: false
           beam_tile_size: 4        # Fuses beams in warp registers; cuts VRAM bandwidth by 4x
           enable_cuda_graph: false # Direct launch takes <3 us; graphs unnecessary and unsafe in multi-threaded stages
           gains_file: charts/config/gains/gains_sun_transit_1027_interp.npy
@@ -393,6 +395,7 @@ gpu:
           buffer_depth: 3
           time_chunk_size: 256
           time_unroll: 4
+          normalize_weights: false
           beam_tile_size: 4
           enable_cuda_graph: false
           gains_file: charts/config/gains/gains_sun_transit_1027_interp.npy

@@ -35,6 +35,7 @@ struct TargetInfo {
 
 const TargetInfo* lookup_target(const std::string& scenario_name) {
     static const std::vector<std::pair<std::string, TargetInfo>> catalog = {
+        {"fornax_a", {"Fornax A", 50.675, -37.208, 5.0, 0.0, 0.0, 0.0, false}},
         {"vela", {"Vela Pulsar", 128.836, -45.176, 3.0, 0.0, 0.0, 0.0, false}},
         {"sun", {"The Sun", 0.0, 0.0, 5.5, 0.0, 0.0, 0.0, false}},
         {"sgr_a", {"Sagittarius A*", 266.417, -29.008, 4.5, 0.0, 0.0, 0.0, false}},

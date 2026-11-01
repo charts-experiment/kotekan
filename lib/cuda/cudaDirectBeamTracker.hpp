@@ -145,6 +145,9 @@ struct DirectBeamTrackerConfig {
     // true: sum(w) = 1 per pol (a source gives the same beam amplitude for any number of active
     // antennas; the noise power scales as 1/N). Do not combine with enable_weight_bislc.
     bool coherent_gain_normalization = false;
+    // When false, taper weights are unnormalized (ta), so the formed beam voltage is the raw sum
+    // without dividing by sqrt(N_active) or N_active.
+    bool normalize_weights = true;
 
     std::array<std::uint8_t, MAX_DIRECT_ANTENNAS> antenna_mask;
     std::array<float3, MAX_DIRECT_ANTENNAS> antenna_positions;
@@ -244,18 +247,21 @@ struct DirectBeamTrackerConfig {
         num_active_antennas = active_cnt;
 
         // 3. Normalization per polarization: sum_{a in pol} norm_taper[a]^2 == 1.0 (default), or
-        //    sum_{a in pol} norm_taper[a] == 1.0 with coherent_gain_normalization
-        const auto inv_norm = [this](double s) {
-            if (s <= 0.0)
-                return 0.0f;
-            return static_cast<float>(coherent_gain_normalization ? 1.0 / s : 1.0 / std::sqrt(s));
-        };
-        const float inv_norm_pol[2] = {inv_norm(sum_sq_pol[0]), inv_norm(sum_sq_pol[1])};
+        //    sum_{a in pol} norm_taper[a] == 1.0 with coherent_gain_normalization.
+        //    If normalize_weights is false, weights remain raw taper values ta (unnormalized).
+        if (normalize_weights) {
+            const auto inv_norm = [this](double s) {
+                if (s <= 0.0)
+                    return 0.0f;
+                return static_cast<float>(coherent_gain_normalization ? 1.0 / s : 1.0 / std::sqrt(s));
+            };
+            const float inv_norm_pol[2] = {inv_norm(sum_sq_pol[0]), inv_norm(sum_sq_pol[1])};
 
-        for (std::size_t r = 0; r < elem_limit; ++r) {
-            if (antenna_mask[r] != 0) {
-                const std::size_t pol = raw_elem_to_pol(r) & 1U;
-                normalized_taper_weights[r] *= inv_norm_pol[pol];
+            for (std::size_t r = 0; r < elem_limit; ++r) {
+                if (antenna_mask[r] != 0) {
+                    const std::size_t pol = raw_elem_to_pol(r) & 1U;
+                    normalized_taper_weights[r] *= inv_norm_pol[pol];
+                }
             }
         }
     }
