@@ -760,12 +760,19 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                 nlohmann::json reply;
                 std::lock_guard<std::mutex> lk(group->group_mutex);
 
-                std::vector<cudaDirectBeamTrackerCommand*> sorted_insts = group->instances;
-                std::sort(sorted_insts.begin(), sorted_insts.end(),
-                          [](const cudaDirectBeamTrackerCommand* a,
-                             const cudaDirectBeamTrackerCommand* b) {
-                              return a->get_freq_start_hz() < b->get_freq_start_hz();
-                          });
+                std::vector<cudaDirectBeamTrackerCommand*> sorted_insts;
+                {
+                    std::map<double, cudaDirectBeamTrackerCommand*> freq_map;
+                    for (auto* inst : group->instances) {
+                        auto it = freq_map.find(inst->get_freq_start_hz());
+                        if (it == freq_map.end() || inst->get_last_frame_id() > it->second->get_last_frame_id()) {
+                            freq_map[inst->get_freq_start_hz()] = inst;
+                        }
+                    }
+                    for (auto& [freq, inst] : freq_map) {
+                        sorted_insts.push_back(inst);
+                    }
+                }
 
                 const int max_b = static_cast<int>(group->config.max_beams);
                 const int active_b = static_cast<int>(group->config.num_active_beams);
