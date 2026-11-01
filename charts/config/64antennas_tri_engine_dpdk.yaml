@@ -322,6 +322,7 @@ gpu:
           num_local_freq: 336
           samples_per_data_set: 15360
           buffer_depth: 3
+          sample_stride: 4
           antenna_order: "descending"
           active_antennas: [0, 4, 5, 6, 32]
           auto_detect_enabled: true
@@ -429,6 +430,7 @@ gpu:
           num_local_freq: 336
           samples_per_data_set: 15360
           buffer_depth: 3
+          sample_stride: 4
           antenna_order: "descending"
           active_antennas: [0, 4, 5, 6, 32]
           auto_detect_enabled: true

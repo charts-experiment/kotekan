@@ -47,6 +47,73 @@ initial_active_beams: 10           # Active beams on startup (Galactic Center & 
 sizeof_complex_float: 8           # float2 (4-byte real + 4-byte imag) per formed beam sample
 max_alive_antennas: 7             # Compact alive baseband channels to record
 
+# 1D Physical East-West Baseline Layout for Calibrated Elements [0, 5, 32, 37]
+custom_antenna_positions: &charts_custom_antenna_positions
+  - [0.0, 0.0, 0.0]  # Ant 0 (x=0.0m)
+  - [0.0, 0.0, 0.0]  # Ant 1
+  - [0.0, 0.0, 0.0]  # Ant 2
+  - [0.0, 0.0, 0.0]  # Ant 3
+  - [0.0, 0.0, 0.0]  # Ant 4
+  - [0.6, 0.0, 0.0]  # Ant 5 (slot 1, x=0.6m)
+  - [0.0, 0.0, 0.0]  # Ant 6
+  - [0.0, 0.0, 0.0]  # Ant 7
+  - [0.0, 0.0, 0.0]  # Ant 8
+  - [0.0, 0.0, 0.0]  # Ant 9
+  - [0.0, 0.0, 0.0]  # Ant 10
+  - [0.0, 0.0, 0.0]  # Ant 11
+  - [0.0, 0.0, 0.0]  # Ant 12
+  - [0.0, 0.0, 0.0]  # Ant 13
+  - [0.0, 0.0, 0.0]  # Ant 14
+  - [0.0, 0.0, 0.0]  # Ant 15
+  - [0.0, 0.0, 0.0]  # Ant 16
+  - [0.0, 0.0, 0.0]  # Ant 17
+  - [0.0, 0.0, 0.0]  # Ant 18
+  - [0.0, 0.0, 0.0]  # Ant 19
+  - [0.0, 0.0, 0.0]  # Ant 20
+  - [0.0, 0.0, 0.0]  # Ant 21
+  - [0.0, 0.0, 0.0]  # Ant 22
+  - [0.0, 0.0, 0.0]  # Ant 23
+  - [0.0, 0.0, 0.0]  # Ant 24
+  - [0.0, 0.0, 0.0]  # Ant 25
+  - [0.0, 0.0, 0.0]  # Ant 26
+  - [0.0, 0.0, 0.0]  # Ant 27
+  - [0.0, 0.0, 0.0]  # Ant 28
+  - [0.0, 0.0, 0.0]  # Ant 29
+  - [0.0, 0.0, 0.0]  # Ant 30
+  - [0.0, 0.0, 0.0]  # Ant 31
+  - [3.6, 0.0, 0.0]  # Ant 32 (slot 6, x=3.6m)
+  - [0.0, 0.0, 0.0]  # Ant 33
+  - [0.0, 0.0, 0.0]  # Ant 34
+  - [0.0, 0.0, 0.0]  # Ant 35
+  - [0.0, 0.0, 0.0]  # Ant 36
+  - [4.2, 0.0, 0.0]  # Ant 37 (slot 7, x=4.2m)
+  - [0.0, 0.0, 0.0]  # Ant 38
+  - [0.0, 0.0, 0.0]  # Ant 39
+  - [0.0, 0.0, 0.0]  # Ant 40
+  - [0.0, 0.0, 0.0]  # Ant 41
+  - [0.0, 0.0, 0.0]  # Ant 42
+  - [0.0, 0.0, 0.0]  # Ant 43
+  - [0.0, 0.0, 0.0]  # Ant 44
+  - [0.0, 0.0, 0.0]  # Ant 45
+  - [0.0, 0.0, 0.0]  # Ant 46
+  - [0.0, 0.0, 0.0]  # Ant 47
+  - [0.0, 0.0, 0.0]  # Ant 48
+  - [0.0, 0.0, 0.0]  # Ant 49
+  - [0.0, 0.0, 0.0]  # Ant 50
+  - [0.0, 0.0, 0.0]  # Ant 51
+  - [0.0, 0.0, 0.0]  # Ant 52
+  - [0.0, 0.0, 0.0]  # Ant 53
+  - [0.0, 0.0, 0.0]  # Ant 54
+  - [0.0, 0.0, 0.0]  # Ant 55
+  - [0.0, 0.0, 0.0]  # Ant 56
+  - [0.0, 0.0, 0.0]  # Ant 57
+  - [0.0, 0.0, 0.0]  # Ant 58
+  - [0.0, 0.0, 0.0]  # Ant 59
+  - [0.0, 0.0, 0.0]  # Ant 60
+  - [0.0, 0.0, 0.0]  # Ant 61
+  - [0.0, 0.0, 0.0]  # Ant 62
+  - [0.0, 0.0, 0.0]  # Ant 63
+
 # ------------------------------------------------------------------------------
 # Metadata Pool
 # ------------------------------------------------------------------------------
@@ -202,6 +269,7 @@ gpu:
           num_local_freq: 336
           samples_per_data_set: 15360
           buffer_depth: 3
+          sample_stride: 4
           antenna_order: "descending"    # RFSoC raw buffer ordering: raw_id = 63 - physical_ant
           active_antennas: [0, 4, 5, 6, 32] # Alive physical antennas convention (auto-mapped to raw elements [63, 59, 58, 57, 31])
           auto_detect_enabled: true
@@ -222,6 +290,7 @@ gpu:
           spacing_m: 0.6
           antenna_order: "descending"    # Maps raw element r to physical position (63 - r)
           active_antennas: [0, 4, 5, 6, 32] # Alive physical antennas
+          custom_antenna_positions: *charts_custom_antenna_positions
           max_beams: 10
           initial_active_beams: 10
           buffer_depth: 3
@@ -297,6 +366,7 @@ gpu:
           num_local_freq: 336
           samples_per_data_set: 15360
           buffer_depth: 3
+          sample_stride: 4
           antenna_order: "descending"    # RFSoC raw buffer ordering: raw_id = 63 - physical_ant
           active_antennas: [0, 4, 5, 6, 32] # Alive physical antennas convention (auto-mapped to raw elements [63, 59, 58, 57, 31])
           auto_detect_enabled: true
@@ -317,6 +387,7 @@ gpu:
           spacing_m: 0.6
           antenna_order: "descending"    # Maps raw element r to physical position (63 - r)
           active_antennas: [0, 4, 5, 6, 32] # Alive physical antennas
+          custom_antenna_positions: *charts_custom_antenna_positions
           max_beams: 10
           initial_active_beams: 10
           buffer_depth: 3

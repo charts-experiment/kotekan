@@ -188,6 +188,7 @@ gpu:
           num_local_freq: 336
           samples_per_data_set: 15360
           buffer_depth: 3
+          sample_stride: 4
           antenna_order: "descending"
           active_antennas: [0, 5, 32, 37]
           auto_detect_enabled: false   # Strict mask to the 4 calibrated physical antennas
@@ -281,7 +282,7 @@ gpu:
           time_unroll: 4
           beam_tile_size: 4
           enable_cuda_graph: false
-          gains_file: /home/fpalma/kotekan/charts/config/gains/gains_sun_transit_1027_interp.npy
+          gains_file: charts/config/gains/gains_sun_transit_1027_interp.npy
           gains_antennas: [0, 5, 32, 37]
           enable_grid_mode: false
           grid_step: 0.02
@@ -325,6 +326,7 @@ gpu:
           num_local_freq: 336
           samples_per_data_set: 15360
           buffer_depth: 3
+          sample_stride: 4
           antenna_order: "descending"
           active_antennas: [0, 5, 32, 37]
           auto_detect_enabled: false
@@ -418,7 +420,7 @@ gpu:
           time_unroll: 4
           beam_tile_size: 4
           enable_cuda_graph: false
-          gains_file: /home/fpalma/kotekan/charts/config/gains/gains_sun_transit_1027_interp.npy
+          gains_file: charts/config/gains/gains_sun_transit_1027_interp.npy
           gains_antennas: [0, 5, 32, 37]
           enable_grid_mode: false
           grid_step: 0.02

@@ -2,6 +2,7 @@
 
 #include "StageFactory.hpp"
 #include "chartsConstants.hpp"
+#include "chartsMetadata.hpp"
 #include "chordMetadata.hpp"
 #include "kotekanLogging.hpp"
 
@@ -119,6 +120,7 @@ chartsFEngineSim::chartsFEngineSim(Config& config, const std::string& unique_nam
     _frb_dm = config.get_default<double>(unique_name, "frb_dm", 2.0);
     _frb_arrival_time_s = config.get_default<double>(unique_name, "frb_arrival_time_s", 0.005);
     _frb_pulse_width_s = config.get_default<double>(unique_name, "frb_pulse_width_s", 0.0008);
+    _time0_fpga = config.get_default<uint64_t>(unique_name, "time0_fpga", 1774000000000000ULL);
 
     INFO("chartsFEngineSim: Initialized for scenario '{:s}' (noise={:d}, saturate={:d}, "
          "antennas={:d}, freq={:d}, samples={:d}, frames={:d})",
@@ -183,9 +185,40 @@ void chartsFEngineSim::main_thread() {
         // Initialize metadata object for downstream stages (rawFileWrite, cudaInputData)
         out_buf->allocate_new_metadata_object(frame_id);
         auto meta = get_chord_metadata(out_buf, frame_id);
-        if (meta) {
+        auto charts_meta = get_charts_metadata(out_buf, frame_id);
+
+        const int coarse_start = static_cast<int>(std::lround(
+            (_freq_start_mhz * 1e6 - kotekan::charts::constants::charts_frequency_start_hz)
+            / (_delta_freq_mhz * 1e6)));
+        std::vector<int> coarse_freq(_num_local_freq);
+        for (int f = 0; f < _num_local_freq; ++f) {
+            coarse_freq[f] = coarse_start + f;
+        }
+
+        struct timeval tv;
+        tv.tv_sec = static_cast<time_t>(_time0_fpga / 1000000ULL);
+        tv.tv_usec = static_cast<suseconds_t>(_time0_fpga % 1000000ULL);
+
+        if (charts_meta) {
+            charts_meta->set_fpga_seq_num(static_cast<uint64_t>(frame_idx) * _samples_per_data_set);
+            charts_meta->set_time_downsampling_fpga(1);
+            charts_meta->set_time0_fpga(_time0_fpga);
+            charts_meta->set_lost_timesamples(0);
+            charts_meta->set_first_packet_recv_time(tv);
+            charts_meta->set_name("E");
+            charts_meta->dims = 4;
+            charts_meta->set_array_dimension(0, _samples_per_data_set, "T");
+            charts_meta->set_array_dimension(1, _num_local_freq, "F");
+            charts_meta->set_array_dimension(2, 2, "P");
+            charts_meta->set_array_dimension(3, 64, "D");
+            charts_meta->set_strides_simple();
+            charts_meta->type = kotekan::int4x2_swapped_withoffset;
+            charts_meta->set_coarse_freq(coarse_freq);
+        } else if (meta) {
             meta->set_fpga_seq_num(static_cast<uint64_t>(frame_idx) * _samples_per_data_set);
             meta->set_time_downsampling_fpga(1);
+            meta->set_lost_timesamples(0);
+            meta->set_first_packet_recv_time(tv);
             meta->set_name("E");
             meta->dims = 4;
             meta->set_array_dimension(0, _samples_per_data_set, "T", 1);
@@ -194,10 +227,6 @@ void chartsFEngineSim::main_thread() {
             meta->set_array_dimension(3, 64, "D", 1);
             meta->set_strides_simple();
             meta->type = kotekan::int4x2_swapped_withoffset;
-            std::vector<int> coarse_freq(_num_local_freq);
-            for (int f = 0; f < _num_local_freq; ++f) {
-                coarse_freq[f] = f;
-            }
             meta->set_coarse_freq(coarse_freq);
             std::vector<int> freq_upchan_factor(_num_local_freq, 1);
             meta->set_freq_upchan_factor(freq_upchan_factor);

@@ -613,15 +613,21 @@ inline bool rfsocHandlerShuffle::advance_frame(uint64_t new_spec, bool first_tim
 
     if (!first_time) {
         // Check for lost samples in the previous frame.
+        int32_t lost_in_frame = 0;
         for (uint64_t i = 0; i < specs_per_frame; i++) {
             const uint8_t missing_packet_mask = complete_packet_mask & ~packets_seen[i];
             if (missing_packet_mask == 0) {
                 mask_frame[i] = 0;
             } else {
                 mask_frame[i] = 1;
+                lost_in_frame += 1;
                 rx_lost_samples_total += 1;
                 rx_lost_packets_total += count_bits(missing_packet_mask);
             }
+        }
+        if (auto prev_meta =
+                std::dynamic_pointer_cast<chartsMetadata>(out_buf->get_metadata(out_frame_id))) {
+            prev_meta->set_lost_timesamples(lost_in_frame);
         }
 
         // DEBUG("advance_frame: closing frame_id {} start_spec {} valid_specs_total {}",

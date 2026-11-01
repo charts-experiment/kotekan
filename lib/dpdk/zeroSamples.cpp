@@ -5,6 +5,7 @@
 #include "buffer.hpp"          // for Buffer
 #include "bufferContainer.hpp" // for bufferContainer
 #include "chordMetadata.hpp"   // for get_chord_metadata, chordMetadata
+#include "chartsMetadata.hpp"  // for chartsMetadata
 #include "nt_memset.h"         // for nt_memset
 
 #include "fmt.hpp"  // for format
@@ -68,12 +69,28 @@ void zeroSamples::main_thread() {
         if (flag_frame == nullptr)
             break;
 
+        uint8_t effective_zero_value = zero_value;
+        auto meta = out_buf->get_metadata(out_buf_frame_id);
+        if (auto charts_meta = std::dynamic_pointer_cast<chartsMetadata>(meta)) {
+            if (charts_meta->type == kotekan::int4x2_swapped_withoffset) {
+                effective_zero_value = 0x88;
+            } else if (charts_meta->type == kotekan::int4x2) {
+                effective_zero_value = 0x00;
+            }
+        } else if (auto chord_meta = std::dynamic_pointer_cast<chordMetadata>(meta)) {
+            if (chord_meta->type == kotekan::int4x2_swapped_withoffset) {
+                effective_zero_value = 0x88;
+            } else if (chord_meta->type == kotekan::int4x2) {
+                effective_zero_value = 0x00;
+            }
+        }
+
         for (size_t i = 0; i < lost_samples_buf->frame_size; ++i) {
             zero_location = i * sample_size;
             // Check array bounds
             assert((zero_location + sample_size) <= (size_t)out_buf->frame_size);
             if (flag_frame[i] == 1) {
-                nt_memset((void*)(&data_frame[zero_location]), zero_value, sample_size);
+                nt_memset((void*)(&data_frame[zero_location]), effective_zero_value, sample_size);
                 lost_samples++;
             }
         }
@@ -87,7 +104,11 @@ void zeroSamples::main_thread() {
                 out_lost_sample_bufs[i]->mark_frame_full(unique_name, lost_samples_buf_frame_id);
             }
         }
-        // get_chord_metadata(out_buf, out_buf_frame_id)->atomic_add_lost_timesamples(lost_samples);
+        if (auto charts_meta = std::dynamic_pointer_cast<chartsMetadata>(meta)) {
+            charts_meta->set_lost_timesamples(static_cast<int32_t>(lost_samples));
+        } else if (auto chord_meta = std::dynamic_pointer_cast<chordMetadata>(meta)) {
+            chord_meta->set_lost_timesamples(static_cast<int32_t>(lost_samples));
+        }
 
         lost_samples_buf->mark_frame_empty(unique_name, lost_samples_buf_frame_id);
         lost_samples_buf_frame_id = (lost_samples_buf_frame_id + 1) % lost_samples_buf->num_frames;

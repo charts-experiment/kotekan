@@ -82,6 +82,7 @@ private:
     std::string _antenna_order = "descending";
 
     std::uint64_t _applied_mask_generation = 0;
+    std::uint64_t _frame_counter = 0;
 
     // Per-subband telemetry
     mutable std::mutex _metric_mutex;

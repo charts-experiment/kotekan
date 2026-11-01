@@ -50,6 +50,7 @@ private:
     double _frb_dm;
     double _frb_arrival_time_s;
     double _frb_pulse_width_s;
+    uint64_t _time0_fpga;
 };
 
 #endif // CHARTS_FENGINE_SIM_HPP

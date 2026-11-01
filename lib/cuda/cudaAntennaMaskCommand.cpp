@@ -149,6 +149,8 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
             static_cast<std::uint16_t>(config.get_default<int>(unique_name, "revival_frames", 5));
         _shared_config.sample_stride =
             static_cast<std::size_t>(config.get_default<int>(unique_name, "sample_stride", 1));
+        _shared_config.auto_detect_cadence_frames = static_cast<std::size_t>(
+            config.get_default<int>(unique_name, "auto_detect_cadence_frames", 1));
 
         _shared_mask.fill(1);
         _shared_config.manual_mask.fill(1);
@@ -747,10 +749,32 @@ cudaEvent_t cudaAntennaMaskCommand::execute(cudaPipelineState& /*pipestate*/,
         if (c_meta->type == kotekan::int4x2_swapped_withoffset) {
             is_swapped_withoffset = true;
         }
+        if (c_meta->has_coarse_freq()) {
+            const auto cf = c_meta->get_coarse_freq();
+            if (!cf.empty()) {
+                _subband_id = (cf.front() >= 336) ? 1 : 0;
+                _freq_start_hz = charts::constants::charts_frequency_start_hz
+                                 + static_cast<double>(cf.front()) * charts::constants::charts_channel_width_hz;
+            }
+        }
+        if (c_meta->has_lost_timesamples()) {
+            const int32_t lost = c_meta->get_lost_timesamples();
+            if (lost > static_cast<int32_t>(0.25 * _samples_per_data_set)) {
+                // Packet loss exceeded 25% of this frame; skip auto-detection mask updates
+                // to prevent temporary network packet loss from falsely marking antennas dead.
+                current_cfg.auto_detect_enabled = false;
+            }
+        }
     } else if (auto ch_meta = std::dynamic_pointer_cast<chordMetadata>(meta)) {
         if (ch_meta->type == kotekan::int4x2_swapped_withoffset) {
             is_swapped_withoffset = true;
         }
+    }
+
+    const std::uint64_t current_frame = _frame_counter++;
+    if (current_cfg.auto_detect_cadence_frames > 1
+        && (current_frame % current_cfg.auto_detect_cadence_frames != 0)) {
+        current_cfg.auto_detect_enabled = false;
     }
 
     const std::size_t total_spectra =

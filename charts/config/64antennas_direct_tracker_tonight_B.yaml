@@ -198,6 +198,7 @@ gpu:
           num_local_freq: 336
           samples_per_data_set: 15360
           buffer_depth: 3
+          sample_stride: 4
           auto_detect_enabled: true
           blank_voltages_enabled: false # Steering weights masking in cudaDirectBeamTracker already zeroes bad antennas
           dead_power_threshold: 1.0
@@ -261,6 +262,7 @@ gpu:
           num_local_freq: 336
           samples_per_data_set: 15360
           buffer_depth: 3
+          sample_stride: 4
           auto_detect_enabled: true
           blank_voltages_enabled: false # Steering weights masking in cudaDirectBeamTracker already zeroes bad antennas
           dead_power_threshold: 1.0

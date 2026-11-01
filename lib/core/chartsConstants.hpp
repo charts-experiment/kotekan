@@ -41,6 +41,10 @@ inline constexpr std::size_t charts_upchannelized_channels =
 inline constexpr float charts_default_spacing_m = 0.6F;
 inline constexpr std::size_t charts_total_antennas = 256;
 
+// 4-Element Calibrated Solar Transit East-West Sub-Array (slots 0, 1, 6, 7)
+inline constexpr int calibrated_antennas_sun_transit[4] = {0, 5, 32, 37};
+inline constexpr float calibrated_antenna_positions_x[4] = {0.0F, 0.6F, 3.6F, 4.2F};
+
 // Site Coordinates (Carén Observatory Site - Primary)
 inline constexpr double charts_caren_lat_deg = -33.4211146;
 inline constexpr double charts_caren_lon_deg = -70.8634710;

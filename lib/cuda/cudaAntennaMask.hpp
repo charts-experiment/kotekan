@@ -124,6 +124,7 @@ struct AntennaMaskConfig {
 
     std::uint16_t revival_frames = 5;
     std::size_t sample_stride = 1;
+    std::size_t auto_detect_cadence_frames = 1;
 
     std::array<std::uint8_t, MAX_MASK_ANTENNAS> manual_mask;
     std::uint64_t mask_generation = 1;

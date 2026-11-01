@@ -1,4 +1,5 @@
 #include "chartsMvdr.hpp"
+#include "chartsConstants.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -174,7 +175,8 @@ std::vector<cplx> load_gains_npy(const std::string& path, int first_channel, int
     } else if (!antenna_subset.empty() && static_cast<long>(antenna_subset.size()) == cols) {
         col_map = antenna_subset;
     } else if (antenna_subset.empty() && cols == 4 && num_elements == 64) {
-        col_map = {0, 5, 32, 37};
+        col_map.assign(std::begin(kotekan::charts::constants::calibrated_antennas_sun_transit),
+                       std::end(kotekan::charts::constants::calibrated_antennas_sun_transit));
     } else {
         throw std::runtime_error("charts_mvdr: gains file " + path + " has " + std::to_string(cols)
                                  + " columns, expected " + std::to_string(num_elements)

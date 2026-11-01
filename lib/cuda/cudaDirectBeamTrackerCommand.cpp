@@ -40,10 +40,12 @@ DirectBeamTrackerConfig cudaDirectBeamTrackerCommand::_default_shared_config;
 void cudaDirectBeamTrackerCommand::set_shared_antenna_mask(
     const std::array<std::uint8_t, MAX_DIRECT_ANTENNAS>& mask, int /*n_active*/) {
     std::lock_guard<std::mutex> lock(_registry_mutex);
-    _default_shared_config.antenna_mask = mask;
-    _default_shared_config.recompute_normalized_taper();
-    _default_shared_config.mask_generation++;
-    _default_shared_config.config_generation++;
+    if (_default_shared_config.antenna_mask != mask) {
+        _default_shared_config.antenna_mask = mask;
+        _default_shared_config.recompute_normalized_taper();
+        _default_shared_config.mask_generation++;
+        _default_shared_config.config_generation++;
+    }
 
     for (auto& [prefix, group] : _tracker_groups) {
         std::lock_guard<std::mutex> glock(group->group_mutex);
@@ -67,10 +69,12 @@ void cudaDirectBeamTrackerCommand::set_shared_antenna_mask(
         const std::size_t phys_ant = _default_shared_config.raw_elem_to_physical_ant(i);
         new_mask[i] = (phys_ant < charts::constants::charts_total_antennas) ? mask[phys_ant] : 0;
     }
-    _default_shared_config.antenna_mask = new_mask;
-    _default_shared_config.recompute_normalized_taper();
-    _default_shared_config.mask_generation++;
-    _default_shared_config.config_generation++;
+    if (_default_shared_config.antenna_mask != new_mask) {
+        _default_shared_config.antenna_mask = new_mask;
+        _default_shared_config.recompute_normalized_taper();
+        _default_shared_config.mask_generation++;
+        _default_shared_config.config_generation++;
+    }
 
     for (auto& [prefix, group] : _tracker_groups) {
         std::lock_guard<std::mutex> glock(group->group_mutex);
@@ -346,6 +350,22 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                     group->config.antenna_positions[r] =
                         make_float3(custom_pos[idx][0], custom_pos[idx][1], z);
                 }
+            }
+        } else if (_gains_antennas == std::vector<int>{0, 5, 32, 37}) {
+            // Automatic fallback to 1D physical baseline coordinates for calibrated solar transit array
+            for (int r = 0; r < _num_elements && r < static_cast<int>(MAX_DIRECT_ANTENNAS); ++r) {
+                const std::size_t phys_ant = group->config.raw_elem_to_physical_ant(r);
+                float x = 0.0f;
+                if (phys_ant == 0) {
+                    x = kotekan::charts::constants::calibrated_antenna_positions_x[0];
+                } else if (phys_ant == 5) {
+                    x = kotekan::charts::constants::calibrated_antenna_positions_x[1];
+                } else if (phys_ant == 32) {
+                    x = kotekan::charts::constants::calibrated_antenna_positions_x[2];
+                } else if (phys_ant == 37) {
+                    x = kotekan::charts::constants::calibrated_antenna_positions_x[3];
+                }
+                group->config.antenna_positions[r] = make_float3(x, 0.0f, 0.0f);
             }
         }
 
@@ -1134,55 +1154,52 @@ void cudaDirectBeamTrackerCommand::update_weights_if_needed(const DirectBeamTrac
     bool mask_changed = false;
 
     {
-        double unix_s = (frame_timestamp_utc > 0.0)
-                            ? frame_timestamp_utc
-                            : std::chrono::duration_cast<std::chrono::duration<double>>(
-                                  std::chrono::system_clock::now().time_since_epoch())
-                                  .count();
-        const double frame_duration_s =
-            static_cast<double>(_samples_per_data_set) * charts::constants::fpga_time_resolution_s;
-        const double unix_s_end = unix_s + frame_duration_s;
-
-        const double d_start = unix_s / 86400.0 - 10957.5;
-        double gmst_start = std::fmod(18.697374558 + 24.06570982441908 * d_start, 24.0);
-        if (gmst_start < 0.0)
-            gmst_start += 24.0;
-
-        const double d_end = unix_s_end / 86400.0 - 10957.5;
-        double gmst_end = std::fmod(18.697374558 + 24.06570982441908 * d_end, 24.0);
-        if (gmst_end < 0.0)
-            gmst_end += 24.0;
-
         std::unique_lock<std::mutex> lk(group ? group->group_mutex : _registry_mutex);
         DirectBeamTrackerConfig& grp_cfg = group ? group->config : _default_shared_config;
 
-        double lst_start = std::fmod(gmst_start + grp_cfg.site.lon_deg / 15.0, 24.0);
-        if (lst_start < 0.0)
-            lst_start += 24.0;
-
-        double lst_end = std::fmod(gmst_end + grp_cfg.site.lon_deg / 15.0, 24.0);
-        if (lst_end < 0.0)
-            lst_end += 24.0;
-
         const std::size_t active_beams =
             std::min(grp_cfg.num_active_beams, static_cast<std::size_t>(_max_beams));
+        bool has_celestial = false;
         for (std::size_t b = 0; b < active_beams; ++b) {
             if (grp_cfg.targets[b].celestial.is_set) {
-                DirectDirection3D dir_start, dir_end;
-                compute_celestial_direction(grp_cfg.targets[b].celestial.ra_deg,
-                                            grp_cfg.targets[b].celestial.dec_deg, lst_start,
-                                            grp_cfg.site.lat_deg, dir_start);
-                compute_celestial_direction(grp_cfg.targets[b].celestial.ra_deg,
-                                            grp_cfg.targets[b].celestial.dec_deg, lst_end,
-                                            grp_cfg.site.lat_deg, dir_end);
+                has_celestial = true;
+                break;
+            }
+        }
 
-                if (std::abs(dir_start.x - grp_cfg.targets[b].direction.x) > 1.0e-6f
-                    || std::abs(dir_start.y - grp_cfg.targets[b].direction.y) > 1.0e-6f
-                    || std::abs(dir_end.x - grp_cfg.targets[b].direction_end.x) > 1.0e-6f
-                    || std::abs(dir_end.y - grp_cfg.targets[b].direction_end.y) > 1.0e-6f) {
-                    grp_cfg.targets[b].direction = dir_start;
-                    grp_cfg.targets[b].direction_end = dir_end;
-                    grp_cfg.config_generation++;
+        if (has_celestial) {
+            double unix_s = (frame_timestamp_utc > 0.0)
+                                ? frame_timestamp_utc
+                                : std::chrono::duration_cast<std::chrono::duration<double>>(
+                                      std::chrono::system_clock::now().time_since_epoch())
+                                      .count();
+            const double frame_duration_s =
+                static_cast<double>(_samples_per_data_set) * charts::constants::fpga_time_resolution_s;
+            const double unix_s_end = unix_s + frame_duration_s;
+
+            const double lst_start =
+                charts::constants::lst_hours_from_unix(unix_s, grp_cfg.site.lon_deg);
+            const double lst_end =
+                charts::constants::lst_hours_from_unix(unix_s_end, grp_cfg.site.lon_deg);
+
+            for (std::size_t b = 0; b < active_beams; ++b) {
+                if (grp_cfg.targets[b].celestial.is_set) {
+                    DirectDirection3D dir_start, dir_end;
+                    compute_celestial_direction(grp_cfg.targets[b].celestial.ra_deg,
+                                                grp_cfg.targets[b].celestial.dec_deg, lst_start,
+                                                grp_cfg.site.lat_deg, dir_start);
+                    compute_celestial_direction(grp_cfg.targets[b].celestial.ra_deg,
+                                                grp_cfg.targets[b].celestial.dec_deg, lst_end,
+                                                grp_cfg.site.lat_deg, dir_end);
+
+                    if (std::abs(dir_start.x - grp_cfg.targets[b].direction.x) > 1.0e-6f
+                        || std::abs(dir_start.y - grp_cfg.targets[b].direction.y) > 1.0e-6f
+                        || std::abs(dir_end.x - grp_cfg.targets[b].direction_end.x) > 1.0e-6f
+                        || std::abs(dir_end.y - grp_cfg.targets[b].direction_end.y) > 1.0e-6f) {
+                        grp_cfg.targets[b].direction = dir_start;
+                        grp_cfg.targets[b].direction_end = dir_end;
+                        grp_cfg.config_generation++;
+                    }
                 }
             }
         }
@@ -1299,8 +1316,19 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
 
     std::shared_ptr<metadataObject> meta =
         device.get_gpu_memory_array_metadata(_gpu_mem_voltage, gpu_frame_id);
+    if (meta) {
+        device.claim_gpu_memory_array_metadata(_gpu_mem_formed_beams, gpu_frame_id, meta);
+    }
     auto charts_meta = meta ? std::dynamic_pointer_cast<chartsMetadata>(meta) : nullptr;
     if (charts_meta) {
+        if (charts_meta->has_coarse_freq()) {
+            const auto cf = charts_meta->get_coarse_freq();
+            if (!cf.empty()) {
+                _gains_first_channel = cf.front();
+                _freq_start_hz = charts::constants::charts_frequency_start_hz
+                                 + static_cast<double>(cf.front()) * _freq_step_hz;
+            }
+        }
         if (charts_meta->has_frame_counter()) {
                 current_frame = charts_meta->get_frame_counter();
             } else if (charts_meta->has_fpga_seq_num()) {
@@ -1420,6 +1448,21 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
     }
 
     return record_end_event();
+}
+
+void cudaDirectBeamTrackerCommand::finalize_frame() {
+    gpuCommand::finalize_frame();
+    const double exec_s = get_last_gpu_execution_time();
+    if (_tracker_kernel_time && exec_s > 0.0) {
+        _tracker_kernel_time->add_sample(exec_s * 1e3);
+    }
+    if (_tracker_realtime_budget && exec_s > 0.0) {
+        const double frame_ms =
+            static_cast<double>(_samples_per_data_set) * _sample_period_s * 1e3;
+        if (frame_ms > 0.0) {
+            _tracker_realtime_budget->add_sample((exec_s * 1e3 / frame_ms) * 100.0);
+        }
+    }
 }
 
 } // namespace kotekan
