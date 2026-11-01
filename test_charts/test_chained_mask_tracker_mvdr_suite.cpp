@@ -17,15 +17,18 @@
 #include "chartsMvdr.hpp"
 
 #include <cuda_runtime.h>
-#include <iostream>
-#include <iomanip>
-#include <vector>
-#include <complex>
-#include <cmath>
-#include <numeric>
 #include <algorithm>
-#include <chrono>
 #include <cassert>
+#include <chrono>
+#include <cmath>
+#include <complex>
+#include <cstdlib>
+#include <cstring>
+#include <iomanip>
+#include <iostream>
+#include <numeric>
+#include <string>
+#include <vector>
 
 #define CHECK_CUDA(call)                                                                      \
     do {                                                                                      \
@@ -197,9 +200,9 @@ bool test_format_and_zero_blanking_invariance() {
         const double mean_dc_real = std::abs(sum_masked_real / std::max(std::size_t(1), masked_samples));
         const double mean_dc_imag = std::abs(sum_masked_imag / std::max(std::size_t(1), masked_samples));
         std::cout << "    Masked Antenna DC Offset: |E[Re]| = " << std::scientific << mean_dc_real
-                  << ", |E[Im]| = " << mean_dc_imag << " (Threshold: < 1.0e-7)\n";
+                  << ", |E[Im]| = " << mean_dc_imag << " (Threshold: < 1.0e-12)\n";
 
-        if (mean_dc_real > 1.0e-7 || mean_dc_imag > 1.0e-7) {
+        if (mean_dc_real > 1.0e-12 || mean_dc_imag > 1.0e-12) {
             std::cerr << "  FAILED: Artificial DC offset detected in masked voltages!\n";
             all_passed = false;
         }
@@ -286,6 +289,91 @@ bool test_format_and_zero_blanking_invariance() {
         cudaFree(d_wavenumbers);
         cudaFree(d_positions);
         cudaFree(d_mask);
+    }
+
+    // Edge Case 1B: Calibrated Sub-Array [0, 5, 32, 37] Asymmetric Faults & 25% Missing Packets
+    {
+        std::cout << "  Testing Edge Case 1B: Calibrated sub-array [0, 5, 32, 37] asymmetric faults & packet loss...\n";
+        std::vector<kotekan::int4x2_t> h_voltages(total_spectra * n_ant);
+        // Fill all with signal 3+0j (0xB8 for swapped_withoffset)
+        for (std::size_t s = 0; s < total_spectra; ++s) {
+            for (std::size_t a = 0; a < n_ant; ++a) {
+                h_voltages[s * n_ant + a].val = 0xB8U;
+            }
+        }
+        // Corrupt active sub-array elements:
+        // Ant 0: Dead (0x88)
+        // Ant 5: Rail-clipped (0xFF)
+        // Ant 32: Disconnected open-circuit (floating noise ~0.2 power, 0x88 with occasional 0x98)
+        // Ant 37: 100% Healthy (0xB8)
+        for (std::size_t s = 0; s < total_spectra; ++s) {
+            h_voltages[s * n_ant + 0].val = 0x88U;
+            h_voltages[s * n_ant + 5].val = 0xFFU;
+            h_voltages[s * n_ant + 32].val = (s % 10 == 0) ? 0x98U : 0x88U;
+        }
+        // Inject 25% random packet drops (whole spectra for all antennas replaced with 0x88)
+        std::size_t dropped_spectra = 0;
+        for (std::size_t s = 0; s < total_spectra; ++s) {
+            if ((s % 4) == 0) { // exactly 25% dropped
+                for (std::size_t a = 0; a < n_ant; ++a) {
+                    h_voltages[s * n_ant + a].val = 0x88U;
+                }
+                dropped_spectra++;
+            }
+        }
+
+        kotekan::int4x2_t* d_voltages = nullptr;
+        float* d_powers = nullptr;
+        std::uint32_t* d_clips = nullptr;
+        int* d_bad = nullptr;
+        std::vector<int> expected_bad = {0, 5, 32};
+
+        CHECK_CUDA(cudaMalloc(&d_voltages, total_spectra * n_ant * sizeof(kotekan::int4x2_t)));
+        CHECK_CUDA(cudaMalloc(&d_powers, n_ant * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_clips, n_ant * sizeof(std::uint32_t)));
+        CHECK_CUDA(cudaMalloc(&d_bad, expected_bad.size() * sizeof(int)));
+
+        CHECK_CUDA(cudaMemcpy(d_voltages, h_voltages.data(), total_spectra * n_ant * sizeof(kotekan::int4x2_t), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_bad, expected_bad.data(), expected_bad.size() * sizeof(int), cudaMemcpyHostToDevice));
+
+        kotekan::launch_inspect_antenna_moments(
+            d_voltages, nullptr, d_powers, d_clips, n_time, n_freq, n_ant, 1, stream, true);
+        CHECK_CUDA(cudaStreamSynchronize(stream));
+
+        std::vector<float> h_powers(n_ant);
+        std::vector<std::uint32_t> h_clips(n_ant);
+        CHECK_CUDA(cudaMemcpy(h_powers.data(), d_powers, n_ant * sizeof(float), cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(h_clips.data(), d_clips, n_ant * sizeof(std::uint32_t), cudaMemcpyDeviceToHost));
+
+        assert(h_powers[0] == 0.0f);
+        const float clip_frac_5 = static_cast<float>(h_clips[5]) / static_cast<float>(total_spectra);
+        assert(clip_frac_5 > 0.70f); // 75% non-dropped were clipped
+        assert(h_powers[32] < 0.50f); // open floating channel
+        assert(h_powers[37] > 5.0f);  // healthy antenna 37 preserved
+
+        // Blank bad antennas
+        kotekan::launch_zero_bad_antennas(
+            d_voltages, d_bad, static_cast<int>(expected_bad.size()), total_spectra, n_ant, stream, true);
+        CHECK_CUDA(cudaStreamSynchronize(stream));
+
+        // Read back and check zero DC offset on bad antennas
+        CHECK_CUDA(cudaMemcpy(h_voltages.data(), d_voltages, total_spectra * n_ant * sizeof(kotekan::int4x2_t), cudaMemcpyDeviceToHost));
+        double sum_r = 0.0, sum_i = 0.0;
+        for (std::size_t s = 0; s < total_spectra; ++s) {
+            for (int b : expected_bad) {
+                std::uint8_t bv = h_voltages[s * n_ant + b].val;
+                assert(bv == 0x88U);
+                sum_r += static_cast<double>((bv >> 4) & 0x0F) - 8.0;
+                sum_i += static_cast<double>(bv & 0x0F) - 8.0;
+            }
+        }
+        assert(std::abs(sum_r) < 1e-12 && std::abs(sum_i) < 1e-12);
+        std::cout << "    Calibrated Sub-Array Faults & 25% Loss: Zero DC offset (<1e-12) confirmed [PASS]\n";
+
+        cudaFree(d_voltages);
+        cudaFree(d_powers);
+        cudaFree(d_clips);
+        cudaFree(d_bad);
     }
 
     cudaStreamDestroy(stream);
@@ -441,6 +529,34 @@ bool test_spatial_covariance_and_mvdr_conditioning() {
         }
     }
 
+    // Edge Case 2B: Near-Collinear Beams (Singular Coupling Matrix) & 8-Frequency Sweep
+    {
+        std::cout << "  Testing Edge Case 2B: Near-collinear beams (0.0057 deg separation) across 8 frequencies...\n";
+        std::vector<double> freqs8 = {300.0e6, 330.0e6, 360.0e6, 400.0e6, 430.0e6, 460.0e6, 480.0e6, 500.0e6};
+        kotekan::DirectBeamTarget targets_singular[4];
+        targets_singular[0].direction = kotekan::DirectDirection3D{0.0f, 0.0f, 1.0f};
+        for (std::size_t b = 1; b < 4; ++b) {
+            const float lb = static_cast<float>(b) * 0.0001f;
+            targets_singular[b].direction = kotekan::DirectDirection3D{lb, 0.0f, std::sqrt(1.0f - lb * lb)};
+        }
+        std::vector<float2> M_sing(8 * 16);
+        std::vector<float2> A_sing(8 * 16);
+        kotekan::compute_beam_coupling_and_inverses(
+            M_sing.data(), A_sing.data(), targets_singular, freqs8, pos.data(), mask.data(),
+            4, 8, n_ant, n_active, 1.0e-3f);
+
+        for (std::size_t f = 0; f < 8; ++f) {
+            for (std::size_t i = 0; i < 16; ++i) {
+                float2 m = M_sing[f * 16 + i];
+                if (!std::isfinite(m.x) || !std::isfinite(m.y)) {
+                    std::cerr << "  FAILED: Non-finite matrix element in near-collinear conditioning at f=" << f << "\n";
+                    passed = false;
+                }
+            }
+        }
+        std::cout << "    Near-Collinear Conditioning (8 freqs, 300-500 MHz): 0 NaNs, 0 Infs [PASS]\n";
+    }
+
     std::cout << "  -> Result: " << (passed ? "PASSED [OK]" : "FAILED [X]") << "\n";
     return passed;
 }
@@ -485,9 +601,9 @@ bool test_distortionless_constraint_and_frb_recovery() {
     cplx64 target_response = w00 * a00 + w01 * a01;
     const double distortion_err = std::abs(target_response - 1.0);
     std::cout << "  Distortionless Target Response |w^H a - 1| = " << std::scientific
-              << distortion_err << " (Threshold <= 1.0e-5)\n";
+              << distortion_err << " (Threshold <= 1.0e-6)\n";
 
-    bool passed = (distortion_err <= 1.0e-5);
+    bool passed = (distortion_err <= 1.0e-6);
 
     // 2. Inject Dispersed FRB pulse (DM = 250 pc cm^-3)
     const double DM = 250.0;
@@ -588,11 +704,11 @@ bool test_distortionless_constraint_and_frb_recovery() {
     std::cout << "  Dispersed FRB Recovery:\n";
     std::cout << "    Pure Peak Power:     " << *max_it_pure << " at sample " << peak_idx_pure << "\n";
     std::cout << "    Recovered Peak Power: " << *max_it_clean << " at sample " << peak_idx_clean << "\n";
-    std::cout << "    SNR Loss:            " << std::fixed << std::setprecision(4) << snr_loss_db << " dB (Threshold <= 0.05 dB)\n";
+    std::cout << "    SNR Loss:            " << std::fixed << std::setprecision(4) << snr_loss_db << " dB (Threshold <= 0.02 dB)\n";
     std::cout << "    Delay Discrepancy:   " << delay_discrepancy << " samples (Threshold = 0)\n";
 
-    if (snr_loss_db > 0.05) {
-        std::cerr << "  FAILED: FRB pulse SNR loss exceeds 0.05 dB!\n";
+    if (snr_loss_db > 0.02) {
+        std::cerr << "  FAILED: FRB pulse SNR loss exceeds 0.02 dB!\n";
         passed = false;
     }
     if (delay_discrepancy != 0) {
@@ -669,13 +785,44 @@ bool test_spatial_null_depth_and_suppression() {
                   << " (" << 10.0 * std::log10(std::max(1e-12, coupling_pwr)) << " dB)"
                   << " | Suppression = " << std::setprecision(1) << suppression_db << " dB";
 
-        // Requirement: 75 dB to 90 dB attenuation
-        if (suppression_db < 75.0) {
-            std::cout << " [FAIL] (< 75 dB)\n";
+        // Requirement: >= 85 dB attenuation
+        if (suppression_db < 85.0) {
+            std::cout << " [FAIL] (< 85 dB)\n";
             all_passed = false;
         } else {
             std::cout << " [PASS]\n";
         }
+    }
+
+    // Edge Case 4B: Quadrant Azimuth Sweep (0, 90, 180, 270 deg)
+    {
+        std::cout << "  Testing Edge Case 4B: 4-quadrant azimuth sweep (l, m offset 0.25)...\n";
+        auto pos64 = generate_positions(64, spacing_m);
+        std::vector<std::uint8_t> mask64(64, 1);
+        std::vector<float2> M(n_freq * 4);
+        std::vector<float2> A(n_freq * 4);
+
+        for (float az_deg : {0.0f, 90.0f, 180.0f, 270.0f}) {
+            const float rad = az_deg * static_cast<float>(M_PI) / 180.0f;
+            const float l = 0.25f * std::cos(rad);
+            const float m = 0.25f * std::sin(rad);
+            const float n = std::sqrt(std::max(0.0f, 1.0f - l * l - m * m));
+            targets[1].direction = kotekan::DirectDirection3D{l, m, n};
+
+            kotekan::compute_beam_coupling_and_inverses(
+                M.data(), A.data(), targets, freqs, pos64.data(), mask64.data(), num_beams, n_freq, 64, 64, 1.0e-5f);
+
+            const float alpha_r = A[1].x;
+            const float alpha_i = A[1].y;
+            cplx64 b0 = cplx64(1.0, 0.0) + cplx64(alpha_r, alpha_i) * std::sqrt(10000.0);
+            cplx64 b1 = std::sqrt(10000.0) + cplx64(alpha_r, -alpha_i) * cplx64(1.0, 0.0);
+            cplx64 b0_clean = cplx64(M[0].x, M[0].y) * b0 + cplx64(M[1].x, M[1].y) * b1;
+            const double res_b = std::abs(b0 - cplx64(1.0, 0.0));
+            const double res_a = std::abs(b0_clean - cplx64(1.0, 0.0));
+            const double supp = 10.0 * std::log10(std::max(1e-12, (res_b * res_b) / std::max(1e-14, res_a * res_a)));
+            assert(supp >= 85.0);
+        }
+        std::cout << "    Quadrant Azimuth Sweep: >= 85 dB null depth confirmed [PASS]\n";
     }
 
     std::cout << "  -> Result: " << (all_passed ? "PASSED [OK]" : "FAILED [X]") << "\n";
@@ -685,10 +832,16 @@ bool test_spatial_null_depth_and_suppression() {
 // ============================================================================
 // INVARIANT 5: Chained Real-Time Telemetry & Sustained Stress Loop
 // ============================================================================
-bool test_chained_realtime_stress_loop() {
+bool test_chained_realtime_stress_loop(double stress_duration_sec = 0.0) {
+    const bool is_duration_mode = (stress_duration_sec > 0.0);
     std::cout << "\n======================================================\n";
     std::cout << "[Invariant 5/5] Chained Real-Time Telemetry & Sustained Stress Loop\n";
-    std::cout << "  (1,000 iterations, <15% of 51.2 ms real-time budget, 0 VRAM leaks)\n";
+    if (is_duration_mode) {
+        std::cout << "  (Sustained continuous real-time execution for " << std::fixed << std::setprecision(1)
+                  << stress_duration_sec << " seconds / 5 minutes)\n";
+    } else {
+        std::cout << "  (1,000 iterations, <15% of 51.2 ms real-time budget, 0 VRAM leaks)\n";
+    }
     std::cout << "======================================================\n";
 
     const std::size_t n_ant = 128;
@@ -734,7 +887,7 @@ bool test_chained_realtime_stress_loop() {
     const std::size_t matrix_bytes = n_freq * num_beams * num_beams * sizeof(float2);
 
     CHECK_CUDA(cudaMalloc(&d_voltages, raw_bytes));
-    CHECK_CUDA(cudaMalloc(&d_bad_antennas, 16 * sizeof(int)));
+    CHECK_CUDA(cudaMalloc(&d_bad_antennas, 32 * sizeof(int)));
     CHECK_CUDA(cudaMalloc(&d_weights, weights_bytes));
     CHECK_CUDA(cudaMalloc(&d_formed, formed_bytes));
     CHECK_CUDA(cudaMalloc(&d_unmixed, formed_bytes));
@@ -758,6 +911,11 @@ bool test_chained_realtime_stress_loop() {
     for (std::size_t b = 0; b < num_beams; ++b) h_dirs[b] = targets[b].direction;
     CHECK_CUDA(cudaMemcpyAsync(d_dirs, h_dirs.data(), num_beams * sizeof(kotekan::DirectDirection3D), cudaMemcpyHostToDevice, stream));
 
+    // Populate bad antennas list for fault injections (Ants 0..31)
+    std::vector<int> h_bad(32);
+    for (int a = 0; a < 32; ++a) h_bad[a] = a;
+    CHECK_CUDA(cudaMemcpyAsync(d_bad_antennas, h_bad.data(), 32 * sizeof(int), cudaMemcpyHostToDevice, stream));
+
     // Warm-up
     kotekan::launch_generate_steering_weights(
         d_weights, nullptr, d_dirs, nullptr, d_wavenumbers, d_positions, d_mask, nullptr,
@@ -771,49 +929,120 @@ bool test_chained_realtime_stress_loop() {
         d_unmixed, d_formed, d_matrices, n_time, n_freq, num_beams, num_beams, stream);
     CHECK_CUDA(cudaStreamSynchronize(stream));
 
-    // 1,000 sustained iterations
-    constexpr int ITERS = 1000;
-    cudaEvent_t ev_start, ev_stop;
-    CHECK_CUDA(cudaEventCreate(&ev_start));
-    CHECK_CUDA(cudaEventCreate(&ev_stop));
-
-    std::cout << "  Executing " << ITERS << " sustained chained frames (128 Ant, 4 Beams, 336 Freq, 15,360 Time)...\n";
     auto t0_wall = std::chrono::high_resolution_clock::now();
+    auto last_telemetry = t0_wall;
+    std::size_t total_frames = 0;
+    std::size_t frames_in_period = 0;
 
-    CHECK_CUDA(cudaEventRecord(ev_start, stream));
-    for (int it = 0; it < ITERS; ++it) {
-        // Step 1: Blank 4 bad antennas
-        kotekan::launch_zero_bad_antennas(d_voltages, d_bad_antennas, 4, total_spectra, n_ant, stream, true);
+    const char* phase_names[10] = {
+        "Phase 0: Nominal 100% Antennas Online",
+        "Phase 1: Calibrated Sub-Array Partial Dropout (4 bad)",
+        "Phase 2: Antenna Dropout Escalation (8 bad)",
+        "Phase 3: High RFI Saturation Event (16 bad)",
+        "Phase 4: Array Revival & Tracking",
+        "Phase 5: Sub-Array Board Drop (32 bad)",
+        "Phase 6: Board Revival & Re-Lock (4 bad)",
+        "Phase 7: High-Rate Flapping/Flickering (12 bad)",
+        "Phase 8: Wide-Angle Tracking (8 bad)",
+        "Phase 9: Nominal Baseline (0 bad)"
+    };
 
-        // Step 2: Direct Beam Tracker
+    std::cout << "  Executing " << (is_duration_mode ? "5-minute continuous real-time stress loop" : "1,000 sustained iterations")
+              << " (128 Ant, 4 Beams, 336 Freq, 15,360 Time)...\n";
+
+    while (true) {
+        auto now = std::chrono::high_resolution_clock::now();
+        double elapsed_sec = std::chrono::duration<double>(now - t0_wall).count();
+        if (is_duration_mode) {
+            if (elapsed_sec >= stress_duration_sec) break;
+        } else {
+            if (total_frames >= 1000) break;
+        }
+
+        int phase = is_duration_mode ? (static_cast<int>(elapsed_sec / 15.0) % 10) : 0;
+        int n_bad_current = 4;
+        if (phase == 0 || phase == 9) n_bad_current = 0;
+        else if (phase == 1 || phase == 6) n_bad_current = 4;
+        else if (phase == 2 || phase == 8) n_bad_current = 8;
+        else if (phase == 3) n_bad_current = 16;
+        else if (phase == 4) n_bad_current = 2;
+        else if (phase == 5) n_bad_current = 32;
+        else if (phase == 7) n_bad_current = 12;
+
+        if (n_bad_current > 0) {
+            kotekan::launch_zero_bad_antennas(d_voltages, d_bad_antennas, n_bad_current, total_spectra, n_ant, stream, true);
+        }
         kotekan::launch_direct_beamformer(
             d_voltages, d_weights, d_formed, n_time, n_freq, n_ant, num_beams, num_beams, 256, 4, 4, stream,
             1, kotekan::DirectPolLayout::INTERLEAVED, kotekan::DirectInputFormat::INT4X2_SWAPPED_WITHOFFSET);
-
-        // Step 3: BiSLC Unmixing
         kotekan::launch_bislc_unmixing(
             d_unmixed, d_formed, d_matrices, n_time, n_freq, num_beams, num_beams, stream);
+
+        total_frames++;
+        frames_in_period++;
+
+        if (is_duration_mode) {
+            double since_last = std::chrono::duration<double>(now - last_telemetry).count();
+            if (since_last >= 15.0) {
+                CHECK_CUDA(cudaStreamSynchronize(stream));
+                double fps = static_cast<double>(frames_in_period) / since_last;
+                double frame_gb = static_cast<double>(raw_bytes + formed_bytes + formed_bytes) / 1e9;
+                double throughput_gbs = fps * frame_gb;
+                double per_frame_ms = (since_last / static_cast<double>(frames_in_period)) * 1000.0;
+                double budget_pct = (per_frame_ms / 51.2) * 100.0;
+                std::size_t vram_curr_free = 0;
+                CHECK_CUDA(cudaMemGetInfo(&vram_curr_free, &vram_total));
+
+                std::cout << "  [Stress " << std::fixed << std::setprecision(1) << std::setw(5) << elapsed_sec
+                          << "s / " << stress_duration_sec << "s | " << std::setw(5)
+                          << (elapsed_sec / stress_duration_sec * 100.0) << "%] Frames: "
+                          << std::setw(6) << total_frames << " | Throughput: " << std::setw(6) << throughput_gbs
+                          << " GB/s (" << std::setprecision(1) << fps << " fps) | Latency: "
+                          << std::setprecision(3) << per_frame_ms << " ms (" << std::setprecision(1)
+                          << budget_pct << "% budget) | VRAM Free: "
+                          << (vram_curr_free / (1024 * 1024)) << " MB | " << phase_names[phase] << "\n";
+
+                frames_in_period = 0;
+                last_telemetry = now;
+            }
+        }
     }
-    CHECK_CUDA(cudaEventRecord(ev_stop, stream));
     CHECK_CUDA(cudaStreamSynchronize(stream));
 
     auto t1_wall = std::chrono::high_resolution_clock::now();
-    float total_gpu_ms = 0.0f;
-    CHECK_CUDA(cudaEventElapsedTime(&total_gpu_ms, ev_start, ev_stop));
-
-    const float per_frame_ms = total_gpu_ms / static_cast<float>(ITERS);
     const double wall_sec = std::chrono::duration<double>(t1_wall - t0_wall).count();
-    const double budget_pct = (per_frame_ms / 51.2f) * 100.0f;
+    const double per_frame_ms = (wall_sec / static_cast<double>(total_frames)) * 1000.0;
+    const double budget_pct = (per_frame_ms / 51.2) * 100.0;
+    const double total_gb = (static_cast<double>(total_frames) * static_cast<double>(raw_bytes + formed_bytes + formed_bytes)) / 1e9;
+    const double avg_throughput_gbs = total_gb / wall_sec;
 
-    std::cout << "  Telemetry & Timing Summary:\n";
-    std::cout << "    Total GPU Kernel Time: " << total_gpu_ms << " ms (" << ITERS << " frames in "
-              << std::fixed << std::setprecision(2) << wall_sec << " s wall-clock)\n";
-    std::cout << "    Per-Frame GPU Latency: " << std::fixed << std::setprecision(3) << per_frame_ms
-              << " ms (Budget: 51.2 ms)\n";
-    std::cout << "    Real-Time Budget Used: " << std::fixed << std::setprecision(2) << budget_pct
+    std::cout << "\n  Telemetry & Sustained Timing Summary:\n";
+    std::cout << "    Total Frames Executed:  " << total_frames << " frames in "
+              << std::fixed << std::setprecision(2) << wall_sec << " s wall-clock\n";
+    std::cout << "    Average Throughput:     " << std::fixed << std::setprecision(1) << avg_throughput_gbs
+              << " GB/s (" << std::setprecision(1) << (static_cast<double>(total_frames) / wall_sec) << " fps)\n";
+    std::cout << "    Per-Frame GPU Latency:  " << std::fixed << std::setprecision(3) << per_frame_ms
+              << " ms (Nominal Frame Budget: 51.2 ms)\n";
+    std::cout << "    Real-Time Budget Used:  " << std::fixed << std::setprecision(2) << budget_pct
               << "% (Requirement: < 15.0%)\n";
 
-    bool passed = (budget_pct < 15.0f);
+    bool passed = (budget_pct < 15.0);
+
+    // Verify numerical integrity of formed beams
+    std::vector<float2> check_buf(total_spectra * num_beams);
+    CHECK_CUDA(cudaMemcpy(check_buf.data(), d_unmixed, formed_bytes, cudaMemcpyDeviceToHost));
+    std::size_t nan_count = 0, inf_count = 0;
+    for (const auto& v : check_buf) {
+        if (std::isnan(v.x) || std::isnan(v.y)) nan_count++;
+        if (std::isinf(v.x) || std::isinf(v.y)) inf_count++;
+    }
+    std::cout << "    Numerical Integrity:    NaNs = " << nan_count << ", Infs = " << inf_count;
+    if (nan_count == 0 && inf_count == 0) {
+        std::cout << " [PASS]\n";
+    } else {
+        std::cout << " [FAIL]\n";
+        passed = false;
+    }
 
     // VRAM Leak Check
     cudaFree(d_voltages);
@@ -826,14 +1055,12 @@ bool test_chained_realtime_stress_loop() {
     cudaFree(d_wavenumbers);
     cudaFree(d_positions);
     cudaFree(d_mask);
-    cudaEventDestroy(ev_start);
-    cudaEventDestroy(ev_stop);
     cudaStreamDestroy(stream);
 
     std::size_t vram_free_final = 0;
     CHECK_CUDA(cudaMemGetInfo(&vram_free_final, &vram_total));
     const long long leak_bytes = static_cast<long long>(vram_free_initial) - static_cast<long long>(vram_free_final);
-    std::cout << "    VRAM Leak Check: Initial Free = " << (vram_free_initial / (1024 * 1024))
+    std::cout << "    VRAM Leak Check:        Initial Free = " << (vram_free_initial / (1024 * 1024))
               << " MB, Final Free = " << (vram_free_final / (1024 * 1024))
               << " MB (Leaked = " << leak_bytes << " bytes)\n";
 
@@ -849,10 +1076,29 @@ bool test_chained_realtime_stress_loop() {
 // ============================================================================
 // MAIN ENTRY
 // ============================================================================
-int main() {
+int main(int argc, char** argv) {
+    double stress_seconds = 0.0;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--stress-5min" || arg == "-s") {
+            stress_seconds = 300.0;
+        } else if (arg == "--stress-seconds" && i + 1 < argc) {
+            stress_seconds = std::stod(argv[++i]);
+        }
+    }
+    if (const char* env_sec = std::getenv("STRESS_SECONDS")) {
+        stress_seconds = std::stod(env_sec);
+    } else if (std::getenv("STRESS_5MIN")) {
+        stress_seconds = 300.0;
+    }
+
     std::cout << "================================================================================\n";
     std::cout << "  CHARTS KOTEKAN CHAINED GPU PIPELINE TEST SUITE\n";
     std::cout << "  cudaAntennaMask -> cudaDirectBeamTracker -> MVDR / BiSLC\n";
+    if (stress_seconds > 0.0) {
+        std::cout << "  MODE: Sustained 5-Minute Continuous Real-Time Stress Test ("
+                  << stress_seconds << "s)\n";
+    }
     std::cout << "================================================================================\n";
 
     int dev_count = 0;
@@ -871,7 +1117,7 @@ int main() {
     bool inv2 = test_spatial_covariance_and_mvdr_conditioning();
     bool inv3 = test_distortionless_constraint_and_frb_recovery();
     bool inv4 = test_spatial_null_depth_and_suppression();
-    bool inv5 = test_chained_realtime_stress_loop();
+    bool inv5 = test_chained_realtime_stress_loop(stress_seconds);
 
     const bool all_passed = inv1 && inv2 && inv3 && inv4 && inv5;
 

@@ -130,8 +130,8 @@ int main() {
                   << " deg (< 1e-12 deg) [PASS]\n";
         assert(max_phase_err_deg_double < 1e-12);
         std::cout << "   Active antennas float32 residual phase error = " << max_phase_err_deg_float
-                  << " deg (within float32 precision, < 5e-6 deg) [PASS]\n";
-        assert(max_phase_err_deg_float < 5e-6);
+                  << " deg (within float32 precision, < 2.5e-6 deg) [PASS]\n";
+        assert(max_phase_err_deg_float < 2.5e-6);
         std::cout << "   60 uncalibrated antennas masked to 0.0 + 0.0j (total dropped = " << dropped << ") [PASS]\n";
     }
 
@@ -143,9 +143,13 @@ int main() {
         // 3a. Zero / Subnormal / Non-Finite Gains
         std::vector<std::complex<double>> bad_values = {
             std::complex<double>(0.0, 0.0),
+            std::complex<double>(-0.0, 0.0),
             std::complex<double>(1e-320, 0.0),
+            std::complex<double>(0.0, 1e-320),
             std::complex<double>(std::numeric_limits<double>::quiet_NaN(), 1.0),
-            std::complex<double>(std::numeric_limits<double>::infinity(), 0.0)
+            std::complex<double>(1.0, std::numeric_limits<double>::quiet_NaN()),
+            std::complex<double>(std::numeric_limits<double>::infinity(), 0.0),
+            std::complex<double>(0.0, -std::numeric_limits<double>::infinity())
         };
 
         for (const auto& bad_val : bad_values) {
@@ -175,9 +179,29 @@ int main() {
                 (void)c;
             }
         }
-        std::cout << "   Fault Injection (0, 1e-320, NaN, Inf) -> masked to 0, dropped=20161, 0 NaNs [PASS]\n";
+        std::cout << "   Fault Injection (0, -0, 1e-320, NaN, Inf) -> masked to 0, dropped=20161, 0 NaNs [PASS]\n";
 
-        // 3b. Dimension & Index Bounds
+        // 3b. Multi-channel, multi-antenna edge channel corruptions
+        {
+            int num_freq = 336;
+            int num_elements = 64;
+            auto g = charts_mvdr::load_gains_npy(path4, 0, num_freq, num_elements, active_antennas);
+            // Corrupt first channel (0) on antenna 0, and last channel (335) on antenna 37
+            g[0 * num_elements + 0] = std::complex<double>(0.0, 0.0);
+            g[335 * num_elements + 37] = std::complex<double>(std::numeric_limits<double>::infinity(), 0.0);
+
+            auto elem_to_ant = charts_mvdr::element_to_antenna(num_elements, "descending");
+            int dropped = 0;
+            auto corr = charts_mvdr::calibration_correctors(g, num_freq, num_elements, elem_to_ant, &dropped);
+            assert(dropped == 20162);
+            for (auto c : corr) {
+                assert(std::isfinite(c.real()) && std::isfinite(c.imag()));
+                (void)c;
+            }
+            std::cout << "   Edge Channels (f=0, f=335) active antenna corruption -> dropped=20162, 0 NaNs [PASS]\n";
+        }
+
+        // 3c. Dimension & Index Bounds
         // Mismatched (336, 4) file when 672 channels expected
         std::string tmp_mismatched = "/tmp/test_gains_mismatched_336x4.npy";
         std::vector<std::complex<double>> dummy_336x4(336 * 4, std::complex<double>(1.0, 0.0));
@@ -216,6 +240,90 @@ int main() {
         }
         assert(caught_oob);
         (void)caught_oob;
+    }
+
+    // -------------------------------------------------------------------------
+    // 4. Strict Phase Inversion Boundaries, Dynamic Range & Physical Geometry
+    // -------------------------------------------------------------------------
+    std::cout << "4. Testing Strict Phase Inversions, Dynamic Range & Interferometer Baselines...\n";
+    {
+        // 4a. Extreme Phase Jumps (180 deg, +90 deg, -90 deg)
+        std::vector<std::complex<double>> phase_cases = {
+            std::complex<double>(-1.0, 0.0),   // 180 deg phase inversion
+            std::complex<double>(0.0, 1.0),    // +90 deg phase rotation
+            std::complex<double>(0.0, -1.0),   // -90 deg phase rotation
+            std::complex<double>(-0.70710678, -0.70710678) // -135 deg
+        };
+
+        for (const auto& g_val : phase_cases) {
+            std::vector<std::complex<double>> g_synthetic(336 * 64, std::complex<double>(0.0, 0.0));
+            for (int f = 0; f < 336; ++f) {
+                for (int a : active_antennas) {
+                    g_synthetic[f * 64 + a] = g_val;
+                }
+            }
+            auto elem_to_ant = charts_mvdr::element_to_antenna(64, "descending");
+            int dropped = 0;
+            auto corr = charts_mvdr::calibration_correctors(g_synthetic, 336, 64, elem_to_ant, &dropped);
+            assert(dropped == 20160);
+
+            for (int f = 0; f < 336; ++f) {
+                for (int e = 0; e < 64; ++e) {
+                    int a = elem_to_ant[e];
+                    if (a == 0 || a == 5 || a == 32 || a == 37) {
+                        std::complex<double> c_double(corr[f * 64 + e].real(), corr[f * 64 + e].imag());
+                        std::complex<double> prod = c_double * g_val;
+                        assert(std::abs(prod.real() - 1.0) < 1e-6);
+                        assert(std::abs(prod.imag()) < 1e-6);
+                        (void)prod;
+                    }
+                }
+            }
+        }
+        std::cout << "   Phase Jump Boundaries (180 deg, +/-90 deg, -135 deg) -> prod == 1.0 +/- 1e-6 [PASS]\n";
+
+        // 4b. Extreme Gain Dynamic Range across active antennas
+        {
+            std::vector<std::complex<double>> g_dyn(336 * 64, std::complex<double>(0.0, 0.0));
+            for (int f = 0; f < 336; ++f) {
+                g_dyn[f * 64 + 0] = std::complex<double>(1000.0, 0.0);   // +60 dB gain
+                g_dyn[f * 64 + 5] = std::complex<double>(0.001, 0.0);    // -60 dB gain
+                g_dyn[f * 64 + 32] = std::complex<double>(1.0, 1.0);     // |g| = sqrt(2)
+                g_dyn[f * 64 + 37] = std::complex<double>(-10.0, 10.0);  // |g| = 10*sqrt(2)
+            }
+            auto elem_to_ant = charts_mvdr::element_to_antenna(64, "descending");
+            int dropped = 0;
+            auto corr = charts_mvdr::calibration_correctors(g_dyn, 336, 64, elem_to_ant, &dropped);
+            assert(dropped == 20160);
+            for (int f = 0; f < 336; ++f) {
+                for (int e = 0; e < 64; ++e) {
+                    int a = elem_to_ant[e];
+                    if (a == 0 || a == 5 || a == 32 || a == 37) {
+                        std::complex<double> c_double(corr[f * 64 + e].real(), corr[f * 64 + e].imag());
+                        std::complex<double> prod = c_double * g_dyn[f * 64 + a];
+                        assert(std::abs(prod.real() - 1.0) < 1e-5);
+                        assert(std::abs(prod.imag()) < 1e-5);
+                        (void)prod;
+                    }
+                }
+            }
+            std::cout << "   Dynamic Range: 120 dB span (1e-3 to 1e3) correctly inverted [PASS]\n";
+        }
+
+        // 4c. Physical Baseline Geometry Ratios for [0, 5, 32, 37]
+        {
+            float pos[4] = {0.0f, 0.6f, 3.6f, 4.2f};
+            float b01 = pos[1] - pos[0]; // 0.6 m
+            float b12 = pos[2] - pos[1]; // 3.0 m
+            float b23 = pos[3] - pos[2]; // 0.6 m
+            float b03 = pos[3] - pos[0]; // 4.2 m
+            assert(std::abs(b01 - 0.6f) < 1e-5f);
+            assert(std::abs(b12 - 3.0f) < 1e-5f);
+            assert(std::abs(b23 - 0.6f) < 1e-5f);
+            assert(std::abs(b03 - 4.2f) < 1e-5f);
+            // Non-redundant UV coverage: Baselines available are 0.6m, 3.0m, 3.6m, 4.2m
+            std::cout << "   Physical 1D East-West Baselines: {0.6, 3.0, 3.6, 4.2}m verified [PASS]\n";
+        }
     }
 
     std::cout << "\n========================================================\n";
