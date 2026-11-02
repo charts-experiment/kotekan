@@ -1,0 +1,69 @@
+# CHARTS CI: runs on PRs to and pushes on the CHARTS branches. main.yaml only
+# runs for upstream's develop branch.
+#
+# - Configs: static checks of charts/config/*.yaml against the source tree (no build).
+# - Build: builds kotekan with CUDA and DPDK in the GPU image (compile only, no GPU
+#   needed) and runs `kotekan --check-config` on every CHARTS config.
+#
+# Reuses build_push_docker.yaml (the image is built and pushed for the branch on
+# first use) and test_kotekan_build.yaml (build with ccache, then post_build).
+# Set the repository variable CHARTS_CI_RUNNER to run the build on a self-hosted
+# runner instead of ubuntu-latest.
+---
+name: CHARTS CI
+
+on:
+  pull_request:
+    branches:
+    - kotekan_charts
+    - kotekan_charts_next
+  push:
+    branches:
+    - kotekan_charts
+    - kotekan_charts_next
+  workflow_dispatch:
+
+# Cancel a superseded PR run on a new commit; let push runs finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+
+  configs:
+    name: "Configs"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          set -euo pipefail
+          python3 -m pip install -q pyyaml
+          python3 charts/ci/validate_charts_configs.py --self-test
+          python3 charts/ci/validate_charts_configs.py
+
+  kotekan-docker:
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/build_push_docker.yaml
+
+  build:
+    name: "Build (CUDA + DPDK)"
+    needs: [kotekan-docker, configs]
+    uses: ./.github/workflows/test_kotekan_build.yaml
+    with:
+      container_image: ${{ needs.kotekan-docker.outputs.docker_gpu_img_name }}
+      ccache_key: charts-gcc-cuda-dpdk
+      # Same options as the node build (no CMAKE_BUILD_TYPE): CUDA, DPDK and NUMA
+      # on, HDF5 off.
+      cmake_defs: >-
+        -DCCACHE=ON -DNO_MEMLOCK=ON
+        -DUSE_CUDA=ON -DUSE_DPDK=ON -DUSE_NUMA=ON
+        -DUSE_HIP=OFF -DUSE_OPENCL=OFF -DUSE_HDF5=OFF
+      post_build: |
+        bash charts/ci/check_configs.sh $GITHUB_WORKSPACE/build-2404/kotekan/kotekan
+      runs_on: ${{ vars.CHARTS_CI_RUNNER || 'ubuntu-latest' }}
