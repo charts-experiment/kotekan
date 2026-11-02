@@ -64,6 +64,8 @@ jobs:
         -DCCACHE=ON -DNO_MEMLOCK=ON
         -DUSE_CUDA=ON -DUSE_DPDK=ON -DUSE_NUMA=ON
         -DUSE_HIP=OFF -DUSE_OPENCL=OFF -DUSE_HDF5=OFF
+      # Only the kotekan binary: test_charts/ has many heavy CUDA test targets
+      build_target: kotekan
       post_build: |
         bash charts/ci/check_configs.sh $GITHUB_WORKSPACE/build-2404/kotekan/kotekan
       runs_on: ${{ vars.CHARTS_CI_RUNNER || 'ubuntu-latest' }}
