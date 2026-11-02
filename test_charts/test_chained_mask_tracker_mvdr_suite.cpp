@@ -585,7 +585,6 @@ bool test_distortionless_constraint_and_frb_recovery() {
 
     // 1. Distortionless Constraint Check: w_0^H a_0 = 1.0
     const float alpha_r = 0.15f, alpha_i = -0.10f;
-    const float alpha_sq = alpha_r * alpha_r + alpha_i * alpha_i;
 
     float2 A[4] = {make_float2(1.0f, 0.0f), make_float2(alpha_r, alpha_i),
                    make_float2(alpha_r, -alpha_i), make_float2(1.0f, 0.0f)};
@@ -764,7 +763,6 @@ bool test_spatial_null_depth_and_suppression() {
         const double coupling_pwr = static_cast<double>(alpha_r * alpha_r + alpha_i * alpha_i);
 
         const double p_rfi = 10000.0; // +40 dB INR
-        const double p_target = 1.0;  // 0 dB
 
         cplx64 b0 = cplx64(1.0, 0.0) + cplx64(alpha_r, alpha_i) * std::sqrt(p_rfi);
         cplx64 b1 = std::sqrt(p_rfi) + cplx64(alpha_r, -alpha_i) * cplx64(1.0, 0.0);
