@@ -13,9 +13,12 @@
  *    for elements (ry * block_size + py, rx * block_size + px). The kernel stores
  *    S_ij = sum conj(v_i) v_j; this code uses R_ij = conj(S_ij) = sum v_i conj(v_j).
  *  - Steering vector d_n = exp(-j 2 pi f (l x_n + m y_n) / c).
- *  - Gains follow the charts-utils convention v_obs = g v: covariances are corrected as
- *    G^-1 R G^-H. Elements with a non-finite or zero gain in a channel are left out of that
- *    channel (zero weight).
+ *  - Gains files follow charts-utils (cal_pipeline_gpu): x_obs = g x for the visibilities
+ *    V_ab = x_a conj(x_b) that charts-utils reads from these frames. charts-utils takes the
+ *    stored S as V, so x = conj(v) and the voltage-domain gain is conj(g); load_gains_npy
+ *    returns conj(g), and everything below uses v_obs = g_v v with g_v = conj(g_file):
+ *    covariances are corrected as G_v^-1 R G_v^-H. Elements with a non-finite or zero gain
+ *    in a channel are left out of that channel (zero weight).
  *  - MVDR: w = (F + delta I)^-1 d / (d^H (F + delta I)^-1 d), DFT: w = d / N.
  *  - WNG = N ||w||^2 (0 dB for DFT, higher is worse), N = usable elements in the channel.
  */
@@ -55,7 +58,8 @@ std::vector<int64_t> window_indices(int64_t t, int64_t last_index, int half_wind
 /// Read complex gains from a NumPy .npy file of shape (n_freq_file, num_elements) or
 /// (n_freq_file, subset_size) with antenna_subset, dtype complex64 or complex128,
 /// little-endian, C order (charts-utils cal_pipeline_gpu --save-avg-gains). Returns channels
-/// [first_channel, first_channel + num_freq) row-major for all num_elements antennas.
+/// [first_channel, first_channel + num_freq) row-major for all num_elements antennas, as
+/// voltage-domain gains g_v = conj(g_file) (see Conventions).
 std::vector<cplx> load_gains_npy(const std::string& path, int first_channel, int num_freq,
                                  int num_elements,
                                  const std::vector<int>& antenna_subset = {});
@@ -68,8 +72,9 @@ std::vector<int> element_to_antenna(int n, const std::string& antenna_order);
 std::vector<cplx> gains_to_elements(const std::vector<cplx>& gains, int num_freq,
                                     const std::vector<int>& elem_to_ant);
 
-/// Correctors c = 1 / g for a beamformer that multiplies its weights by c and forms
-/// y = sum_e w_e v_e (charts-utils convention v_obs = g v), laid out [freq][element]:
+/// Correctors c = 1 / g_v for a beamformer that multiplies its weights by c and forms
+/// y = sum_e w_e v_e (voltage-domain gains from load_gains_npy, v_obs = g_v v), laid out
+/// [freq][element]:
 /// element e takes the gain of antenna elem_to_ant[e]. Non-finite or zero gains give c = 0
 /// (the element is dropped). gains is [freq][antenna] with num_ant antennas.
 std::vector<std::complex<float>> calibration_correctors(const std::vector<cplx>& gains,

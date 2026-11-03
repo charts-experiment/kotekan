@@ -5,8 +5,8 @@ cudaOutputData) -> rawFileWrite of the formed beams (complex float32, frame size
 samples_per_data_set * num_local_freq * max_beams * 8 bytes, one file per frame).
 
 Beams are fixed directions (source_l0 / source_m0 keys). gains_file is a charts-utils
-complex .npy (n_channels, n_antennas), convention v_obs = g v; the tracker uses the
-corrector 1 / g per element. No antenna-mask stage (its automatic detection could mask
+complex .npy (n_channels, n_antennas), convention x_obs = g x with x = conj(v); the
+tracker uses the corrector 1 / conj(g) per element (load_gains_npy conjugates). No antenna-mask stage (its automatic detection could mask
 different antennas in runs that are compared). Kotekan exits after num_frames output files
 (the reader does not end the pipeline), so every frame is on disk.
 """

@@ -21,8 +21,9 @@
  * weights d / N and the MVDR weights (F + delta I)^-1 d / (d^H (F + delta I)^-1 d), and
  * outputs the beam power w^H R(t) w. Weights are recomputed at the first frame with at
  * least cov_min_frames frames in its window and then every update_every frames.
- * Optional complex antenna gains (charts-utils .npy, v_obs = g v) are removed as
- * G^-1 R G^-H; elements with NaN or zero gain are dropped from that channel.
+ * Optional complex antenna gains (charts-utils .npy, x_obs = g x; applied in the voltage
+ * domain as g_v = conj(g), see chartsMvdr.hpp) are removed as G_v^-1 R G_v^-H; elements
+ * with NaN or zero gain are dropped from that channel.
  *
  * The stage holds input frames t - H ... t + H (H = cov_half_window), so its latency is
  * H frames and in_buf needs at least 2 H + 2 frames. Output frame t is produced when frame
@@ -51,7 +52,8 @@
  * @conf positions_x_m       Array of double. Element x positions, correlator element order.
  * @conf positions_y_m       Array of double. Element y positions.
  * @conf beams               Array of [l, m]. Look directions (direction cosines).
- * @conf gains_file          String. Optional complex gains .npy (n_freq_file, num_elements).
+ * @conf gains_file          String. Optional complex gains .npy (n_freq_file, num_elements),
+ *                                   charts-utils convention (conjugated on load).
  * @conf gains_first_channel Int.    Row of the gains file for channel 0 (default 0).
  * @conf antenna_order       String. Logical antenna of correlator element e for the gains
  *                                   file: descending (n - 1 - e, default, as the baseband
