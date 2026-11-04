@@ -129,7 +129,10 @@ SELF_TEST_SRC = {
 def _cfg(handlers=None, commands=None, extra=None):
     cfg = {
         "dpdk": {"kotekan_stage": "dpdkCore", "handlers": handlers if handlers is not None else [
-            {"dpdk_handler": "rfsocHandlerShuffle", "coarse_freq_start": 0, "num_local_freq": 336},
+            {"name": "cudaInputData"},
+            {"name": "cudaAntennaMaskCommand"},
+            {"name": "cudaDirectBeamTrackerCommand"},
+            {"name": "cudaCorrelatorAstron", "freq_offset": 336},
             {"dpdk_handler": "rfsocHandlerShuffle", "coarse_freq_start": 336, "num_local_freq": 336},
         ]},
         "gpu": {"kotekan_stage": "cudaProcess", "commands": commands if commands is not None else [
