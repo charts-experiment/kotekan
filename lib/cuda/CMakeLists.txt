@@ -100,6 +100,8 @@ add_library(
     cudaCorrelatorAstron.cpp
     cudaBeamTrackerV5.cu
     cudaBeamTrackerCommand.cpp
+    cudaVisibilityCalibrator.cu
+    cudaVisibilityCalibrator.cpp
     cudaDirectBeamTracker.cu
     cudaDirectBeamTrackerCommand.cpp
     cudaAntennaMask.cu
