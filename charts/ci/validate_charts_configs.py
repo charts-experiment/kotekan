@@ -111,16 +111,16 @@ def check_file(path, src):
     if not isinstance(cfg, dict):
         return ["config is not a YAML mapping"]
     return check_config(cfg, src)
+
+
+SELF_TEST_SRC = {
+    "stages": {"dpdkCore", "cudaProcess", "rawFileWrite"},
     "cuda": {
         "cudaInputData",
         "cudaCorrelatorAstron",
         "cudaAntennaMaskCommand",
         "cudaDirectBeamTrackerCommand",
     },
-
-SELF_TEST_SRC = {
-    "stages": {"dpdkCore", "cudaProcess", "rawFileWrite"},
-    "cuda": {"cudaInputData", "cudaCorrelatorAstron"},
     "dpdk": {"rfsocHandlerShuffle"},
     "full_band": 672,
 }
@@ -129,14 +129,14 @@ SELF_TEST_SRC = {
 def _cfg(handlers=None, commands=None, extra=None):
     cfg = {
         "dpdk": {"kotekan_stage": "dpdkCore", "handlers": handlers if handlers is not None else [
+            {"dpdk_handler": "rfsocHandlerShuffle", "coarse_freq_start": 0, "num_local_freq": 336},
+            {"dpdk_handler": "rfsocHandlerShuffle", "coarse_freq_start": 336, "num_local_freq": 336},
+        ]},
+        "gpu": {"kotekan_stage": "cudaProcess", "commands": commands if commands is not None else [
             {"name": "cudaInputData"},
             {"name": "cudaAntennaMaskCommand"},
             {"name": "cudaDirectBeamTrackerCommand"},
             {"name": "cudaCorrelatorAstron", "freq_offset": 336},
-            {"dpdk_handler": "rfsocHandlerShuffle", "coarse_freq_start": 336, "num_local_freq": 336},
-        ]},
-        "gpu": {"kotekan_stage": "cudaProcess", "commands": commands if commands is not None else [
-            {"name": "cudaInputData"}, {"name": "cudaCorrelatorAstron", "freq_offset": 336},
         ]},
     }
     cfg.update(extra or {})
