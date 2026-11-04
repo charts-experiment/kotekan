@@ -111,7 +111,12 @@ def check_file(path, src):
     if not isinstance(cfg, dict):
         return ["config is not a YAML mapping"]
     return check_config(cfg, src)
-
+    "cuda": {
+        "cudaInputData",
+        "cudaCorrelatorAstron",
+        "cudaAntennaMaskCommand",
+        "cudaDirectBeamTrackerCommand",
+    },
 
 SELF_TEST_SRC = {
     "stages": {"dpdkCore", "cudaProcess", "rawFileWrite"},
