@@ -109,7 +109,7 @@ flowchart LR
     D --> E[Deploy on node]
 ```
 
-- Run each production config on the node before the release PR (no lost packets or frames, both frequency shards aligned, fringes consistent with the previous release) and put the results in the PR.
+- Run each production config on the node before the release PR (no lost packets or frames, both frequency shards aligned, fringes consistent with the previous release) and put the results in the PR. `charts/ci/node_smoke_test.sh` does this and writes the `summary.md` to attach; see [ci/node_smoke_test.md](ci/node_smoke_test.md).
 - **Tag every release** (`git tag charts-YYYY-MM-DD`). Analysis must be able to tell which kotekan version produced a dataset; record the tag in the observation log.
 
 ## 6. Bringing in upstream changes
