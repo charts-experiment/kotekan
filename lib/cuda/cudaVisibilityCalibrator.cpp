@@ -85,6 +85,8 @@ cudaVisibilityCalibrator::cudaVisibilityCalibrator(Config& config, const std::st
     _freq_offset = config.get_default<int>(unique_name, "freq_offset", 0);
     _gpu_mem_correlation_matrix =
         config.get<std::string>(unique_name, "gpu_mem_correlation_matrix");
+    _gpu_mem_calibrated_out =
+        config.get_default<std::string>(unique_name, "gpu_mem_calibrated_out", "");
     const std::string calibration_file =
         config.get_default<std::string>(unique_name, "calibration_file", "");
 
@@ -98,6 +100,13 @@ cudaVisibilityCalibrator::cudaVisibilityCalibrator(Config& config, const std::st
 
     const size_t vis_per_freq = (size_t)_num_blocks * _block_size * _block_size;
     _num_visibilities = (size_t)_num_local_freq * vis_per_freq;
+
+    if (!_gpu_mem_calibrated_out.empty()) {
+        if (_gpu_mem_calibrated_out == _gpu_mem_correlation_matrix)
+            throw std::runtime_error("cudaVisibilityCalibrator gpu_mem_calibrated_out must differ "
+                                     "from gpu_mem_correlation_matrix");
+        gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_calibrated_out, true, true, false));
+    }
 
     if (calibration_file.empty()) {
         INFO("No calibration_file given: visibilities pass through uncalibrated");
@@ -133,10 +142,20 @@ cudaEvent_t cudaVisibilityCalibrator::execute(cudaPipelineState&, const std::vec
     void* correlation = device.get_gpu_memory_array(_gpu_mem_correlation_matrix, gpu_frame_id,
                                                     _gpu_buffer_depth, frame_len);
 
+    void* output = correlation;
+    if (!_gpu_mem_calibrated_out.empty())
+        output = device.get_gpu_memory_array(_gpu_mem_calibrated_out, gpu_frame_id,
+                                             _gpu_buffer_depth, frame_len);
+
     record_start_event();
     if (_d_calibration) {
-        launch_apply_visibility_calibration(static_cast<int32_t*>(correlation), _d_calibration,
+        launch_apply_visibility_calibration(static_cast<int32_t*>(correlation),
+                                            static_cast<int32_t*>(output), _d_calibration,
                                             _num_visibilities, device.getStream(cuda_stream_id));
+    } else if (output != correlation) {
+        CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(output, correlation, frame_len,
+                                                cudaMemcpyDeviceToDevice,
+                                                device.getStream(cuda_stream_id)));
     }
     return record_end_event();
 }

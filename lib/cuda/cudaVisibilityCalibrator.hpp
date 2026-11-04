@@ -19,9 +19,11 @@
 #include <string>   // for string
 #include <vector>   // for vector
 
-/// Launches the in-place calibration kernel (defined in cudaVisibilityCalibrator.cu).
-void launch_apply_visibility_calibration(int32_t* d_correlation, const float* d_calibration,
-                                         size_t num_visibilities, cudaStream_t stream);
+/// Launches the calibration kernel (defined in cudaVisibilityCalibrator.cu). `d_output` may equal
+/// `d_correlation` for in-place operation.
+void launch_apply_visibility_calibration(const int32_t* d_correlation, int32_t* d_output,
+                                         const float* d_calibration, size_t num_visibilities,
+                                         cudaStream_t stream);
 
 /**
  * @class cudaVisibilityCalibrator
@@ -32,6 +34,10 @@ void launch_apply_visibility_calibration(int32_t* d_correlation, const float* d_
  * layout as the correlator output, [freq][block][pol_a][pol_b], and loaded from a .npy file at
  * start-up. Each result is rounded to the nearest int32 with saturation. Without a
  * `calibration_file` the command is a pass-through.
+ *
+ * With `gpu_mem_calibrated_out` the input is left untouched and the calibrated frame is written
+ * to that GPU array instead, so both versions can be copied out (raw vs calibrated comparison).
+ * Without a table the output array is a plain copy of the input.
  */
 class cudaVisibilityCalibrator : public cudaCommand {
 public:
@@ -54,8 +60,11 @@ private:
     /// First channel of this frame inside the full-band table.
     int32_t _freq_offset;
 
-    /// GPU side memory name for the correlated data, calibrated in place
+    /// GPU side memory name for the correlated data, calibrated in place unless
+    /// _gpu_mem_calibrated_out is set
     std::string _gpu_mem_correlation_matrix;
+    /// Optional GPU memory name for the calibrated copy; empty means in place
+    std::string _gpu_mem_calibrated_out;
 
     /// Number of complex visibilities in a frame
     size_t _num_visibilities;

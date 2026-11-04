@@ -57,6 +57,7 @@ def create_replay_yaml(
     num_frames: Optional[int] = None,
     end_interrupt: bool = True,
     frame_arrival_period: Optional[float] = None,
+    cal_out_dir: Optional[Path] = None,
 ) -> Path:
     """Write the replay config.
 
@@ -65,7 +66,14 @@ def create_replay_yaml(
     "freq_offset": ...}`` a real one). With ``out_dir`` the correlation frames
     are written there; with ``None`` they go to a ``restInspectFrame`` sink,
     which makes no disk traffic and is what the benchmark uses.
+
+    With ``cal_out_dir`` (needs ``out_dir`` and ``calibrator``) the calibrator leaves the raw
+    correlation untouched and writes the calibrated frames to a second buffer and sink, so
+    ``out_dir`` gets the raw frames and ``cal_out_dir`` the calibrated ones.
     """
+    dual = cal_out_dir is not None
+    if dual and (out_dir is None or calibrator is None):
+        raise ValueError("cal_out_dir needs out_dir and a calibrator")
     num_blocks = num_blocks_for(num_elements)
     if frame_arrival_period is None:
         frame_arrival_period = samples_per_data_set * (10.0 / 3.0) * 1e-6  # 3.33 us/sample
@@ -81,6 +89,7 @@ def create_replay_yaml(
     if calibrator is not None:
         commands.append({"name": "cudaVisibilityCalibrator",
                          "gpu_mem_correlation_matrix": "correlation_matrix_0",
+                         **({"gpu_mem_calibrated_out": "correlation_matrix_cal_0"} if dual else {}),
                          **{k: (str(v) if isinstance(v, Path) else v)
                             for k, v in calibrator.items()}})
     commands += [
@@ -88,6 +97,9 @@ def create_replay_yaml(
         {"name": "cudaOutputData", "in_buf": "host_voltage", "gpu_mem": "correlation_matrix_0",
          "out_buf": "host_correlation"},
     ]
+    if dual:
+        commands.append({"name": "cudaOutputData", "in_buf": "host_voltage",
+                         "gpu_mem": "correlation_matrix_cal_0", "out_buf": "host_correlation_cal"})
 
     reader: Dict[str, Any] = {
         "kotekan_stage": "rawFileRead", "buf": "network_capture_buf",
@@ -104,6 +116,14 @@ def create_replay_yaml(
             sink["exit_after_n_files"] = num_frames
     else:
         sink = {"kotekan_stage": "restInspectFrame", "in_buf": "host_correlation_buffer"}
+
+    def corr_buffer() -> Dict[str, Any]:
+        return {
+            "kotekan_buffer": "standard", "num_frames": "buffer_depth",
+            "frame_size": "num_local_freq * num_blocks * (block_size*block_size) * 2 "
+                          "* num_data_sets * sizeof_int",
+            "metadata_pool": "main_pool",
+        }
 
     config = {
         "type": "config",
@@ -124,12 +144,7 @@ def create_replay_yaml(
             "frame_size": "samples_per_data_set * num_local_freq * num_elements",
             "numa_node": 0, "metadata_pool": "main_pool",
         },
-        "host_correlation_buffer": {
-            "kotekan_buffer": "standard", "num_frames": "buffer_depth",
-            "frame_size": "num_local_freq * num_blocks * (block_size*block_size) * 2 "
-                          "* num_data_sets * sizeof_int",
-            "metadata_pool": "main_pool",
-        },
+        "host_correlation_buffer": corr_buffer(),
         "baseband_reader": reader,
         "gpu": {
             "profiling": True,
@@ -143,6 +158,11 @@ def create_replay_yaml(
         },
         "sink": sink,
     }
+    if dual:
+        config["host_correlation_cal_buffer"] = corr_buffer()
+        config["gpu"]["gpu_0"]["out_buffers"]["host_correlation_cal"] = "host_correlation_cal_buffer"
+        config["sink_cal"] = {**sink, "in_buf": "host_correlation_cal_buffer",
+                              "base_dir": str(cal_out_dir)}
     yaml_path.parent.mkdir(parents=True, exist_ok=True)
     yaml_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
     return yaml_path

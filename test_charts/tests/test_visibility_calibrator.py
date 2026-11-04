@@ -103,19 +103,25 @@ class TestVisibilityCalibratorEndToEnd(unittest.TestCase):
         cls.run_replay("passthrough", {})
         cls.run_replay("offset0", {"calibration_file": cls.table_path, "freq_offset": 0})
         cls.run_replay("offset336", {"calibration_file": cls.table_path, "freq_offset": NUM_FREQ})
+        cls.run_replay("dual", {"calibration_file": cls.table_path, "freq_offset": 0}, dual=True)
+        cls.runs["dual_cal"] = (cls.runs["dual"][0], cls.work / "dual_cal", cls.runs["dual"][2])
 
     @classmethod
     def tearDownClass(cls):
         shutil.rmtree(cls.work, ignore_errors=True)
 
     @classmethod
-    def run_replay(cls, name, calibrator):
+    def run_replay(cls, name, calibrator, dual=False):
         out_dir = cls.work / name
         out_dir.mkdir()
+        cal_dir = None
+        if dual:
+            cal_dir = cls.work / f"{name}_cal"
+            cal_dir.mkdir()
         yaml_path = create_replay_yaml(
             cls.work / f"{name}.yaml", cls.baseband_dir, "viscal", out_dir,
             num_elements=NUM_ANT, num_local_freq=NUM_FREQ, calibrator=calibrator,
-            num_frames=cls.num_frames,
+            num_frames=cls.num_frames, cal_out_dir=cal_dir,
         )
         log_path = cls.work / f"{name}.log"
         rc = run_kotekan_replay(yaml_path, log_path, _repo_root)
@@ -146,6 +152,13 @@ class TestVisibilityCalibratorEndToEnd(unittest.TestCase):
         for plain, calibrated in zip(self.load("plain"), self.load("offset0")):
             expected = plain * self.table_full[:NUM_FREQ].astype(np.complex128)
             self.assertLess(np.abs(calibrated - expected).max(), 1.0)
+
+    def test_dual_output_keeps_raw_and_calibrates_copy(self):
+        # raw side is bit-exact with a run without calibrator; the copy matches the in-place run
+        for plain, raw in zip(self.frames("plain"), self.frames("dual")):
+            self.assertEqual(plain.read_bytes(), raw.read_bytes(), plain.name)
+        for inplace, copy in zip(self.frames("offset0"), self.frames("dual_cal")):
+            self.assertEqual(inplace.read_bytes(), copy.read_bytes(), inplace.name)
 
     def test_freq_offset_selects_table_slice(self):
         sl = slice(NUM_FREQ, FULL_BAND_FREQ)
