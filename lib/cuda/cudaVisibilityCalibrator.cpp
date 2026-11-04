@@ -106,6 +106,8 @@ cudaVisibilityCalibrator::cudaVisibilityCalibrator(Config& config, const std::st
             throw std::runtime_error("cudaVisibilityCalibrator gpu_mem_calibrated_out must differ "
                                      "from gpu_mem_correlation_matrix");
         gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_calibrated_out, true, true, false));
+        // Taken in execute(); attribute it to this stage now (see gpuMemoryClaims.hpp).
+        device.register_gpu_memory_name(_gpu_mem_calibrated_out);
     }
 
     if (calibration_file.empty()) {
