@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cstdint>
@@ -140,9 +141,13 @@ protected:
     uint64_t alignment = 0;
 
     // For test and start
+    // The warmup starts at the first packet the lcore polls: dpdkCore starts polling only after
+    // lcore_start_delay, and the packets queued in the rx ring by then are stale.
+    // update_stats() runs on another thread and reads start_time only once warmup_started is set.
     double warmup_time = 10.0; // seconds
     std::chrono::steady_clock::time_point start_time;
-    bool in_warmup = true;
+    std::atomic<bool> warmup_started{false};
+    std::atomic<bool> in_warmup{true};
     double last_status_message_time = 0.0;
 
     // Metadata
@@ -470,8 +475,6 @@ inline rfsocHandlerShuffle::rfsocHandlerShuffle(kotekan::Config& config,
          "layout {:d} freq x {:d} elements, {:d} packets/spec.",
          port, first_subband, coarse_freq_start, num_local_freq, num_elements,
          expected_packets_per_spec);
-
-    start_time = std::chrono::steady_clock::now();
 };
 
 
@@ -481,6 +484,10 @@ inline int rfsocHandlerShuffle::handle_packet(struct rte_mbuf* mbuf) {
     // stabilize, and then start processing packets after that.
     if (in_warmup) {
         const auto now = std::chrono::steady_clock::now();
+        if (!warmup_started) {
+            start_time = now;
+            warmup_started = true;
+        }
         const double elapsed_time =
             std::chrono::duration_cast<std::chrono::duration<double>>(now - start_time).count();
         if (elapsed_time >= warmup_time) {
@@ -583,7 +590,8 @@ inline bool rfsocHandlerShuffle::align_first_packet(uint64_t spec) {
                 }
                 // Align to 2 full frames ahead of the highest seen spectrum so no port misses it
                 common_target = ((max_seen / alignment) + 2) * alignment;
-                INFO("rfsocHandlerShuffle: All {:d} network handlers active. Synchronizing startup alignment to spectrum {:d}",
+                INFO("rfsocHandlerShuffle: All {:d} network handlers active. Synchronizing startup "
+                     "alignment to spectrum {:d}",
                      registered_ports_ref().size(), common_target);
             }
         }
@@ -602,7 +610,8 @@ inline bool rfsocHandlerShuffle::align_first_packet(uint64_t spec) {
 
     if (spec < target_spec + alignment) {
         const uint64_t start_spec = target_spec;
-        INFO("rfsocHandlerShuffle: Port {:d} received spectrum {:d}, locked to common start spectrum {:d}",
+        INFO("rfsocHandlerShuffle: Port {:d} received spectrum {:d}, locked to common start "
+             "spectrum {:d}",
              port, spec, start_spec);
 
         last_seq = cur_seq;
@@ -615,9 +624,11 @@ inline bool rfsocHandlerShuffle::align_first_packet(uint64_t spec) {
         return true;
     }
 
-    ERROR("rfsocHandlerShuffle: Port {:d} missed common startup alignment target {:d} (current spec {:d})",
+    ERROR("rfsocHandlerShuffle: Port {:d} missed common startup alignment target {:d} (current "
+          "spec {:d})",
           port, target_spec, spec);
-    FATAL_ERROR("rfsocHandlerShuffle: Port {:d} failed startup alignment between handlers, closing kotekan!",
+    FATAL_ERROR("rfsocHandlerShuffle: Port {:d} failed startup alignment between handlers, closing "
+                "kotekan!",
                 port);
     return false;
 }
@@ -814,6 +825,9 @@ inline void rfsocHandlerShuffle::update_stats() {
     const double status_cadence = 1.0; // seconds
 
     if (in_warmup) {
+        if (!warmup_started) {
+            return;
+        }
         const auto now = std::chrono::steady_clock::now();
         const double elapsed_time =
             std::chrono::duration_cast<std::chrono::duration<double>>(now - start_time).count();
