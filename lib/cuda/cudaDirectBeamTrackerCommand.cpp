@@ -971,8 +971,9 @@ void cudaDirectBeamTrackerCommand::invalidate_cuda_graphs() {
 
 void cudaDirectBeamTrackerCommand::upload_calibration_gains(const DirectBeamTrackerConfig& cfg) {
     // The weight kernels multiply each weight by calibration_gains[freq][elem] and form
-    // y = sum_e w_e v_e, so they need the corrector 1 / g of each element (v_obs = g v);
-    // non-finite or zero gains drop the element (corrector 0).
+    // y = sum_e w_e v_e, so they need the corrector 1 / g_v of each element (v_obs = g_v v,
+    // g_v = conj(g_file): load_gains_npy conjugates the charts-utils file); non-finite or
+    // zero gains drop the element (corrector 0).
     const auto gains = charts_mvdr::load_gains_npy(_gains_file, _gains_first_channel,
                                                    _num_local_freq, _num_antennas,
                                                    _gains_antennas);

@@ -144,7 +144,7 @@ private:
     float* _d_norm_taper = nullptr;
     float2* _d_calibration_gains = nullptr;
 
-    // Complex antenna gains (charts-utils .npy, v_obs = g v); empty: no calibration
+    // Complex antenna gains (charts-utils .npy, x_obs = g x; conjugated on load); empty: none
     std::string _gains_file;
     int32_t _gains_first_channel = 0;
     std::vector<int> _gains_antennas;

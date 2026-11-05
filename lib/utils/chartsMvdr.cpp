@@ -208,8 +208,9 @@ std::vector<cplx> load_gains_npy(const std::string& path, int first_channel, int
                 in.read(reinterpret_cast<char*>(re_im), 16);
                 val = cplx(re_im[0], re_im[1]);
             }
+            // File: charts-utils convention (x = conj(v)); returned: voltage domain.
             const int ant = col_map[c];
-            out[static_cast<std::size_t>(f) * num_elements + ant] = val;
+            out[static_cast<std::size_t>(f) * num_elements + ant] = std::conj(val);
         }
     }
     if (!in)
