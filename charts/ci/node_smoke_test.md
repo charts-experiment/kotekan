@@ -32,7 +32,7 @@ sudo charts/ci/node_smoke_test.sh [-t SECONDS] [-o OUTDIR] [-b KOTEKAN_BIN] [-a 
 |---|---|---|
 | `-t` | 120 | Run time per config, counted from the alignment. |
 | `-o` | `/data/smoke_test/<date>_<commit>` | Output directory. |
-| `-b` | `<repo>/build/kotekan/kotekan` | kotekan binary. |
+| `-b` | `<repo>/build/kotekan/kotekan` | kotekan binary. The commit in the output directory name and `summary.md` is that of the source tree it was built from. |
 | `-a` | `signal_antennas` of `~/kotekan_charts_next/charts/config/64antennas_corr.yaml` | Antennas: `0,4,32,36`, or a config to take `signal_antennas` from. |
 | `-k` | none | Calibration table for `cudaVisibilityCalibrator`, or `none` for pass-through. Also adds `64antennas_corr_cal` and `64antennas_corr_trigger_cal` to the default configs. |
 | `-r` | none | Production output directory to compare autocorrelation levels against (check 8). |

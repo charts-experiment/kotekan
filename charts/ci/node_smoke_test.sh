@@ -86,12 +86,17 @@ if [[ ! -x "$kotekan" ]]; then
 fi
 
 # Packet capture keeps up with the RFSoC rate only with optimisation (-O3).
-build_type=$(sed -n 's/^CMAKE_BUILD_TYPE:STRING=//p' "$(dirname "$(dirname "$kotekan")")/CMakeCache.txt" 2> /dev/null)
+cmake_cache="$(dirname "$(dirname "$kotekan")")/CMakeCache.txt"
+build_type=$(sed -n 's/^CMAKE_BUILD_TYPE:STRING=//p' "$cmake_cache" 2> /dev/null)
 if [[ "$build_type" != Release ]]; then
     echo "warning: $kotekan is a '${build_type:-unknown}' build, not Release; expect packet loss" >&2
 fi
 
-git_repo=(git -c "safe.directory=$repo" -C "$repo")
+# The commit tested is the one the binary was built from, which differs from this script's
+# checkout when -b points to another build.
+source_dir=$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$cmake_cache" 2> /dev/null)
+source_dir=${source_dir:-$repo}
+git_repo=(git -c "safe.directory=$source_dir" -C "$source_dir")
 commit=$("${git_repo[@]}" rev-parse --short HEAD)
 if [[ -n $("${git_repo[@]}" status --porcelain --untracked-files=no) ]]; then
     commit="$commit-dirty"
@@ -344,7 +349,7 @@ summary="$outdir/summary.md"
     echo
     echo "- Date: $(date -Is)"
     echo "- Host: $(hostname)"
-    echo "- Binary: $kotekan (CMAKE_BUILD_TYPE ${build_type:-unknown})"
+    echo "- Binary: $kotekan (CMAKE_BUILD_TYPE ${build_type:-unknown}, source $source_dir)"
     echo "- Run time per config: ${run_seconds}s after alignment"
     echo "- Antennas: ${summary_antennas:-from each config}${antennas:+ (from $antennas)}"
     echo "- Calibration file: ${cal_file:-from each config}"
