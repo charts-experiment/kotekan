@@ -17,7 +17,8 @@ statically; it never opens a NIC or a GPU. This test is the one that runs them.
   stops one itself. Note how production was started so it can be relaunched exactly.
 - It needs `sudo` (DPDK, hugepages).
 - Run it from a test clone, not from the production checkout. kotekan is started from the
-  clone's root, which the configs' `kernel_path` is relative to.
+  root of the source tree the binary was built from, which the configs' `kernel_path` is
+  relative to.
 - Nothing in the repo is modified. Each config is copied to `OUTDIR/<config>.yaml` with every
   output path pointing to `OUTDIR/<config>/`.
 
@@ -87,7 +88,7 @@ of `node_smoke_check.py`.
 | 1 | Port alignment | log lines `Port p received spectrum ..., locked to common start spectrum S` (`selected start spectrum S` in older builds), one per port | all N ports started at the same S | FAIL. SKIP if the config has no `rfsocHandlerShuffle`. |
 | 2 | No hang | check 1 under the `-w` timeout | aligned in time | FAIL, listing the ports with `rx_packets_total` = 0 (a port that never receives data makes kotekan wait forever without a message). |
 | 3 | No errors | log lines starting with `ERROR:`, `CRITICAL:`, `ALERT:` or `EMERGENCY:`, or containing `FATAL`; whether kotekan exited by itself | none, and kotekan was still running at the end | FAIL with the first error line. WARN if it exited cleanly by itself (e.g. `exit_after_n_files`). |
-| 4 | Packets | `kotekan_dpdk_rx_*` gauges per port, start and end samples | packets grow on every port; lost and rejected (`rx_error_total`) packets are at most 1e-3 of the total | FAIL. The rates are always reported; production shows a steady trickle of rejected packets. |
+| 4 | Packets | `kotekan_dpdk_rx_*` and `kotekan_dpdk_nic_rx_missed_total` gauges per port, start and end samples | packets grow on every port; lost, NIC missed and rejected (`rx_error_total`) packets are each at most 1e-3 of the total | FAIL. NIC missed packets mean the lcore stopped polling, e.g. the handler blocked on a full buffer because a downstream stage stalled. The rates are always reported; production shows a steady trickle of rejected packets. |
 | 5 | Invalid packets | log lines `Invalid subband number`, `outside configured range`, `Invalid RFSoC id` | none | WARN with the count. |
 | 6 | Output cadence | mtimes of the `rawFileWrite` files of each prefix | at least 2 files per prefix, prefixes within one file of each other, median period within 10% of `integration_frames × frame_arrival_period` (10.24 s) | FAIL. SKIP without `rawFileWrite` (the beamformer config writes no files). |
 | 7 | Shard timestamps | `discover_gpu_corr_frame_groups` (charts-utils) on `corr_freq_*` | every frame index has both shards with the same `fpga_seq_num` | FAIL with the first mismatch or missing shard. |

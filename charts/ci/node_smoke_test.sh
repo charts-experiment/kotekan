@@ -9,8 +9,8 @@
 # fails.
 #
 # Only one kotekan can own the NICs, so this refuses to start while another kotekan
-# runs; it never stops one itself. kotekan is started from the repo root, which the
-# configs' kernel_path is relative to.
+# runs; it never stops one itself. kotekan is started from the root of the
+# source tree the binary was built from, which the configs' kernel_path is relative to.
 #
 # Usage: sudo charts/ci/node_smoke_test.sh [-t SECONDS] [-o OUTDIR] [-b KOTEKAN_BIN]
 #            [-a ANTENNAS] [-k CAL_FILE] [-r REF_DIR] [-p PYTHON] [-w SECONDS] [config.yaml ...]
@@ -246,7 +246,7 @@ run_config() {
         return
     fi
 
-    (cd "$repo" && exec "$kotekan" -c "$outdir/$name.yaml") > "$log" 2>&1 &
+    (cd "$source_dir" && exec "$kotekan" -c "$outdir/$name.yaml") > "$log" 2>&1 &
     pid=$!
     local started=$SECONDS align_seconds=0 aligned=1
     exit_code=""

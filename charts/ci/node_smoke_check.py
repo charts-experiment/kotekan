@@ -181,9 +181,9 @@ def cmd_prepare(args):
 
 
 def read_metrics(path):
-    """Return {(metric, port): (value, timestamp_ms)} for the kotekan_dpdk_rx_* gauges."""
+    """Return {(metric, port): (value, timestamp_ms)} for the handler and NIC rx gauges."""
     line_re = re.compile(
-        r'^(kotekan_dpdk_rx_\w+)\{[^}]*port="(\d+)"[^}]*\}\s+(\S+)(?:\s+(\d+))?'
+        r'^(kotekan_dpdk_(?:nic_)?rx_\w+)\{[^}]*port="(\d+)"[^}]*\}\s+(\S+)(?:\s+(\d+))?'
     )
     samples = {}
     with open(path) as stream:
@@ -223,21 +223,27 @@ def cmd_metrics(args):
         )
         lost, _ = counter_delta(start, end, "kotekan_dpdk_rx_lost_packets_total", port)
         errors, _ = counter_delta(start, end, "kotekan_dpdk_rx_error_total", port)
+        # Packets the NIC dropped because the lcore did not poll, e.g. when the handler blocks
+        # on a full output buffer. The handler never sees these, so they are not in lost.
+        missed, _ = counter_delta(start, end, "kotekan_dpdk_nic_rx_missed_total", port)
         if seconds <= 0:
             details.append(
                 f"port {port}: start and end samples are from the same update"
             )
             failed = True
             continue
-        total = packets + lost
+        total = packets + lost + missed
         lost_fraction = lost / total if total > 0 else 0.0
+        missed_fraction = missed / total if total > 0 else 0.0
         error_fraction = errors / total if total > 0 else 0.0
         details.append(
             f"port {port}: {packets:.0f} pkts ({packets / seconds:.0f}/s), "
-            f"lost {lost:.0f} ({lost_fraction:.1e}), errors {errors:.0f} "
+            f"lost {lost:.0f} ({lost_fraction:.1e}), "
+            f"NIC missed {missed:.0f} ({missed_fraction:.1e}), errors {errors:.0f} "
             f"({errors / seconds:.2f}/s, {error_fraction:.1e})"
         )
-        if packets <= 0 or max(lost_fraction, error_fraction) > MAX_BAD_FRACTION:
+        worst = max(lost_fraction, missed_fraction, error_fraction)
+        if packets <= 0 or worst > MAX_BAD_FRACTION:
             failed = True
     report(4, "FAIL" if failed else "PASS", "; ".join(details))
     return 0
