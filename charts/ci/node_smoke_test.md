@@ -84,7 +84,7 @@ of `node_smoke_check.py`.
 | # | What | How | PASS | Otherwise |
 |---|---|---|---|---|
 | 0 | Setup | config copy and `--check-config` | not reported | FAIL: the config is not started. WARN: helper warning, e.g. `num_saved_antennas` mismatch. |
-| 1 | Port alignment | log lines `All N network handlers active ... spectrum S` and `Port p ... locked to common start spectrum S` | all N ports locked to the same S | FAIL. SKIP if the config has no `rfsocHandlerShuffle`. |
+| 1 | Port alignment | log lines `Port p received spectrum ..., locked to common start spectrum S` (`selected start spectrum S` in older builds), one per port | all N ports started at the same S | FAIL. SKIP if the config has no `rfsocHandlerShuffle`. |
 | 2 | No hang | check 1 under the `-w` timeout | aligned in time | FAIL, listing the ports with `rx_packets_total` = 0 (a port that never receives data makes kotekan wait forever without a message). |
 | 3 | No errors | log lines starting with `ERROR:`, `CRITICAL:`, `ALERT:` or `EMERGENCY:`, or containing `FATAL`; whether kotekan exited by itself | none, and kotekan was still running at the end | FAIL with the first error line. WARN if it exited cleanly by itself (e.g. `exit_after_n_files`). |
 | 4 | Packets | `kotekan_dpdk_rx_*` gauges per port, start and end samples | packets grow on every port; lost and rejected (`rx_error_total`) packets are at most 1e-3 of the total | FAIL. The rates are always reported; production shows a steady trickle of rejected packets. |

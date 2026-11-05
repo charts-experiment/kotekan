@@ -85,6 +85,12 @@ if [[ ! -x "$kotekan" ]]; then
     exit 2
 fi
 
+# Packet capture keeps up with the RFSoC rate only with optimisation (-O3).
+build_type=$(sed -n 's/^CMAKE_BUILD_TYPE:STRING=//p' "$(dirname "$(dirname "$kotekan")")/CMakeCache.txt" 2> /dev/null)
+if [[ "$build_type" != Release ]]; then
+    echo "warning: $kotekan is a '${build_type:-unknown}' build, not Release; expect packet loss" >&2
+fi
+
 git_repo=(git -c "safe.directory=$repo" -C "$repo")
 commit=$("${git_repo[@]}" rev-parse --short HEAD)
 if [[ -n $("${git_repo[@]}" status --porcelain --untracked-files=no) ]]; then
@@ -154,14 +160,18 @@ record_helper() {
     done
 }
 
+# Start line of each rfsocHandlerShuffle port: "locked to common start spectrum S" since the
+# shared start-up alignment, "selected start spectrum S" before it.
+start_re='Port [0-9]+ received spectrum [0-9]+, (locked to common|selected) start spectrum [0-9]+'
+
 wait_for_alignment() {
-    local start=$SECONDS locked
+    local start=$SECONDS started_ports
     while ((SECONDS - start < align_timeout)); do
         if ! kill -0 "$pid" 2> /dev/null; then
             return 1
         fi
-        locked=$(grep -oE "Port [0-9]+ received spectrum [0-9]+, locked" "$log" | awk '{print $2}' | sort -u | wc -l)
-        if grep -q "network handlers active" "$log" && ((locked >= handlers)); then
+        started_ports=$(grep -oE "$start_re" "$log" | awk '{print $2}' | sort -u | wc -l)
+        if ((started_ports >= handlers)); then
             align_seconds=$((SECONDS - start))
             return 0
         fi
@@ -171,17 +181,14 @@ wait_for_alignment() {
 }
 
 check_alignment() {
-    local line spectrum ports others
-    line=$(grep -oE "All [0-9]+ network handlers active. Synchronizing startup alignment to spectrum [0-9]+" "$log" | head -1)
-    spectrum=${line##* }
-    ports=$(grep -oE "Port [0-9]+ received spectrum [0-9]+, locked to common start spectrum [0-9]+" "$log")
-    others=$(awk -v s="$spectrum" '$NF != s' <<< "$ports" | wc -l)
-    if [[ "$line" != "All $handlers network handlers active"* ]]; then
-        record 1 FAIL "expected 'All $handlers network handlers active', got '${line:-nothing}'"
-    elif (($(wc -l <<< "$ports") < handlers || others > 0)); then
-        record 1 FAIL "start spectrum $spectrum; lock lines: $(tr '\n' ';' <<< "$ports")"
+    local lines spectrum others
+    lines=$(grep -oE "$start_re" "$log")
+    spectrum=$(head -n 1 <<< "$lines" | awk '{print $NF}')
+    others=$(awk -v s="$spectrum" '$NF != s' <<< "$lines" | wc -l)
+    if ((others > 0)); then
+        record 1 FAIL "ports started at different spectra: $(tr '\n' ';' <<< "$lines")"
     else
-        record 1 PASS "all $handlers ports locked to spectrum $spectrum after ${align_seconds}s"
+        record 1 PASS "all $handlers ports started at spectrum $spectrum after ${align_seconds}s"
     fi
 }
 
@@ -217,8 +224,9 @@ run_config() {
         record 0 FAIL "config copy failed: $(tr '\n' ' ' < "$outdir/$name.prepare.log")"
         return
     fi
-    local handlers file_prefixes cadence n_freq baseband_endpoint used_antennas
+    local handlers gpu_stages file_prefixes cadence n_freq baseband_endpoint used_antennas
     handlers=$(sed -n 's/^handlers=//p' <<< "$prepared")
+    gpu_stages=$(sed -n 's/^gpu_stages=//p' <<< "$prepared")
     file_prefixes=$(sed -n 's/^file_prefixes=//p' <<< "$prepared")
     cadence=$(sed -n 's/^cadence=//p' <<< "$prepared")
     n_freq=$(sed -n 's/^n_freq=//p' <<< "$prepared")
@@ -312,7 +320,11 @@ run_config() {
         record 7 SKIP "no corr_freq output or no antenna list"
         record 8 SKIP "no corr_freq output or no antenna list"
     fi
-    if [[ -s "$outdir/$name.trackers.json" ]]; then
+    if ((gpu_stages == 0)); then
+        record 9 SKIP "no cudaProcess stage"
+    elif ((died)); then
+        record 9 SKIP "kotekan was not running at the end, see check 3"
+    elif [[ -s "$outdir/$name.trackers.json" ]]; then
         "$python" "$helper" trackers "$outdir/$name.trackers.json" | record_helper
     else
         record 9 FAIL "no /trackers reply"
@@ -332,7 +344,7 @@ summary="$outdir/summary.md"
     echo
     echo "- Date: $(date -Is)"
     echo "- Host: $(hostname)"
-    echo "- Binary: $kotekan"
+    echo "- Binary: $kotekan (CMAKE_BUILD_TYPE ${build_type:-unknown})"
     echo "- Run time per config: ${run_seconds}s after alignment"
     echo "- Antennas: ${summary_antennas:-from each config}${antennas:+ (from $antennas)}"
     echo "- Calibration file: ${cal_file:-from each config}"

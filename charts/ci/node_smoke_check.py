@@ -122,6 +122,7 @@ def cmd_prepare(args):
         )
 
     handlers = 0
+    gpu_stages = 0
     file_prefixes = []
     baseband_endpoint = ""
     for parent, key in list(walk(cfg)):
@@ -137,6 +138,8 @@ def cmd_prepare(args):
                 parent[key] = args.calibration_file
         elif key == "dpdk_handler" and value == "rfsocHandlerShuffle":
             handlers += 1
+        elif key == "kotekan_stage" and value == "cudaProcess":
+            gpu_stages += 1
         elif key == "kotekan_stage" and value == "rawFileWrite":
             file_prefixes.append(parent["file_name"])
         elif key == "kotekan_stage" and value == "chartsTriggeredBasebandReadout":
@@ -166,6 +169,7 @@ def cmd_prepare(args):
         yaml.safe_dump(cfg, stream, sort_keys=False, default_flow_style=None)
 
     print(f"handlers={handlers}")
+    print(f"gpu_stages={gpu_stages}")
     print(f"file_prefixes={','.join(file_prefixes)}")
     print(f"cadence={cadence:.6f}")
     print(
