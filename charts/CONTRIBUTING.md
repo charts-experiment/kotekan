@@ -109,6 +109,11 @@ flowchart LR
     D --> E[Deploy on node]
 ```
 
+- Build the node binary as production does:
+  `cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=native -DUSE_CUDA=ON -DUSE_DPDK=ON -DUSE_NUMA=ON -DUSE_HDF5=OFF .. && make -j kotekan`.
+  Without Release, the DPDK handlers drop about 20% of the packets. The default architecture (86)
+  has no code for the node's RTX 5090 (sm_120): the driver then JIT-compiles the kernels at
+  start-up and the beamformer configs stall for minutes.
 - Run each production config on the node before the release PR (no lost packets or frames, both frequency shards aligned, fringes consistent with the previous release) and put the results in the PR.
 - **Tag every release** (`git tag charts-YYYY-MM-DD`). Analysis must be able to tell which kotekan version produced a dataset; record the tag in the observation log.
 

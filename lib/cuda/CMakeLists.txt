@@ -1,37 +1,11 @@
 project(kotekan_cuda)
 
-# Default to NVIDIA Ampere-class archs; override with -DCMAKE_CUDA_ARCHITECTURES=...
+# CMAKE_CUDA_ARCHITECTURES defaults to 86 (cmake/Features/FeatureGPU.cmake); build the node
+# binary with -DCMAKE_CUDA_ARCHITECTURES=native. CUDA_ARCHITECTURE(S) are accepted as aliases.
 if(DEFINED CUDA_ARCHITECTURE AND NOT "${CUDA_ARCHITECTURE}" STREQUAL "")
     set(CMAKE_CUDA_ARCHITECTURES ${CUDA_ARCHITECTURE})
 elseif(DEFINED CUDA_ARCHITECTURES AND NOT "${CUDA_ARCHITECTURES}" STREQUAL "")
     set(CMAKE_CUDA_ARCHITECTURES ${CUDA_ARCHITECTURES})
-elseif(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR "${CMAKE_CUDA_ARCHITECTURES}" STREQUAL "")
-    if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL
-                                               13.0)
-        set(CMAKE_CUDA_ARCHITECTURES
-            75
-            80
-            86
-            89
-            90
-            100
-            120)
-    elseif(DEFINED CMAKE_CUDA_COMPILER_VERSION AND CMAKE_CUDA_COMPILER_VERSION
-                                                   VERSION_GREATER_EQUAL 12.8)
-        set(CMAKE_CUDA_ARCHITECTURES
-            75
-            80
-            86
-            89
-            90
-            100
-            120)
-    elseif(DEFINED CMAKE_CUDA_COMPILER_VERSION AND CMAKE_CUDA_COMPILER_VERSION
-                                                   VERSION_GREATER_EQUAL 12.0)
-        set(CMAKE_CUDA_ARCHITECTURES 75 80 86 89 90)
-    else()
-        set(CMAKE_CUDA_ARCHITECTURES 61 75 80 86 89 90)
-    endif()
 endif()
 
 add_library(
