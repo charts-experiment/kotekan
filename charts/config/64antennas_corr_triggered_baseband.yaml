@@ -24,7 +24,7 @@ output_dir: &output_dir /data/corr/corr_1019
 baseband_spectra_per_frame: 15360
 baseband_staging_frames: 100
 baseband_history_frames: buffer_depth - 10
-num_saved_antennas: 5
+num_saved_antennas: 4 # Must match the number of entries in baseband_capture.selected_antennas.
 max_capture_seconds: 5.0
 correlation_output_frames: 8438 # 24 h + 5.12 s at the default frame size.
 bytes_per_dataset: n_channels_per_packet * local_subbands_per_packet * samples_per_data_set # One packed complex byte per frequency and element.

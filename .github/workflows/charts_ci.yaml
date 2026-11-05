@@ -58,8 +58,8 @@ jobs:
     with:
       container_image: ${{ needs.kotekan-docker.outputs.docker_gpu_img_name }}
       ccache_key: charts-gcc-cuda-dpdk
-      # Same options as the node build (no CMAKE_BUILD_TYPE): CUDA, DPDK and NUMA
-      # on, HDF5 off.
+      # Node build features (CUDA, DPDK and NUMA on, HDF5 off). This job only checks that it
+      # builds; the node build flags are in charts/CONTRIBUTING.md §5.
       cmake_defs: >-
         -DCCACHE=ON -DNO_MEMLOCK=ON
         -DUSE_CUDA=ON -DUSE_DPDK=ON -DUSE_NUMA=ON
