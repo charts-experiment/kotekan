@@ -278,6 +278,10 @@ def cmd_trackers(args):
     if not per_stage:
         report(9, "SKIP", "no GPU command trackers (is profiling enabled?)")
         return 0
+    # Without profiling some commands still publish samples, all 0.
+    if worst == 0.0:
+        report(9, "SKIP", "all GPU command trackers are 0 (is profiling enabled?)")
+        return 0
     detail = ", ".join(f"{stage} {u:.2f}" for stage, u in sorted(per_stage.items()))
     failed = max(per_stage.values()) >= MAX_GPU_UTILISATION or worst >= 1.0
     report(
