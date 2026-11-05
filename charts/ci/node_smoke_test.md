@@ -16,6 +16,10 @@ statically; it never opens a NIC or a GPU. This test is the one that runs them.
   refuses to start if a `kotekan` process is running or `localhost:12048` answers; it never
   stops one itself. Note how production was started so it can be relaunched exactly.
 - It needs `sudo` (DPDK, hugepages).
+- Build the binary as production is built: `-DCMAKE_BUILD_TYPE=Release` (an unoptimised
+  handler drops about 20% of the packets) and code for the node's GPU, e.g.
+  `-DCMAKE_CUDA_ARCHITECTURES=native` (with PTX only, the driver JIT-compiles the kernels at
+  start-up and the beamformer stalls for minutes). The script warns about both.
 - Run it from a test clone, not from the production checkout. kotekan is started from the
   root of the source tree the binary was built from, which the configs' `kernel_path` is
   relative to.

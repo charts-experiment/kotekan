@@ -92,6 +92,16 @@ if [[ "$build_type" != Release ]]; then
     echo "warning: $kotekan is a '${build_type:-unknown}' build, not Release; expect packet loss" >&2
 fi
 
+# Without code for the local GPU, CUDA JIT-compiles the PTX at the first launch of each kernel,
+# which can stall a GPU stage for minutes.
+cuda_archs=$(sed -n 's/^CMAKE_CUDA_ARCHITECTURES:[A-Z]*=//p' "$cmake_cache" 2> /dev/null)
+gpu_arch=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2> /dev/null | head -n 1 | tr -d .)
+if [[ -n "$cuda_archs" && -n "$gpu_arch" ]] \
+    && [[ ! ";${cuda_archs//-real/};" =~ \;($gpu_arch|native|all|all-major)\; ]]; then
+    echo "warning: $kotekan is built for CUDA architectures $cuda_archs, not sm_$gpu_arch;" \
+        "kernels are JIT-compiled at start-up" >&2
+fi
+
 # The commit tested is the one the binary was built from, which differs from this script's
 # checkout when -b points to another build.
 source_dir=$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$cmake_cache" 2> /dev/null)
@@ -349,7 +359,7 @@ summary="$outdir/summary.md"
     echo
     echo "- Date: $(date -Is)"
     echo "- Host: $(hostname)"
-    echo "- Binary: $kotekan (CMAKE_BUILD_TYPE ${build_type:-unknown}, source $source_dir)"
+    echo "- Binary: $kotekan (CMAKE_BUILD_TYPE ${build_type:-unknown}, CUDA architectures ${cuda_archs:-default}, source $source_dir)"
     echo "- Run time per config: ${run_seconds}s after alignment"
     echo "- Antennas: ${summary_antennas:-from each config}${antennas:+ (from $antennas)}"
     echo "- Calibration file: ${cal_file:-from each config}"
