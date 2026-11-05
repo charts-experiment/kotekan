@@ -1,0 +1,482 @@
+---
+# ==============================================================================
+# CHARTS 64-Antenna Live DPDK Ingest & Real-Time GPU DIRECT Beam Tracker Pipeline
+# ==============================================================================
+# Built from charts/config/64antennas_record.yaml and charts/config/64antennas_corr.yaml.
+# - Ingests 64 antennas across dual 100GbE/25GbE NIC ports (subbands 0..1 and 2..3).
+# - Retains rfsocHandlerShuffle and zeroSamples stages for lost-packet mitigation.
+# - Replaces correlation / baseband disk recording with real-time GPU Direct Beamformer:
+#     * cudaAntennaMaskCommand: Dynamic dead/saturated/clipped antenna blanking
+#     * cudaDirectBeamTrackerCommand: Zero-window precalculated steering weights
+#       with fused 4-beam warp tiling (beam_tile_size=4) and CUDA Graph execution.
+# - Outputs complex voltages (float2) for up to max_beams concurrent sky directions.
+# ==============================================================================
+
+type: config
+log_level: info
+
+# CPU Thread Affinity (isolates Kotekan host pipeline from DPDK lcores [3, 4, 5])
+cpu_affinity: [6, 7, 8, 9]
+
+# ------------------------------------------------------------------------------
+# Array Dimensions & Sampling Parameters
+# ------------------------------------------------------------------------------
+num_elements: 64                  # 64 Antennas (8x8 physical grid or custom layout)
+n_channels_per_packet: 168        # RFSoC packet channel packing
+local_subbands_per_packet: 2      # 2 subbands per NIC port
+num_local_freq: 336               # 168 * 2 = 336 coarse channels per NIC stream (672 total)
+
+# Timing & Frame Arrival (RFSoC 300 MSPS PFB -> 10/3 us per sample)
+sample_period_s: 3.333333333333e-6
+
+# Frame Batch: 15,360 samples = 51.2 ms per frame
+# (Matches rfsocHandlerShuffle alignment: 15360 and divides cleanly by time_chunk_size: 256 into 60 chunks)
+samples_per_data_set: 15360
+frame_arrival_period: samples_per_data_set * sample_period_s
+bytes_per_dataset: n_channels_per_packet * local_subbands_per_packet * samples_per_data_set
+capture_n_frames: 168750          # Continuous streaming duration (~2.4 hours)
+
+# Memory & Buffer Management
+buffer_depth: 20                  # Host RAM frame queue depth (~6.6 GB total queue per NIC)
+gpu_buffer_depth: 3               # GPU VRAM frame queue depth (~1.0 GB VRAM per GPU stream)
+
+# Array Geometry & Beam Setup
+spacing_m: 0.6                    # Physical antenna spacing in meters
+max_beams: 2                      # Concurrent beam slots (0..1)
+initial_active_beams: 2           # Active beams on startup (Galactic Center & Vela)
+sizeof_complex_float: 8           # float2 (4-byte real + 4-byte imag) per formed beam sample
+max_alive_antennas: 7             # Compact alive baseband channels to record
+
+# 1D Physical East-West Baseline Layout for Calibrated Elements [0, 5, 32, 37]
+custom_antenna_positions: &charts_custom_antenna_positions
+  - [0.0, 0.0, 0.0]  # Ant 0 (x=0.0m)
+  - [0.0, 0.0, 0.0]  # Ant 1
+  - [0.0, 0.0, 0.0]  # Ant 2
+  - [0.0, 0.0, 0.0]  # Ant 3
+  - [0.0, 0.0, 0.0]  # Ant 4
+  - [0.6, 0.0, 0.0]  # Ant 5 (slot 1, x=0.6m)
+  - [0.0, 0.0, 0.0]  # Ant 6
+  - [0.0, 0.0, 0.0]  # Ant 7
+  - [0.0, 0.0, 0.0]  # Ant 8
+  - [0.0, 0.0, 0.0]  # Ant 9
+  - [0.0, 0.0, 0.0]  # Ant 10
+  - [0.0, 0.0, 0.0]  # Ant 11
+  - [0.0, 0.0, 0.0]  # Ant 12
+  - [0.0, 0.0, 0.0]  # Ant 13
+  - [0.0, 0.0, 0.0]  # Ant 14
+  - [0.0, 0.0, 0.0]  # Ant 15
+  - [0.0, 0.0, 0.0]  # Ant 16
+  - [0.0, 0.0, 0.0]  # Ant 17
+  - [0.0, 0.0, 0.0]  # Ant 18
+  - [0.0, 0.0, 0.0]  # Ant 19
+  - [0.0, 0.0, 0.0]  # Ant 20
+  - [0.0, 0.0, 0.0]  # Ant 21
+  - [0.0, 0.0, 0.0]  # Ant 22
+  - [0.0, 0.0, 0.0]  # Ant 23
+  - [0.0, 0.0, 0.0]  # Ant 24
+  - [0.0, 0.0, 0.0]  # Ant 25
+  - [0.0, 0.0, 0.0]  # Ant 26
+  - [0.0, 0.0, 0.0]  # Ant 27
+  - [0.0, 0.0, 0.0]  # Ant 28
+  - [0.0, 0.0, 0.0]  # Ant 29
+  - [0.0, 0.0, 0.0]  # Ant 30
+  - [0.0, 0.0, 0.0]  # Ant 31
+  - [3.6, 0.0, 0.0]  # Ant 32 (slot 6, x=3.6m)
+  - [0.0, 0.0, 0.0]  # Ant 33
+  - [0.0, 0.0, 0.0]  # Ant 34
+  - [0.0, 0.0, 0.0]  # Ant 35
+  - [0.0, 0.0, 0.0]  # Ant 36
+  - [4.2, 0.0, 0.0]  # Ant 37 (slot 7, x=4.2m)
+  - [0.0, 0.0, 0.0]  # Ant 38
+  - [0.0, 0.0, 0.0]  # Ant 39
+  - [0.0, 0.0, 0.0]  # Ant 40
+  - [0.0, 0.0, 0.0]  # Ant 41
+  - [0.0, 0.0, 0.0]  # Ant 42
+  - [0.0, 0.0, 0.0]  # Ant 43
+  - [0.0, 0.0, 0.0]  # Ant 44
+  - [0.0, 0.0, 0.0]  # Ant 45
+  - [0.0, 0.0, 0.0]  # Ant 46
+  - [0.0, 0.0, 0.0]  # Ant 47
+  - [0.0, 0.0, 0.0]  # Ant 48
+  - [0.0, 0.0, 0.0]  # Ant 49
+  - [0.0, 0.0, 0.0]  # Ant 50
+  - [0.0, 0.0, 0.0]  # Ant 51
+  - [0.0, 0.0, 0.0]  # Ant 52
+  - [0.0, 0.0, 0.0]  # Ant 53
+  - [0.0, 0.0, 0.0]  # Ant 54
+  - [0.0, 0.0, 0.0]  # Ant 55
+  - [0.0, 0.0, 0.0]  # Ant 56
+  - [0.0, 0.0, 0.0]  # Ant 57
+  - [0.0, 0.0, 0.0]  # Ant 58
+  - [0.0, 0.0, 0.0]  # Ant 59
+  - [0.0, 0.0, 0.0]  # Ant 60
+  - [0.0, 0.0, 0.0]  # Ant 61
+  - [0.0, 0.0, 0.0]  # Ant 62
+  - [0.0, 0.0, 0.0]  # Ant 63
+
+# ------------------------------------------------------------------------------
+# Metadata Pool
+# ------------------------------------------------------------------------------
+main_pool:
+    kotekan_metadata_pool: chartsMetadata
+    num_metadata_objects: buffer_depth * 15
+
+# ------------------------------------------------------------------------------
+# Host Buffer Definitions
+# ------------------------------------------------------------------------------
+# Raw voltage capture buffer for Stream 0 (Port 0: coarse frequencies 0..335)
+network_capture_buf_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: bytes_per_dataset * num_elements # ~330.3 MB per frame
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+mask_buffer_zeros_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set
+    numa_node: 0
+    metadata_pool: main_pool
+
+# Raw voltage capture buffer for Stream 1 (Port 1: coarse frequencies 336..671)
+network_capture_buf_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: bytes_per_dataset * num_elements # ~330.3 MB per frame
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+mask_buffer_zeros_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set
+    numa_node: 0
+    metadata_pool: main_pool
+
+# Output Formed Beams Buffer for Stream 0 [time][freq][max_beams] of float2
+host_formed_beams_buffer_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float # ~82.58 MB
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+# Output Formed Beams Buffer for Stream 1 [time][freq][max_beams] of float2
+host_formed_beams_buffer_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float # ~82.58 MB
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+# Output Alive Antennas Baseband Buffer for Stream 0 [time][freq][max_alive_antennas] of int4x2_t
+host_alive_voltages_buffer_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set * num_local_freq * max_alive_antennas # ~36.13 MB
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+# Output Alive Antennas Baseband Buffer for Stream 1 [time][freq][max_alive_antennas] of int4x2_t
+host_alive_voltages_buffer_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set * num_local_freq * max_alive_antennas # ~36.13 MB
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+# ------------------------------------------------------------------------------
+# Network Ingest Stage: DPDK Core (Dual Port, Exact match to 64antennas_corr.yaml)
+# ------------------------------------------------------------------------------
+dpdk:
+    kotekan_stage: dpdkCore
+    lcore_cpu_map: [3, 5]          # Worker lcores 3 and 5 for ports 0 and 1
+    main_lcore_cpu: 4              # Main DPDK coordinator thread
+    lcore_port_map:
+        - [0]                      # lcore 3 handles NIC port 0
+        - [1]                      # lcore 5 handles NIC port 1
+    max_rx_pkt_len: 9000
+    rx_ring_size: 4096
+    num_mbufs: 65536
+    mbuf_data_size: 9216
+
+    handlers:
+        - dpdk_handler: rfsocHandlerShuffle
+          out_buffer: network_capture_buf_0
+          alignment: 15360
+          mask_buf: mask_buffer_zeros_0
+          first_subband: 0
+          coarse_freq_start: 0
+          num_local_freq: 336
+
+        - dpdk_handler: rfsocHandlerShuffle
+          out_buffer: network_capture_buf_1
+          alignment: 15360
+          mask_buf: mask_buffer_zeros_1
+          first_subband: 2
+          coarse_freq_start: 336
+          num_local_freq: 336
+
+# ------------------------------------------------------------------------------
+# Dropped Packet Zeroing Stages
+# ------------------------------------------------------------------------------
+zero_samples_0:
+    kotekan_stage: zeroSamples
+    out_buf: network_capture_buf_0
+    lost_samples_buf: mask_buffer_zeros_0
+    zero_value: 0
+    sample_size: 21504             # num_elements (64) * num_local_freq (336)
+
+zero_samples_1:
+    kotekan_stage: zeroSamples
+    out_buf: network_capture_buf_1
+    lost_samples_buf: mask_buffer_zeros_1
+    zero_value: 0
+    sample_size: 21504             # num_elements (64) * num_local_freq (336)
+
+# ------------------------------------------------------------------------------
+# GPU Direct Multi-Beam Tracker & Antenna Health Stages
+# ------------------------------------------------------------------------------
+gpu:
+    profiling: false
+
+  # Command Pipeline for Stream 0 (Frequencies 0..335, 300.0 - 400.5 MHz)
+    commands_0: &command_list_0
+        - name: cudaInputData
+          in_buf: host_voltage
+          gpu_mem: voltage_0
+        - name: cudaSyncInput
+
+    # Real-Time Automatic Dead & Saturated Antenna Detection/Masking & Alive Voltage Extraction
+        - name: cudaAntennaMaskCommand
+          gpu_mem_voltage: voltage_0
+          gpu_mem_alive_voltages: alive_voltages_0
+          max_alive_antennas: 7
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          buffer_depth: 3
+          sample_stride: 4
+          antenna_order: "descending"    # RFSoC raw buffer ordering: raw_id = 63 - physical_ant
+          active_antennas: [0, 4, 5, 6, 32] # Alive physical antennas convention (auto-mapped to raw elements [63, 59, 58, 57, 31])
+          auto_detect_enabled: true
+          blank_voltages_enabled: false # Steering weights masking in cudaDirectBeamTracker already zeroes bad antennas
+      # Open/disconnected ADC inputs float at power ~0.20-0.35. Threshold 5.0 marks open channels DEAD, keeping 7 alive antennas.
+          dead_power_threshold: 5.0
+          sat_power_threshold: 80.0
+          clip_fraction_threshold: 0.15
+          revival_frames: 5
+
+    # Direct Fused Multi-Beam Tracker Kernel
+        - name: cudaDirectBeamTrackerCommand
+          gpu_mem_voltage: voltage_0
+          gpu_mem_formed_beams: formed_beams_0
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          spacing_m: 0.6
+          antenna_order: "descending"    # Maps raw element r to physical position (63 - r)
+          active_antennas: [0, 4, 5, 6, 32] # Alive physical antennas
+          custom_antenna_positions: *charts_custom_antenna_positions
+          max_beams: 2
+          initial_active_beams: 2
+          buffer_depth: 3
+          time_chunk_size: 256
+          time_unroll: 4
+          beam_tile_size: 4        # Fuses beams in warp registers; cuts VRAM bandwidth by 4x
+          enable_cuda_graph: false # Direct launch takes <3 us; graphs unnecessary and unsafe in multi-threaded stages
+          gains_file: charts/config/gains/gains_sun_transit_1027_interp.npy
+          gains_antennas: [0, 5, 32, 37]
+          enable_grid_mode: false
+          grid_step: 0.02
+      # Carén Observatory Site Coordinates
+          site_lat_deg: -33.4211146
+          site_lon_deg: -70.8634710
+          site_alt_m: 458.0
+      # Frequency band for Stream 0
+          freq_start_hz: 300000000.0 # 300.0 MHz base
+          freq_step_hz: 300000.0   # 300 kHz channel spacing
+      # Beam 0: Galactic Center (Sgr A*)
+          source_ra_deg: 266.4168
+          source_dec_deg: -29.0078
+      # Beam 1: Vela Pulsar (PSR B0833-45)
+          source_ra_deg_1: 128.8361
+          source_dec_deg_1: -45.1764
+
+        - name: cudaSyncOutput
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: formed_beams_0
+          out_buf: host_formed_beams
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: alive_voltages_0
+          out_buf: host_alive_voltages
+
+  # Command Pipeline for Stream 1 (Frequencies 336..671, 400.8 - 501.3 MHz)
+    commands_1: &command_list_1
+        - name: cudaInputData
+          in_buf: host_voltage
+          gpu_mem: voltage_1
+        - name: cudaSyncInput
+
+    # Real-Time Automatic Dead & Saturated Antenna Detection/Masking & Alive Voltage Extraction
+        - name: cudaAntennaMaskCommand
+          gpu_mem_voltage: voltage_1
+          gpu_mem_alive_voltages: alive_voltages_1
+          max_alive_antennas: 7
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          buffer_depth: 3
+          sample_stride: 4
+          antenna_order: "descending"    # RFSoC raw buffer ordering: raw_id = 63 - physical_ant
+          active_antennas: [0, 4, 5, 6, 32] # Alive physical antennas convention (auto-mapped to raw elements [63, 59, 58, 57, 31])
+          auto_detect_enabled: true
+          blank_voltages_enabled: false # Steering weights masking in cudaDirectBeamTracker already zeroes bad antennas
+      # Open/disconnected ADC inputs float at power ~0.20-0.35. Threshold 5.0 marks open channels DEAD, keeping 7 alive antennas.
+          dead_power_threshold: 5.0
+          sat_power_threshold: 80.0
+          clip_fraction_threshold: 0.15
+          revival_frames: 5
+
+    # Direct Fused Multi-Beam Tracker Kernel
+        - name: cudaDirectBeamTrackerCommand
+          gpu_mem_voltage: voltage_1
+          gpu_mem_formed_beams: formed_beams_1
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          spacing_m: 0.6
+          antenna_order: "descending"    # Maps raw element r to physical position (63 - r)
+          active_antennas: [0, 4, 5, 6, 32] # Alive physical antennas
+          custom_antenna_positions: *charts_custom_antenna_positions
+          max_beams: 2
+          initial_active_beams: 2
+          buffer_depth: 3
+          time_chunk_size: 256
+          time_unroll: 4
+          beam_tile_size: 4
+          enable_cuda_graph: false
+          gains_file: charts/config/gains/gains_sun_transit_1027_interp.npy
+          gains_antennas: [0, 5, 32, 37]
+          enable_grid_mode: false
+          grid_step: 0.02
+      # Carén Observatory Site Coordinates
+          site_lat_deg: -33.4211146
+          site_lon_deg: -70.8634710
+          site_alt_m: 458.0
+      # Frequency band for Stream 1 (starts at 300 MHz + 336 * 300 kHz = 400.8 MHz)
+          freq_start_hz: 400800000.0 # 400.8 MHz base
+          freq_step_hz: 300000.0
+      # Beam 0: Galactic Center (Sgr A*)
+          source_ra_deg: 266.4168
+          source_dec_deg: -29.0078
+      # Beam 1: Vela Pulsar (PSR B0833-45)
+          source_ra_deg_1: 128.8361
+          source_dec_deg_1: -45.1764
+
+        - name: cudaSyncOutput
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: formed_beams_1
+          out_buf: host_formed_beams
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: alive_voltages_1
+          out_buf: host_alive_voltages
+
+  # GPU Processors: can target GPU 0 (or split across gpu_id 0 and 1 on dual-GPU nodes)
+    gpu_0:
+        kotekan_stage: cudaProcess
+        gpu_id: 0
+        cuda_stream_base: 0
+        num_cuda_streams: 6
+        buffer_depth: 3
+        commands: *command_list_0
+        in_buffers:
+            host_voltage: network_capture_buf_0
+        out_buffers:
+            host_formed_beams: host_formed_beams_buffer_0
+            host_alive_voltages: host_alive_voltages_buffer_0
+
+    gpu_1:
+        kotekan_stage: cudaProcess
+        gpu_id: 0
+        cuda_stream_base: 1
+        num_cuda_streams: 6
+        buffer_depth: 3
+        commands: *command_list_1
+        in_buffers:
+            host_voltage: network_capture_buf_1
+        out_buffers:
+            host_formed_beams: host_formed_beams_buffer_1
+            host_alive_voltages: host_alive_voltages_buffer_1
+
+# ------------------------------------------------------------------------------
+# Monitoring & Sinks
+# ------------------------------------------------------------------------------
+# Live REST inspection endpoints for waterfall telemetry & beam health snapshots
+inspect_beams_0:
+    kotekan_stage: restInspectFrame
+    in_buf: host_formed_beams_buffer_0
+    len: 4194304                   # 4 MB snapshot for dashboard telemetry
+
+inspect_beams_1:
+    kotekan_stage: restInspectFrame
+    in_buf: host_formed_beams_buffer_1
+    len: 4194304                   # 4 MB snapshot for dashboard telemetry
+
+# Stream output complex voltages to NVMe disk (10 GB recording = 42 frames = 2.15s)
+raw_file_write_beams_0:
+    kotekan_stage: rawFileWrite
+    in_buf: host_formed_beams_buffer_0
+    file_name: formed_beams_64ant_freq0
+    base_dir: /data/tracker/tracker_64ant
+    file_ext: bin
+    num_frames_per_file: 42
+    prefix_hostname: false
+    exit_after_n_files: 1
+
+raw_file_write_beams_1:
+    kotekan_stage: rawFileWrite
+    in_buf: host_formed_beams_buffer_1
+    file_name: formed_beams_64ant_freq1
+    base_dir: /data/tracker/tracker_64ant
+    file_ext: bin
+    num_frames_per_file: 42
+    prefix_hostname: false
+    exit_after_n_files: 1
+
+raw_file_write_alive_0:
+    kotekan_stage: rawFileWrite
+    in_buf: host_alive_voltages_buffer_0
+    file_name: alive_baseband_64ant_freq0
+    base_dir: /data/tracker/tracker_64ant
+    file_ext: bin
+    num_frames_per_file: 42
+    prefix_hostname: false
+    exit_after_n_files: 1
+
+raw_file_write_alive_1:
+    kotekan_stage: rawFileWrite
+    in_buf: host_alive_voltages_buffer_1
+    file_name: alive_baseband_64ant_freq1
+    base_dir: /data/tracker/tracker_64ant
+    file_ext: bin
+    num_frames_per_file: 42
+    prefix_hostname: false
+    exit_after_n_files: 1

@@ -1,10 +1,3 @@
-# === Start Python 2/3 compatibility
-from __future__ import absolute_import, division, print_function, unicode_literals
-from future.builtins import *  # noqa  pylint: disable=W0401, W0614
-from future.builtins.disabled import *  # noqa  pylint: disable=W0401, W0614
-
-# === End Python 2/3 compatibility
-
 import pytest
 import numpy as np
 import h5py
@@ -17,6 +10,7 @@ from pytest_localserver.http import WSGIServer
 
 from kotekan import runner
 from test_compression import _chime_stack_expectations, float_allclose
+from tolerance import FP32_RTOL
 
 if not runner.has_hdf5():
     pytest.fail("HDF5 support not available; unable to run tests!")
@@ -286,9 +280,18 @@ def test_transpose(transpose):
     assert f_tr["flags/frac_rfi"].shape == (n_f, n_t)
     assert f_tr["flags/dataset_id"].shape == (n_f, n_t)
 
-    assert (f_tr["flags/frac_lost"][:frac_freq, :] == 0.0).all()
-    assert np.allclose(f_tr["flags/frac_lost"][frac_freq, :], frac_lost, rtol=1e-3)
-    assert np.allclose(f_tr["flags/frac_rfi"][frac_freq, :], frac_rfi, rtol=1e-3)
+    # visDrop quantizes seq_total/rfi_total to integer samples, so the recovered
+    # frac differs from the target by up to ~1/fpga_seq_length on top of the
+    # float32 rounding in 1 - float(seq_total)/seq_length.
+    fpga_seq_length = int(800e6 / 2048 * writer_params["cadence"])
+    frac_atol = 1.0 / fpga_seq_length
+    assert np.allclose(f_tr["flags/frac_lost"][:frac_freq, :], 0.0, atol=FP32_RTOL)
+    assert np.allclose(
+        f_tr["flags/frac_lost"][frac_freq, :], frac_lost, atol=frac_atol, rtol=FP32_RTOL
+    )
+    assert np.allclose(
+        f_tr["flags/frac_rfi"][frac_freq, :], frac_rfi, atol=frac_atol, rtol=FP32_RTOL
+    )
     assert (f_tr["flags/dataset_id"][empty_freq, :] == NULL_DSET_ID).all()
 
     # Check dataset ID change is present

@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from .constants import (
     CHARTS_LATITUDE_DEG,
     CHARTS_LONGITUDE_DEG,
+    EARTH_ROT_RATE_RAD_S,
     SAMPLE_RATE_HZ,
 )
 
@@ -32,11 +33,12 @@ from .constants import (
 @dataclass(frozen=True)
 class CelestialSource:
     """Immutable celestial source definition."""
+
     name: str
     ra_deg: float
     dec_deg: float
-    flux_jy_400: float = 0.0          # Estimated flux density at 400 MHz (Jansky)
-    source_type: str = "calibrator"    # 'calibrator', 'pulsar', 'frb_host', 'solar'
+    flux_jy_400: float = 0.0  # Estimated flux density at 400 MHz (Jansky)
+    source_type: str = "calibrator"  # 'calibrator', 'pulsar', 'frb_host', 'solar'
     description: str = ""
 
 
@@ -75,6 +77,30 @@ CELESTIAL_CATALOG: Dict[str, CelestialSource] = {
         source_type="calibrator",
         description="Giant radio galaxy with bright relativistic jets",
     ),
+    "FornaxA": CelestialSource(
+        name="Fornax A (NGC 1316)",
+        ra_deg=50.6738,
+        dec_deg=-37.2082,
+        flux_jy_400=540.0,
+        source_type="calibrator",
+        description="Giant southern radio galaxy in Fornax cluster",
+    ),
+    "FornaxA_West": CelestialSource(
+        name="Fornax A West Lobe",
+        ra_deg=50.3583,
+        dec_deg=-37.2082,
+        flux_jy_400=280.0,
+        source_type="calibrator",
+        description="Western synchrotron radio lobe of Fornax A",
+    ),
+    "FornaxA_East": CelestialSource(
+        name="Fornax A East Lobe",
+        ra_deg=50.9750,
+        dec_deg=-37.2082,
+        flux_jy_400=260.0,
+        source_type="calibrator",
+        description="Eastern synchrotron radio lobe of Fornax A",
+    ),
     "PictorA": CelestialSource(
         name="Pictor A",
         ra_deg=79.9572,
@@ -82,6 +108,22 @@ CELESTIAL_CATALOG: Dict[str, CelestialSource] = {
         flux_jy_400=380.0,
         source_type="calibrator",
         description="Powerful FR II radio galaxy in southern sky",
+    ),
+    "PictorA_West": CelestialSource(
+        name="Pictor A West Lobe",
+        ra_deg=79.6000,
+        dec_deg=-45.7788,
+        flux_jy_400=190.0,
+        source_type="calibrator",
+        description="Western relativistic lobe of Pictor A",
+    ),
+    "PictorA_East": CelestialSource(
+        name="Pictor A East Lobe",
+        ra_deg=80.3000,
+        dec_deg=-45.7788,
+        flux_jy_400=190.0,
+        source_type="calibrator",
+        description="Eastern relativistic lobe of Pictor A",
     ),
     "PuppisA": CelestialSource(
         name="Puppis A",
@@ -174,7 +216,9 @@ CATALOG_ALIASES: Dict[str, str] = {
 }
 
 
-def parse_observation_time(time_spec: Optional[Union[str, datetime.datetime, float]]) -> datetime.datetime:
+def parse_observation_time(
+    time_spec: Optional[Union[str, datetime.datetime, float]],
+) -> datetime.datetime:
     """Parses observation time into an explicit UTC datetime.
 
     Supports:
@@ -195,11 +239,18 @@ def parse_observation_time(time_spec: Optional[Union[str, datetime.datetime, flo
         hour = int(time_spec) % 24
         minute = int((time_spec - hour) * 60)
         second = int(((time_spec - hour) * 60 - minute) * 60)
-        return datetime.datetime(2026, 3, 20, hour, minute, second, tzinfo=datetime.timezone.utc)
+        return datetime.datetime(
+            2026, 3, 20, hour, minute, second, tzinfo=datetime.timezone.utc
+        )
 
     s = str(time_spec).strip()
     if s.lower() == "now":
         return datetime.datetime.now(datetime.timezone.utc)
+
+    if s.lower().startswith("transit") or s.lower().startswith("slot:"):
+        from .sky import resolve_window_start
+
+        return resolve_window_start(s)
 
     # Try ISO 8601
     try:
@@ -218,7 +269,9 @@ def parse_observation_time(time_spec: Optional[Union[str, datetime.datetime, flo
             h = int(parts[0])
             m = int(parts[1])
             sec = int(parts[2]) if len(parts) == 3 else 0
-            return datetime.datetime(2026, 3, 20, h, m, sec, tzinfo=datetime.timezone.utc)
+            return datetime.datetime(
+                2026, 3, 20, h, m, sec, tzinfo=datetime.timezone.utc
+            )
         except ValueError:
             pass
 
@@ -235,26 +288,37 @@ def datetime_to_julian_date(dt: datetime.datetime) -> float:
     return 2440587.5 + dt.timestamp() / 86400.0
 
 
-def datetime_to_lst_hours(
-    dt: datetime.datetime,
-    longitude_deg: float = CHARTS_LONGITUDE_DEG,
-) -> float:
-    """Computes Local Sidereal Time (LST) in hours.
-
-    Mathematically identical to Kotekan C++ astrometry formula in:
-      - lib/cuda/cudaBeamTrackerCommand.cpp
-      - lib/cuda/cudaDirectBeamTrackerCommand.cpp
-    """
-    unix_s = dt.timestamp()
+def unix_to_gmst_hours(unix_s: float) -> float:
+    """Computes Greenwich Mean Sidereal Time (GMST) in hours from Unix timestamp."""
     d = unix_s / 86400.0 - 10957.5
     gmst_hours = (18.697374558 + 24.06570982441908 * d) % 24.0
     if gmst_hours < 0.0:
         gmst_hours += 24.0
+    return gmst_hours
 
+
+def unix_to_lst_hours(
+    unix_s: float, longitude_deg: float = CHARTS_LONGITUDE_DEG,
+) -> float:
+    """Computes Local Sidereal Time (LST) in hours from Unix timestamp seconds.
+
+    Mathematically identical to Kotekan C++ astrometry formula in:
+      - lib/cuda/cudaBeamTrackerCommand.cpp
+      - lib/cuda/cudaDirectBeamTrackerCommand.cpp
+      - lib/core/chartsConstants.hpp
+    """
+    gmst_hours = unix_to_gmst_hours(unix_s)
     lst_hours = (gmst_hours + longitude_deg / 15.0) % 24.0
     if lst_hours < 0.0:
         lst_hours += 24.0
     return lst_hours
+
+
+def datetime_to_lst_hours(
+    dt: datetime.datetime, longitude_deg: float = CHARTS_LONGITUDE_DEG,
+) -> float:
+    """Computes Local Sidereal Time (LST) in hours."""
+    return unix_to_lst_hours(dt.timestamp(), longitude_deg)
 
 
 def equatorial_to_horizontal(
@@ -276,7 +340,9 @@ def equatorial_to_horizontal(
     lat_rad = math.radians(lat_deg)
 
     # Elevation: sin(alt) = sin(dec)*sin(lat) + cos(dec)*cos(lat)*cos(ha)
-    sin_alt = math.sin(dec_rad) * math.sin(lat_rad) + math.cos(dec_rad) * math.cos(lat_rad) * math.cos(ha_rad)
+    sin_alt = math.sin(dec_rad) * math.sin(lat_rad) + math.cos(dec_rad) * math.cos(
+        lat_rad
+    ) * math.cos(ha_rad)
     sin_alt = max(-1.0, min(1.0, sin_alt))
     alt_rad = math.asin(sin_alt)
     alt_deg = math.degrees(alt_rad)
@@ -285,7 +351,9 @@ def equatorial_to_horizontal(
     # l = -cos(dec) * sin(ha)  (East)
     # m = sin(dec)*cos(lat) - cos(dec)*sin(lat)*cos(ha)  (North)
     l = -math.cos(dec_rad) * math.sin(ha_rad)
-    m = math.sin(dec_rad) * math.cos(lat_rad) - math.cos(dec_rad) * math.sin(lat_rad) * math.cos(ha_rad)
+    m = math.sin(dec_rad) * math.cos(lat_rad) - math.cos(dec_rad) * math.sin(
+        lat_rad
+    ) * math.cos(ha_rad)
 
     az_rad = math.atan2(l, m)
     az_deg = (math.degrees(az_rad) + 360.0) % 360.0
@@ -314,7 +382,9 @@ def equatorial_to_direction_cosines(
     lat_rad = math.radians(lat_deg)
 
     l = -math.cos(dec_rad) * math.sin(ha_rad)
-    m = math.sin(dec_rad) * math.cos(lat_rad) - math.cos(dec_rad) * math.sin(lat_rad) * math.cos(ha_rad)
+    m = math.sin(dec_rad) * math.cos(lat_rad) - math.cos(dec_rad) * math.sin(
+        lat_rad
+    ) * math.cos(ha_rad)
     n_sq = 1.0 - (l * l + m * m)
     n = math.sqrt(max(0.0, n_sq)) if n_sq > 0.0 else 0.0
 
@@ -336,8 +406,8 @@ def compute_direction_rates(
     dec_rad = math.radians(dec_deg)
     lat_rad = math.radians(lat_deg)
 
-    # Earth rotation angular velocity: omega = 2*pi / 86164.0905 s (sidereal day)
-    omega = 2.0 * math.pi / 86164.090535
+    # Earth rotation angular velocity (canonical rad/s)
+    omega = EARTH_ROT_RATE_RAD_S
 
     # d(l)/dt = -cos(dec) * cos(ha) * omega
     dl_dt = -math.cos(dec_rad) * math.cos(ha_rad) * omega
@@ -406,39 +476,49 @@ def find_visible_sources(
     sun_ra, sun_dec = compute_sun_equatorial(dt)
     sun_az, sun_alt = equatorial_to_horizontal(sun_ra, sun_dec, lst_h, lat_deg=lat_deg)
     if sun_alt >= min_elevation_deg:
-        l, m, n = equatorial_to_direction_cosines(sun_ra, sun_dec, lst_h, lat_deg=lat_deg)
-        results.append({
-            "key": "Sun",
-            "name": "Sun",
-            "ra_deg": sun_ra,
-            "dec_deg": sun_dec,
-            "elevation_deg": sun_alt,
-            "azimuth_deg": sun_az,
-            "l0": l,
-            "m0": m,
-            "flux_jy": 1.5e5,
-            "source_type": "solar",
-            "description": "The Sun (intense radio flux, active/quiet profile)",
-        })
+        l, m, n = equatorial_to_direction_cosines(
+            sun_ra, sun_dec, lst_h, lat_deg=lat_deg
+        )
+        results.append(
+            {
+                "key": "Sun",
+                "name": "Sun",
+                "ra_deg": sun_ra,
+                "dec_deg": sun_dec,
+                "elevation_deg": sun_alt,
+                "azimuth_deg": sun_az,
+                "l0": l,
+                "m0": m,
+                "flux_jy": 1.5e5,
+                "source_type": "solar",
+                "description": "The Sun (intense radio flux, active/quiet profile)",
+            }
+        )
 
     # Check celestial catalog
     for key, src in CELESTIAL_CATALOG.items():
-        az, alt = equatorial_to_horizontal(src.ra_deg, src.dec_deg, lst_h, lat_deg=lat_deg)
+        az, alt = equatorial_to_horizontal(
+            src.ra_deg, src.dec_deg, lst_h, lat_deg=lat_deg
+        )
         if alt >= min_elevation_deg:
-            l, m, n = equatorial_to_direction_cosines(src.ra_deg, src.dec_deg, lst_h, lat_deg=lat_deg)
-            results.append({
-                "key": key,
-                "name": src.name,
-                "ra_deg": src.ra_deg,
-                "dec_deg": src.dec_deg,
-                "elevation_deg": alt,
-                "azimuth_deg": az,
-                "l0": l,
-                "m0": m,
-                "flux_jy": src.flux_jy_400,
-                "source_type": src.source_type,
-                "description": src.description,
-            })
+            l, m, n = equatorial_to_direction_cosines(
+                src.ra_deg, src.dec_deg, lst_h, lat_deg=lat_deg
+            )
+            results.append(
+                {
+                    "key": key,
+                    "name": src.name,
+                    "ra_deg": src.ra_deg,
+                    "dec_deg": src.dec_deg,
+                    "elevation_deg": alt,
+                    "azimuth_deg": az,
+                    "l0": l,
+                    "m0": m,
+                    "flux_jy": src.flux_jy_400,
+                    "source_type": src.source_type,
+                    "description": src.description,
+                }
+            )
 
     # Sort descending by elevation
     results.sort(key=lambda s: s["elevation_deg"], reverse=True)
@@ -495,17 +575,19 @@ def resolve_beam_targets(
         if item.lower() == "zenith":
             ra_zenith = (lst_h * 15.0) % 360.0
             dec_zenith = lat_deg
-            targets.append({
-                "beam": len(targets),
-                "name": "Zenith (Local Meridian)",
-                "ra_deg": ra_zenith,
-                "dec_deg": dec_zenith,
-                "lst_hours": lst_h,
-                "elevation_deg": 90.0,
-                "azimuth_deg": 0.0,
-                "l0": 0.0,
-                "m0": 0.0,
-            })
+            targets.append(
+                {
+                    "beam": len(targets),
+                    "name": "Zenith (Local Meridian)",
+                    "ra_deg": ra_zenith,
+                    "dec_deg": dec_zenith,
+                    "lst_hours": lst_h,
+                    "elevation_deg": 90.0,
+                    "azimuth_deg": 0.0,
+                    "l0": 0.0,
+                    "m0": 0.0,
+                }
+            )
             continue
 
         # Check for 'Sun'
@@ -513,17 +595,19 @@ def resolve_beam_targets(
             sun_ra, sun_dec = compute_sun_equatorial(dt)
             az, alt = equatorial_to_horizontal(sun_ra, sun_dec, lst_h, lat_deg)
             l, m, _ = equatorial_to_direction_cosines(sun_ra, sun_dec, lst_h, lat_deg)
-            targets.append({
-                "beam": len(targets),
-                "name": "Sun",
-                "ra_deg": sun_ra,
-                "dec_deg": sun_dec,
-                "lst_hours": lst_h,
-                "elevation_deg": alt,
-                "azimuth_deg": az,
-                "l0": l,
-                "m0": m,
-            })
+            targets.append(
+                {
+                    "beam": len(targets),
+                    "name": "Sun",
+                    "ra_deg": sun_ra,
+                    "dec_deg": sun_dec,
+                    "lst_hours": lst_h,
+                    "elevation_deg": alt,
+                    "azimuth_deg": az,
+                    "l0": l,
+                    "m0": m,
+                }
+            )
             continue
 
         # Check catalog by name or alias
@@ -532,19 +616,51 @@ def resolve_beam_targets(
         if canonical_key in CELESTIAL_CATALOG:
             src = CELESTIAL_CATALOG[canonical_key]
             az, alt = equatorial_to_horizontal(src.ra_deg, src.dec_deg, lst_h, lat_deg)
-            l, m, _ = equatorial_to_direction_cosines(src.ra_deg, src.dec_deg, lst_h, lat_deg)
-            targets.append({
-                "beam": len(targets),
-                "name": src.name,
-                "ra_deg": src.ra_deg,
-                "dec_deg": src.dec_deg,
-                "lst_hours": lst_h,
-                "elevation_deg": alt,
-                "azimuth_deg": az,
-                "l0": l,
-                "m0": m,
-            })
+            l, m, _ = equatorial_to_direction_cosines(
+                src.ra_deg, src.dec_deg, lst_h, lat_deg
+            )
+            targets.append(
+                {
+                    "beam": len(targets),
+                    "name": src.name,
+                    "ra_deg": src.ra_deg,
+                    "dec_deg": src.dec_deg,
+                    "lst_hours": lst_h,
+                    "elevation_deg": alt,
+                    "azimuth_deg": az,
+                    "l0": l,
+                    "m0": m,
+                }
+            )
             continue
+
+        # Check verified targets catalog (SIMBAD parity)
+        try:
+            from .sky import find_verified_target
+
+            v_src = find_verified_target(lookup_key)
+            az, alt = equatorial_to_horizontal(
+                v_src.ra_deg, v_src.dec_deg, lst_h, lat_deg
+            )
+            l, m, _ = equatorial_to_direction_cosines(
+                v_src.ra_deg, v_src.dec_deg, lst_h, lat_deg
+            )
+            targets.append(
+                {
+                    "beam": len(targets),
+                    "name": v_src.label,
+                    "ra_deg": v_src.ra_deg,
+                    "dec_deg": v_src.dec_deg,
+                    "lst_hours": lst_h,
+                    "elevation_deg": alt,
+                    "azimuth_deg": az,
+                    "l0": l,
+                    "m0": m,
+                }
+            )
+            continue
+        except Exception:
+            pass
 
         # Check if "Name:RA,Dec" or "RA,Dec"
         name = f"Custom Beam {len(targets)}"
@@ -560,39 +676,45 @@ def resolve_beam_targets(
                 dec = float(coords[1])
                 az, alt = equatorial_to_horizontal(ra, dec, lst_h, lat_deg)
                 l, m, _ = equatorial_to_direction_cosines(ra, dec, lst_h, lat_deg)
-                targets.append({
-                    "beam": len(targets),
-                    "name": name,
-                    "ra_deg": ra,
-                    "dec_deg": dec,
-                    "lst_hours": lst_h,
-                    "elevation_deg": alt,
-                    "azimuth_deg": az,
-                    "l0": l,
-                    "m0": m,
-                })
+                targets.append(
+                    {
+                        "beam": len(targets),
+                        "name": name,
+                        "ra_deg": ra,
+                        "dec_deg": dec,
+                        "lst_hours": lst_h,
+                        "elevation_deg": alt,
+                        "azimuth_deg": az,
+                        "l0": l,
+                        "m0": m,
+                    }
+                )
             except ValueError:
                 pass
 
     # If auto count requested, fill remaining beams with visible sources
     if auto_count_requested > 0 or len(targets) == 0:
-        visible = find_visible_sources(dt, min_elevation_deg=5.0, lat_deg=lat_deg, lon_deg=lon_deg)
+        visible = find_visible_sources(
+            dt, min_elevation_deg=5.0, lat_deg=lat_deg, lon_deg=lon_deg
+        )
         already_names = {t["name"] for t in targets}
         for v in visible:
             if len(targets) >= max_beams:
                 break
             if v["name"] not in already_names:
-                targets.append({
-                    "beam": len(targets),
-                    "name": v["name"],
-                    "ra_deg": v["ra_deg"],
-                    "dec_deg": v["dec_deg"],
-                    "lst_hours": lst_h,
-                    "elevation_deg": v["elevation_deg"],
-                    "azimuth_deg": v["azimuth_deg"],
-                    "l0": v["l0"],
-                    "m0": v["m0"],
-                })
+                targets.append(
+                    {
+                        "beam": len(targets),
+                        "name": v["name"],
+                        "ra_deg": v["ra_deg"],
+                        "dec_deg": v["dec_deg"],
+                        "lst_hours": lst_h,
+                        "elevation_deg": v["elevation_deg"],
+                        "azimuth_deg": v["azimuth_deg"],
+                        "l0": v["l0"],
+                        "m0": v["m0"],
+                    }
+                )
                 already_names.add(v["name"])
 
     # If still fewer than max_beams, synthesize hexagonal grid offset beams around Zenith or primary
@@ -604,16 +726,18 @@ def resolve_beam_targets(
         offset_dec = base_dec + (idx * 0.25)
         az, alt = equatorial_to_horizontal(offset_ra, offset_dec, lst_h, lat_deg)
         l, m, _ = equatorial_to_direction_cosines(offset_ra, offset_dec, lst_h, lat_deg)
-        targets.append({
-            "beam": idx,
-            "name": f"Hex Offset {idx}",
-            "ra_deg": offset_ra,
-            "dec_deg": offset_dec,
-            "lst_hours": lst_h,
-            "elevation_deg": alt,
-            "azimuth_deg": az,
-            "l0": l,
-            "m0": m,
-        })
+        targets.append(
+            {
+                "beam": idx,
+                "name": f"Hex Offset {idx}",
+                "ra_deg": offset_ra,
+                "dec_deg": offset_dec,
+                "lst_hours": lst_h,
+                "elevation_deg": alt,
+                "azimuth_deg": az,
+                "l0": l,
+                "m0": m,
+            }
+        )
 
     return targets

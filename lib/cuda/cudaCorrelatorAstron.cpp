@@ -6,8 +6,9 @@
 
 #include "fmt.hpp" // for format, format_string, compile_string_to_view
 
-#include <map>       // for map
-#include <stdexcept> // for runtime_error
+#include <cuda_runtime.h> // for cudaDeviceProp, cudaGetDeviceProperties, cudaSuccess
+#include <map>            // for map
+#include <stdexcept>      // for runtime_error
 
 using kotekan::bufferContainer;
 using kotekan::Config;
@@ -39,23 +40,46 @@ cudaCorrelatorAstron::cudaCorrelatorAstron(Config& config, const std::string& un
 
     if (_elements_per_thread_block != 32 && _elements_per_thread_block != 48
         && _elements_per_thread_block != 64)
-        throw std::runtime_error("elements_per_thread_block must be one of 32, 48, 64 for TCCorrelator");
+        throw std::runtime_error(
+            "elements_per_thread_block must be one of 32, 48, 64 for TCCorrelator");
 
 
     // Multiple cudaProcess stages may share a CUDA device (for example, one
     // pipeline per frequency block). The compiled kernel is device-wide, so
     // only the first command instance on that device should register it.
     if (inst == 0 && !device.runtime_kernels.count("correlate")) {
+        std::string arch_flag = config.get_default<std::string>(unique_name, "correlator_arch", "");
+        if (arch_flag.empty()) {
+            cudaDeviceProp prop;
+            if (cudaGetDeviceProperties(&prop, device.get_gpu_id()) == cudaSuccess) {
+                arch_flag = fmt::format("-arch=compute_{:d}{:d}", prop.major, prop.minor);
+                INFO("cudaCorrelatorAstron: Auto-detected GPU {:d} compute capability: sm_{:d}{:d} "
+                     "-> compiling with {:s}",
+                     device.get_gpu_id(), prop.major, prop.minor, arch_flag);
+            } else {
+                arch_flag = "-arch=compute_80";
+                INFO("cudaCorrelatorAstron: Falling back to default {:s}", arch_flag);
+            }
+        } else if (arch_flag.rfind("-arch=", 0) != 0) {
+            arch_flag = "-arch=" + arch_flag;
+        }
+
         std::vector<std::string> opts = {
-            "-arch=compute_86",
+            arch_flag,
             "-lineinfo",
             "-DNR_BITS=4",
             fmt::format("-DNR_RECEIVERS={:d}", _num_elements / 2),
             fmt::format("-DNR_CHANNELS={:d}", _num_local_freq),
             fmt::format("-DNR_SAMPLES_PER_CHANNEL={:d}", _samples_per_data_set),
             fmt::format("-DNR_RECEIVERS_PER_BLOCK={:d}", _elements_per_thread_block),
-            "-DNR_POLARIZATIONS=2", // 10/03/2026 On CHARTS now we are using 1 pol, but the kernel expect 2, so this is set to 2 for now and its working fine
-            "-I/usr/local/cuda/include"};
+            "-DNR_POLARIZATIONS=2" // 10/03/2026 On CHARTS now we are using 1 pol, but the kernel
+                                   // expect 2, so this is set to 2 for now and its working fine
+        };
+        std::string custom_inc =
+            config.get_default<std::string>(unique_name, "cuda_include_dir", "");
+        if (!custom_inc.empty()) {
+            opts.push_back("-I" + custom_inc);
+        }
         device.build(kernel_file_name, {"correlate"}, opts);
     }
 }
@@ -82,11 +106,13 @@ cudaEvent_t cudaCorrelatorAstron::execute(cudaPipelineState&, const std::vector<
 
     // n = ceil(nr_receivers / NR_RECEIVERS_PER_BLOCK)
     int n = (nr_receivers + _elements_per_thread_block - 1) / _elements_per_thread_block;
-    if (n < 1) n = 1;
+    if (n < 1)
+        n = 1;
 
     // triangular blocks
     int num_thread_blocks = n * (n + 1) / 2;
-    if (num_thread_blocks < 1) num_thread_blocks = 1;
+    if (num_thread_blocks < 1)
+        num_thread_blocks = 1;
 
     err = cuLaunchKernel(device.runtime_kernels["correlate"], num_thread_blocks, _num_local_freq, 1,
                          32, 2, 2, 0, device.getStream(cuda_stream_id), parameters, NULL);

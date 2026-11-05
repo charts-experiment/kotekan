@@ -9,6 +9,7 @@ Shows:
 - attributes (metadata)
 - a compact preview of dataset data (corner slice)
 """
+
 import argparse
 import sys
 import numpy as np

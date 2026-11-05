@@ -6,16 +6,20 @@
 
 #include "fmt.hpp" // for compile_string_to_view
 
-#include <algorithm>       // for max
-#include <assert.h>        // for assert
-#include <cuda.h>          // for cuGetErrorString, cuModuleGetFunction, cuModuleLoadDataEx
+#include <assert.h> // for assert
+#include <cstdlib>
+#include <cuda.h> // for cuGetErrorString, cuModuleGetFunction, cuModuleLoadDataEx
+#include <filesystem>
 #include <mutex>           // for mutex, lock_guard
 #include <nvPTXCompiler.h> // for NVPTXCOMPILE_SUCCESS, nvPTXCompilerCompile, nvPTXCompilerC...
 #include <nvrtc.h>         // for nvrtcGetErrorString, NVRTC_SUCCESS, nvrtcCompileProgram
-#include <stdexcept>       // for runtime_error
-#include <stdio.h>         // for fclose, fopen, fread, fseek, ftell, rewind, FILE, SEEK_END
-#include <stdlib.h>        // for free, malloc, size_t, NULL
-#include <utility>         // for pair
+#include <set>
+#include <sstream>
+#include <stdexcept> // for runtime_error
+#include <stdio.h>   // for fclose, fopen, fread, fseek, ftell, rewind, FILE, SEEK_END
+#include <stdlib.h>  // for free, malloc
+#include <system_error>
+#include <utility> // for pair
 
 using kotekan::Config;
 
@@ -56,6 +60,13 @@ cudaDeviceInterface::cudaDeviceInterface(Config& config, const std::string& uniq
     }
 
     set_thread_device();
+
+    // Copy engines, once per device: see async_engine_count() and cudaProcess's
+    // `require_async_engines`.
+    cudaDeviceProp prop;
+    CHECK_CUDA_ERROR(cudaGetDeviceProperties(&prop, gpu_id));
+    _async_engine_count = prop.asyncEngineCount;
+    INFO("GPU[{:d}] {:s}: {:d} async copy engine(s)", gpu_id, prop.name, _async_engine_count);
 }
 
 cudaDeviceInterface::~cudaDeviceInterface() {
@@ -79,6 +90,12 @@ void cudaDeviceInterface::free_gpu_memory(void* ptr) {
 }
 
 cudaStream_t cudaDeviceInterface::getStream(int32_t cuda_stream_id) {
+    // The per-stage bound (cudaProcess::collect_stream_ids) runs after the commands are built,
+    // and a command may fetch its stream in its constructor; refuse here too rather than read
+    // past the vector first.
+    if (cuda_stream_id < 0 || cuda_stream_id >= (int32_t)streams.size())
+        throw std::runtime_error(fmt::format("getStream: stream {:d} outside [0, {:d})",
+                                             cuda_stream_id, (int32_t)streams.size()));
     return streams[cuda_stream_id];
 }
 
@@ -86,9 +103,18 @@ int32_t cudaDeviceInterface::get_num_streams() {
     return streams.size();
 }
 
+std::recursive_mutex& cudaDeviceInterface::stream_mutex(int32_t stream_id) {
+    if (stream_id < 0 || stream_id >= (int32_t)stream_mutexes.size())
+        throw std::runtime_error(fmt::format("stream_mutex: stream {:d} outside [0, {:d})",
+                                             stream_id, (int32_t)stream_mutexes.size()));
+    return stream_mutexes[stream_id];
+}
+
 void cudaDeviceInterface::prepareStreams(uint32_t num_streams) {
-    // Create GPU command queues
+    // Create GPU command queues, each with its queuing mutex; the mutex first, so no stream
+    // ever exists without one.
     for (uint32_t i = streams.size(); i < num_streams; ++i) {
+        stream_mutexes.emplace_back();
         cudaStream_t stream = nullptr;
         CHECK_CUDA_ERROR(cudaStreamCreate(&stream));
         streams.push_back(stream);
@@ -133,6 +159,96 @@ void cudaDeviceInterface::async_copy_gpu_to_host(void* dst, void* src, size_t le
     }
 }
 
+static std::vector<std::string> get_cuda_include_paths() {
+    std::vector<std::string> inc_paths;
+    std::set<std::string> seen;
+
+    auto try_add = [&](const std::string& path) {
+        if (path.empty())
+            return;
+        std::error_code ec;
+        if (std::filesystem::is_directory(path, ec)) {
+            std::string canon;
+            try {
+                canon = std::filesystem::canonical(path, ec).string();
+            } catch (...) {
+                canon = path;
+            }
+            if (canon.empty())
+                canon = path;
+            if (seen.find(canon) == seen.end()) {
+                seen.insert(canon);
+                inc_paths.push_back(path);
+            }
+            // In modern CUDA (e.g. CUDA 12+), CCCL headers (cuda/std, cooperative_groups, thrust,
+            // cub) may reside in cccl/
+            std::string cccl = path + "/cccl";
+            if (std::filesystem::is_directory(cccl, ec)) {
+                std::string canon_cccl;
+                try {
+                    canon_cccl = std::filesystem::canonical(cccl, ec).string();
+                } catch (...) {
+                    canon_cccl = cccl;
+                }
+                if (canon_cccl.empty())
+                    canon_cccl = cccl;
+                if (seen.find(canon_cccl) == seen.end()) {
+                    seen.insert(canon_cccl);
+                    inc_paths.push_back(cccl);
+                }
+            }
+        }
+    };
+
+    // 1. Environment variables from cluster modules (e.g. Trillium, Compute Canada, SLURM)
+    const char* env_vars[] = {"CUDA_HOME", "CUDA_PATH",        "CUDA_ROOT",     "EBROOTCUDA",
+                              "CUDADIR",   "CUDA_INCLUDE_DIR", "CUDA_INC_PATH", "CUDAToolkit_ROOT"};
+    for (const char* var : env_vars) {
+        const char* val = std::getenv(var);
+        if (val && *val) {
+            std::string root(val);
+            try_add(root + "/include");
+            try_add(root);
+        }
+    }
+
+    // 2. Check CPATH / C_INCLUDE_PATH / CPLUS_INCLUDE_PATH
+    const char* inc_envs[] = {"CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH"};
+    for (const char* var : inc_envs) {
+        const char* val = std::getenv(var);
+        if (val && *val) {
+            std::stringstream ss(val);
+            std::string item;
+            while (std::getline(ss, item, ':')) {
+                if (!item.empty()) {
+                    try_add(item);
+                }
+            }
+        }
+    }
+
+    // 3. Compile-time definition from CMake FindCUDAToolkit
+#ifdef KOTEKAN_CUDA_INCLUDE_DIRS
+    {
+        std::stringstream ss(KOTEKAN_CUDA_INCLUDE_DIRS);
+        std::string item;
+        while (std::getline(ss, item, ';')) {
+            if (!item.empty()) {
+                try_add(item);
+            }
+        }
+    }
+#endif
+
+    // 4. Standard default fallback locations
+    try_add("/usr/local/cuda/include");
+    try_add("/usr/local/include");
+    try_add("/opt/cuda/include");
+    try_add("/usr/include");
+
+    return inc_paths;
+}
+
 void cudaDeviceInterface::build(const std::string& kernel_filename,
                                 const std::vector<std::string>& kernel_names,
                                 const std::vector<std::string>& opts) {
@@ -173,20 +289,47 @@ void cudaDeviceInterface::build(const std::string& kernel_filename,
 
     free(program_buffer);
 
+    // Target the local GPU's compute capability. A hardcoded -arch (e.g.
+    // compute_86) produces PTX the driver JIT may reject on newer GPUs.
+    int cc_major = 0, cc_minor = 0;
+    CHECK_CUDA_ERROR(cudaDeviceGetAttribute(&cc_major, cudaDevAttrComputeCapabilityMajor, gpu_id));
+    CHECK_CUDA_ERROR(cudaDeviceGetAttribute(&cc_minor, cudaDevAttrComputeCapabilityMinor, gpu_id));
+    const std::string arch_opt = fmt::format("-arch=sm_{:d}{:d}", cc_major, cc_minor);
+
+    std::vector<std::string> local_opts(opts);
+    bool arch_found = false;
+    for (auto& s : local_opts) {
+        if (s.rfind("-arch=", 0) == 0) {
+            if (s != arch_opt)
+                INFO("GPU[{:d}] device interface: Replacing option {} with {} for local GPU",
+                     gpu_id, s, arch_opt);
+            s = arch_opt;
+            arch_found = true;
+        }
+    }
+    if (!arch_found)
+        local_opts.push_back(arch_opt);
+
+    // Dynamically resolved CUDA include paths for NVRTC
+    std::vector<std::string> extra_opts;
+    for (const auto& inc_path : get_cuda_include_paths()) {
+        INFO("cudaDeviceInterface: Using NVRTC include path: {:s}", inc_path);
+        extra_opts.push_back(std::string("--include-path=") + inc_path);
+    }
+    extra_opts.push_back("--std=c++17");
+
     // Convert compiler options to a c-style array.
     std::vector<const char*> cstrings;
-    cstrings.reserve(opts.size() + 4);
+    cstrings.reserve(local_opts.size() + extra_opts.size());
 
-    for (auto& s : opts)
+    for (auto& s : local_opts)
+        cstrings.push_back(s.c_str());
+    for (auto& s : extra_opts)
         cstrings.push_back(s.c_str());
 
-    cstrings.push_back("--include-path=/usr/local/cuda/include");
-    cstrings.push_back("--include-path=/usr/local/cuda/include/cccl");
-
-    cstrings.push_back("--std=c++17");
-
     // Compile the kernel
-    res = nvrtcCompileProgram(prog, cstrings.size(), cstrings.data());    // TODO Abstract error checking
+    res =
+        nvrtcCompileProgram(prog, cstrings.size(), cstrings.data()); // TODO Abstract error checking
 
     if (res != NVRTC_SUCCESS) {
 
@@ -194,25 +337,30 @@ void cudaDeviceInterface::build(const std::string& kernel_filename,
         nvrtcGetProgramLogSize(prog, &logSize);
 
         std::string log;
-        log.resize(logSize > 1 ? logSize : 1);  // evita size 0
+        log.resize(logSize > 1 ? logSize : 1); // evita size 0
         nvrtcGetProgramLog(prog, log.data());
 
         // 2) Mensaje de error + log
         const char* error_str = nvrtcGetErrorString(res);
         FATAL_ERROR("ERROR IN nvrtcCompileProgram: {}\nNVRTC LOG:\n{}", error_str, log);
     }
-    
 
-    // Obtain PTX from the program.
-    size_t ptxSize;
-    nvrtcGetPTXSize(prog, &ptxSize);
-    char* ptx = new char[ptxSize];
-    res = nvrtcGetPTX(prog, ptx);
+
+    // Obtain CUBIN from the program: native SASS for the local GPU, so the
+    // driver does not need to JIT-compile PTX.
+    size_t cubinSize;
+    res = nvrtcGetCUBINSize(prog, &cubinSize);
     if (res != NVRTC_SUCCESS) {
         const char* error_str = nvrtcGetErrorString(res);
-        FATAL_ERROR("ERROR IN nvrtcGetPTX: {}", error_str);
+        FATAL_ERROR("ERROR IN nvrtcGetCUBINSize: {}", error_str);
     }
-    DEBUG2("PTX EXTRACTED");
+    std::vector<char> cubin(cubinSize);
+    res = nvrtcGetCUBIN(prog, cubin.data());
+    if (res != NVRTC_SUCCESS) {
+        const char* error_str = nvrtcGetErrorString(res);
+        FATAL_ERROR("ERROR IN nvrtcGetCUBIN: {}", error_str);
+    }
+    DEBUG2("CUBIN EXTRACTED");
     res = nvrtcDestroyProgram(&prog);
     if (res != NVRTC_SUCCESS) {
         const char* error_str = nvrtcGetErrorString(res);
@@ -222,7 +370,7 @@ void cudaDeviceInterface::build(const std::string& kernel_filename,
     CUresult err;
     CUmodule module;
     // Get the module with the kernels
-    err = cuModuleLoadDataEx(&module, ptx, 0, nullptr, nullptr);
+    err = cuModuleLoadDataEx(&module, cubin.data(), 0, nullptr, nullptr);
     if (err != CUDA_SUCCESS) {
         const char* errStr;
         cuGetErrorString(err, &errStr);
@@ -238,7 +386,7 @@ void cudaDeviceInterface::build(const std::string& kernel_filename,
             FATAL_ERROR("ERROR IN cuModuleGetFunction for correlate: {}", errStr);
         }
         if (runtime_kernels[kernel_name] == nullptr) {
-            FATAL_ERROR("Failed to find kernel name \"{}\" in compiled PTX module", kernel_name);
+            FATAL_ERROR("Failed to find kernel name \"{}\" in compiled CUBIN module", kernel_name);
         }
     }
 }
@@ -250,12 +398,6 @@ void cudaDeviceInterface::build_ptx(const std::string& kernel_filename,
     size_t program_size;
     FILE* fp;
     char* program_buffer;
-    nvPTXCompileResult nv_res;
-    CUresult cu_res;
-    nvPTXCompilerHandle compiler = nullptr;
-    size_t elf_size;
-    char* elf;
-    CUmodule module;
 
     for (auto& kernel_name : kernel_names)
         if (runtime_kernels.count(kernel_name_prefix + kernel_name))
@@ -279,18 +421,56 @@ void cudaDeviceInterface::build_ptx(const std::string& kernel_filename,
         FATAL_ERROR("Error reading the file: {:s}", kernel_filename);
     fclose(fp);
 
+    build_ptx(std::string(program_buffer, program_size), kernel_filename, kernel_names, opts,
+              kernel_name_prefix);
+}
+
+void cudaDeviceInterface::build_ptx(const std::string& kernel_code,
+                                    const std::string& kernel_filename,
+                                    const std::vector<std::string>& kernel_names,
+                                    const std::vector<std::string>& opts,
+                                    const std::string& kernel_name_prefix) {
+    nvPTXCompileResult nv_res;
+    CUresult cu_res;
+    nvPTXCompilerHandle compiler = nullptr;
+    size_t elf_size;
+    char* elf;
+    CUmodule module;
+
     // Create the compiler
-    nv_res = nvPTXCompilerCreate(&compiler, program_size, program_buffer);
+    nv_res = nvPTXCompilerCreate(&compiler, kernel_code.size(), kernel_code.data());
     if (nv_res != NVPTXCOMPILE_SUCCESS) {
         // TODO Report ENUM names.
         FATAL_ERROR("Could not create PTX compiler, error code: {:d}", (int)nv_res);
         return;
     }
 
+    // Compile for the compute capability of the GPU that is actually present. Callers
+    // pass the --gpu-name their kernel was generated for, but SASS is only compatible
+    // within a major architecture (an sm_89 cubin fails to load on an sm_86 device with
+    // "no kernel image is available for execution on the device"), so kernels would
+    // otherwise only run on the specific GPU model they were generated for.
+    cudaDeviceProp prop;
+    CHECK_CUDA_ERROR(cudaGetDeviceProperties(&prop, gpu_id));
+    const std::string gpu_name = fmt::format("--gpu-name=sm_{:d}{:d}", prop.major, prop.minor);
+    std::vector<std::string> compile_opts;
+    compile_opts.reserve(opts.size() + 1);
+    for (const std::string& opt : opts) {
+        if (opt.rfind("--gpu-name", 0) == 0) {
+            if (opt != gpu_name)
+                INFO("Kernel file {:s} was generated for {:s}; compiling for the local GPU with "
+                     "{:s} instead",
+                     kernel_filename, opt, gpu_name);
+        } else {
+            compile_opts.push_back(opt);
+        }
+    }
+    compile_opts.push_back(gpu_name);
+
     // Convert compiler options to a c-style array.
     std::vector<const char*> cstring_opts;
-    cstring_opts.reserve(opts.size());
-    for (auto& s : opts)
+    cstring_opts.reserve(compile_opts.size());
+    for (auto& s : compile_opts)
         cstring_opts.push_back(s.c_str());
 
     // Compile the code
@@ -363,7 +543,10 @@ void cudaDeviceInterface::build_ptx(const std::string& kernel_filename,
     // Extract kernels
     cu_res = cuModuleLoadDataEx(&module, elf, 0, nullptr, nullptr);
     if (cu_res != CUDA_SUCCESS) {
-        FATAL_ERROR("Could not load module data from elf");
+        const char* errStr = nullptr;
+        cuGetErrorString(cu_res, &errStr);
+        FATAL_ERROR("Could not load module data from elf for kernel file {:s}: {:s}",
+                    kernel_filename, errStr);
         return;
     }
 

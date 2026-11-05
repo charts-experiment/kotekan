@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+
 try:
     import curses
 except ImportError:
@@ -54,16 +55,19 @@ except ImportError:
     CHARTS_ALTITUDE_M = 458.0
     DEFAULT_SPACING_M = 0.6
     LOCAL_FREQUENCY_CHANNELS = 336
+
     def get_default_charts_h5_path():
         from pathlib import Path
-        return Path("baseband_virtual.h5")
 
+        return Path("baseband_virtual.h5")
 
 
 class KotekanTrackerClient:
     """REST Client for Kotekan Beam Tracker endpoints."""
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 12048, timeout_s: float = 3.0):
+    def __init__(
+        self, host: str = "127.0.0.1", port: int = 12048, timeout_s: float = 3.0
+    ):
         self.base_url = f"http://{host}:{port}"
         self.timeout_s = timeout_s
 
@@ -80,7 +84,9 @@ class KotekanTrackerClient:
     def _post(self, endpoint: str, payload: Dict[str, Any]) -> str:
         url = f"{self.base_url}{endpoint}"
         body = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+        req = urllib.request.Request(
+            url, data=body, headers={"Content-Type": "application/json"}, method="POST"
+        )
         try:
             with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
                 return resp.read().decode("utf-8").strip()
@@ -101,7 +107,9 @@ class KotekanTrackerClient:
         except urllib.error.URLError as e:
             raise ConnectionError(f"Failed to fetch inspect frame from {url}: {e}")
 
-    def steer_lm(self, beam_id: int, l0: float, m0: float, dl: float = 0.0, dm: float = 0.0) -> str:
+    def steer_lm(
+        self, beam_id: int, l0: float, m0: float, dl: float = 0.0, dm: float = 0.0
+    ) -> str:
         """Set beam trajectory via direction cosines (l, m)."""
         payload = {
             "beam_id": beam_id,
@@ -179,15 +187,18 @@ class KotekanTrackerClient:
             payload["active_elements"] = active_elements
         return self._post("/beam_tracker/set_antenna_mask", payload)
 
-    def auto_mask(self, h5_path: Optional[str] = None, power_threshold: float = 0.05) -> str:
+    def auto_mask(
+        self, h5_path: Optional[str] = None, power_threshold: float = 0.05
+    ) -> str:
         """Automatically detects unplugged/dead antennas from baseband data and masks them."""
         bad_elements = []
         active_elements = []
         if h5_path and os.path.exists(h5_path):
             import h5py
+
             with h5py.File(h5_path, "r") as f:
                 dset = f["baseband"]
-                raw = dset[:, :min(84, dset.shape[1]), :min(2048, dset.shape[2])]
+                raw = dset[:, : min(84, dset.shape[1]), : min(2048, dset.shape[2])]
                 r = (raw & 0x0F).astype(np.int8)
                 i = (raw >> 4).astype(np.int8)
                 r[r >= 8] -= 16
@@ -211,6 +222,90 @@ class KotekanTrackerClient:
         """Activate specified raw antenna elements and mask all others."""
         payload = {"active_elements": active_elements}
         return self._post("/beam_tracker/set_antenna_mask", payload)
+
+    def set_taper(
+        self,
+        taper_type: str = "boxcar",
+        taper_pedestal: float = 1.0,
+        enable_weight_bislc: bool = False,
+        bislc_diagonal_loading: float = 1e-3,
+    ) -> str:
+        """Configure spatial windowing / taper and fused weight-space BiSLC unmixing."""
+        payload = {
+            "taper_type": str(taper_type),
+            "taper_pedestal": float(taper_pedestal),
+            "enable_weight_bislc": bool(enable_weight_bislc),
+            "bislc_diagonal_loading": float(bislc_diagonal_loading),
+        }
+        return self._post("/beam_tracker/set_taper", payload)
+
+    def get_bislc_status(self) -> Dict[str, Any]:
+        """Query /bislc/status for GPU-inverted beam unmixing metrics."""
+        return self._get("/bislc/status")
+
+    def enable_bislc(
+        self, enabled: bool = True, diagonal_loading: Optional[float] = None
+    ) -> str:
+        """Enable or disable BiSLC beam unmixing stage."""
+        msg = self._post("/bislc/enable", {"enabled": bool(enabled)})
+        if diagonal_loading is not None:
+            self._post(
+                "/bislc/set_diagonal_loading",
+                {"diagonal_loading": float(diagonal_loading)},
+            )
+        return msg
+
+    def get_transient_trigger_status(self) -> Dict[str, Any]:
+        """Query /transient_trigger/status for SK and cross-correlation counters."""
+        return self._get("/transient_trigger/status")
+
+    def set_transient_trigger_thresholds(
+        self,
+        sk_threshold: Optional[float] = None,
+        rfi_threshold: Optional[float] = None,
+        min_flagged_channels: Optional[int] = None,
+        cooldown_frames: Optional[int] = None,
+    ) -> str:
+        """Update live transient trigger thresholds."""
+        payload: Dict[str, Any] = {}
+        if sk_threshold is not None:
+            payload["sk_threshold"] = float(sk_threshold)
+        if rfi_threshold is not None:
+            payload["rfi_threshold"] = float(rfi_threshold)
+        if min_flagged_channels is not None:
+            payload["min_flagged_channels"] = int(min_flagged_channels)
+        if cooldown_frames is not None:
+            payload["cooldown_frames"] = int(cooldown_frames)
+        return self._post("/transient_trigger/set_thresholds", payload)
+
+    def get_telemetry(self) -> Dict[str, Any]:
+        """Query /direct_beam_tracker/telemetry (or /direct_tracker/telemetry)."""
+        try:
+            return self._get("/direct_beam_tracker/telemetry")
+        except Exception:
+            return self._get("/direct_tracker/telemetry")
+
+    def get_beam_power(self) -> Dict[str, Any]:
+        """Query /beam_tracker/beam_power for detected beam power across channels."""
+        try:
+            return self._get("/beam_tracker/beam_power")
+        except Exception:
+            return self._get("/direct_tracker/beam_power")
+
+    def get_targets(self) -> Dict[str, Any]:
+        """Query /beam_tracker/targets for active beam pointing directions."""
+        try:
+            return self._get("/beam_tracker/targets")
+        except Exception:
+            return self._get("/direct_tracker/targets")
+
+    def set_subframe_interpolation(self, enabled: bool = True) -> str:
+        """Enable or disable subframe phase interpolation."""
+        payload = {"enabled": bool(enabled)}
+        try:
+            return self._post("/beam_tracker/set_interpolation", payload)
+        except Exception:
+            return self._post("/direct_tracker/set_interpolation", payload)
 
 
 def render_ascii_skymap(trajectories: List[Dict[str, Any]], active_beams: int) -> str:
@@ -260,7 +355,9 @@ def print_status_dashboard(status: Dict[str, Any], latency_ms: float):
     print(f" REST Connection Latency : {latency_ms:.2f} ms")
     print(f" Output Format            : {status.get('output_format', 'N/A')}")
     print(f" Total Array Elements    : {status.get('total_elements', 32)}")
-    print(f" Active Antennas (Alive) : {status.get('active_antennas', 0)} / {status.get('total_elements', 32)}")
+    print(
+        f" Active Antennas (Alive) : {status.get('active_antennas', 0)} / {status.get('total_elements', 32)}"
+    )
     print(f" Masked Antennas (Dead)  : {status.get('masked_antennas', 0)}")
     active_raw = status.get("active_raw_elements", [])
     active_phys = status.get("active_physical_antennas", [])
@@ -268,9 +365,15 @@ def print_status_dashboard(status: Dict[str, Any], latency_ms: float):
         print(f"   -> Active Raw Elements: {active_raw}")
         print(f"   -> Physical Antennas  : {active_phys}")
     site = status.get("site", {})
-    print(f" Site Location           : Lat {site.get('lat_deg', 0.0):.4f}°, Lon {site.get('lon_deg', 0.0):.4f}°, Alt {site.get('alt_m', 0.0):.1f} m")
-    print(f" Active Beams / Capacity : {status.get('num_active_beams', 1)} / {status.get('max_beams_capacity', 8)}")
-    print(f" Integration Spectra     : {status.get('integration_spectra', 320)} (~1.07 ms)")
+    print(
+        f" Site Location           : Lat {site.get('lat_deg', 0.0):.4f}°, Lon {site.get('lon_deg', 0.0):.4f}°, Alt {site.get('alt_m', 0.0):.1f} m"
+    )
+    print(
+        f" Active Beams / Capacity : {status.get('num_active_beams', 1)} / {status.get('max_beams_capacity', 8)}"
+    )
+    print(
+        f" Integration Spectra     : {status.get('integration_spectra', 320)} (~1.07 ms)"
+    )
     print(f" Element Spacing         : {status.get('spacing_m', 0.6):.2f} m")
     print("-" * 80)
 
@@ -278,14 +381,26 @@ def print_status_dashboard(status: Dict[str, Any], latency_ms: float):
     trajectories = status.get("trajectories", [])
     active_count = status.get("num_active_beams", 1)
     print(" ACTIVE BEAMS & TRAJECTORY STATE:")
-    print(" | Beam | State  |   l0 (East) |   m0 (North)|   n0 (Zenith)|  dl/dt (1/s) |  dm/dt (1/s) | Target (RA, Dec) |")
-    print(" +------+--------+-------------+-------------+--------------+--------------+--------------+-------------------+")
+    print(
+        " | Beam | State  |   l0 (East) |   m0 (North)|   n0 (Zenith)|  dl/dt (1/s) |  dm/dt (1/s) | Target (RA, Dec) |"
+    )
+    print(
+        " +------+--------+-------------+-------------+--------------+--------------+--------------+-------------------+"
+    )
     for b, traj in enumerate(trajectories):
         state = "ACTIVE" if b < active_count else "IDLE  "
         cel = traj.get("celestial_target", {})
-        cel_str = f"({cel.get('ra_deg', 0.0):.2f}°, {cel.get('dec_deg', 0.0):.2f}°)" if cel.get("is_set", False) else "Manual (l,m)"
-        print(f" | {b:4d} | {state} | {traj.get('l0', 0.0):11.5f} | {traj.get('m0', 0.0):11.5f} | {traj.get('n0', 0.0):12.5f} | {traj.get('dl', 0.0):12.4e} | {traj.get('dm', 0.0):12.4e} | {cel_str:17s} |")
-    print(" +------+--------+-------------+-------------+--------------+--------------+--------------+-------------------+")
+        cel_str = (
+            f"({cel.get('ra_deg', 0.0):.2f}°, {cel.get('dec_deg', 0.0):.2f}°)"
+            if cel.get("is_set", False)
+            else "Manual (l,m)"
+        )
+        print(
+            f" | {b:4d} | {state} | {traj.get('l0', 0.0):11.5f} | {traj.get('m0', 0.0):11.5f} | {traj.get('n0', 0.0):12.5f} | {traj.get('dl', 0.0):12.4e} | {traj.get('dm', 0.0):12.4e} | {cel_str:17s} |"
+        )
+    print(
+        " +------+--------+-------------+-------------+--------------+--------------+--------------+-------------------+"
+    )
 
     print("\n SKY RECEPTIVITY FOOTPRINT (Hemisphere Topocentric Projection):")
     print(render_ascii_skymap(trajectories, active_count))
@@ -306,13 +421,21 @@ def print_antenna_mask_dashboard(mask_status: Dict[str, Any]):
 
     print(f" Version                : {mask_status.get('version', 'N/A')}")
     print(f" Elements (Total/Active): {n_ant} / {active} (Masked: {masked})")
-    print(f" Breakdown              : Dead: {dead} | Saturated: {sat} | Manual Mask: {manual}")
+    print(
+        f" Breakdown              : Dead: {dead} | Saturated: {sat} | Manual Mask: {manual}"
+    )
     thresh = mask_status.get("thresholds", {})
-    clip_pct = thresh.get('clip_fraction_threshold', 0.02) * 100.0
-    print(f" Thresholds             : Dead <= {thresh.get('dead_power_threshold', 0.05)} | Sat >= {thresh.get('sat_power_threshold', 80.0)} | Clip >= {clip_pct:.1f}%")
+    clip_pct = thresh.get("clip_fraction_threshold", 0.02) * 100.0
+    print(
+        f" Thresholds             : Dead <= {thresh.get('dead_power_threshold', 0.05)} | Sat >= {thresh.get('sat_power_threshold', 80.0)} | Clip >= {clip_pct:.1f}%"
+    )
     print("-" * 80)
-    print(" | Ant ID | State       | Active | Mean Power | Clip Frac (%) | Clip Count | Healthy Frames |")
-    print(" +--------+-------------+--------+------------+---------------+------------+----------------+")
+    print(
+        " | Ant ID | State       | Active | Mean Power | Clip Frac (%) | Clip Count | Healthy Frames |"
+    )
+    print(
+        " +--------+-------------+--------+------------+---------------+------------+----------------+"
+    )
     for ant in mask_status.get("antennas", []):
         aid = ant.get("id", 0)
         st = ant.get("status", "UNKNOWN")
@@ -321,8 +444,12 @@ def print_antenna_mask_dashboard(mask_status: Dict[str, Any]):
         clip_f = ant.get("clipping_fraction", 0.0) * 100.0
         clip_c = ant.get("clipped_count", 0)
         rec = ant.get("consecutive_healthy", 0)
-        print(f" | {aid:6d} | {st:11s} | {act:6s} | {pwr:10.4f} | {clip_f:12.2f}% | {clip_c:10d} | {rec:14d} |")
-    print(" +--------+-------------+--------+------------+---------------+------------+----------------+")
+        print(
+            f" | {aid:6d} | {st:11s} | {act:6s} | {pwr:10.4f} | {clip_f:12.2f}% | {clip_c:10d} | {rec:14d} |"
+        )
+    print(
+        " +--------+-------------+--------+------------+---------------+------------+----------------+"
+    )
     print("=" * 80)
 
 
@@ -338,13 +465,19 @@ def watch_loop(client: KotekanTrackerClient, interval_s: float = 1.0):
                 print_status_dashboard(status, (t1 - t0) * 1000.0)
             except Exception as e:
                 print(f"[ERROR] Connection to Kotekan failed: {e}")
-                print("Make sure Kotekan is running with REST server enabled (e.g. -b 127.0.0.1:12048)")
+                print(
+                    "Make sure Kotekan is running with REST server enabled (e.g. -b 127.0.0.1:12048)"
+                )
             time.sleep(interval_s)
     except KeyboardInterrupt:
         print("\nExiting watch mode.")
 
 
-def stream_loop(client: KotekanTrackerClient, buffer_name: str = "host_formed_beams_buffer", interval_s: float = 1.0):
+def stream_loop(
+    client: KotekanTrackerClient,
+    buffer_name: str = "host_formed_beams_buffer",
+    interval_s: float = 1.0,
+):
     """Continuously poll and display live formed beam RF stream metrics in terminal."""
     print("=" * 80)
     print(f" CHARTS LIVE FORMED BEAM RF STREAM MONITOR (/inspect_frame/{buffer_name})")
@@ -371,7 +504,9 @@ def stream_loop(client: KotekanTrackerClient, buffer_name: str = "host_formed_be
 
                 now_str = time.strftime("%H:%M:%S")
                 mb_size = len(raw_data) / (1024.0 * 1024.0)
-                print(f"\n[{now_str}] Frame #{frame_idx:04d} | Payload: {mb_size:.2f} MB ({n_samples:,} complex float2) | REST: {t_fetch_ms:.1f} ms")
+                print(
+                    f"\n[{now_str}] Frame #{frame_idx:04d} | Payload: {mb_size:.2f} MB ({n_samples:,} complex float2) | REST: {t_fetch_ms:.1f} ms"
+                )
 
                 samples_per_beam = n_samples // max(1, n_beams)
                 for b in range(n_beams):
@@ -388,16 +523,22 @@ def stream_loop(client: KotekanTrackerClient, buffer_name: str = "host_formed_be
                     bar_filled = min(bar_len, max(0, int(rms_v * 12)))
                     bar_str = "█" * bar_filled + "░" * (bar_len - bar_filled)
 
-                    print(f"  Beam {b} | RMS: {rms_v:8.4f} | Power: {db_p:6.1f} dB | [{bar_str}] Peak: {peak_p:8.4f}")
+                    print(
+                        f"  Beam {b} | RMS: {rms_v:8.4f} | Power: {db_p:6.1f} dB | [{bar_str}] Peak: {peak_p:8.4f}"
+                    )
 
                 frame_idx += 1
             except urllib.error.HTTPError as e:
                 if e.code == 404:
-                    print(f"[{time.strftime('%H:%M:%S')}] Waiting for beam tracker to produce first frame... (HTTP 404)")
+                    print(
+                        f"[{time.strftime('%H:%M:%S')}] Waiting for beam tracker to produce first frame... (HTTP 404)"
+                    )
                 else:
                     print(f"[ERROR] HTTP {e.code}: {e.reason}")
             except Exception as e:
-                print(f"[{time.strftime('%H:%M:%S')}] Waiting for stream / frame arrival: {e}")
+                print(
+                    f"[{time.strftime('%H:%M:%S')}] Waiting for stream / frame arrival: {e}"
+                )
 
             time.sleep(interval_s)
     except KeyboardInterrupt:
@@ -451,7 +592,9 @@ def render_ascii_spectrum(
     f_mid = 0.5 * (f_start + f_end)
 
     tick_line = f"  Bin: {b_start}" + f"{b_mid}".center(width - 10) + f"{b_end}"
-    freq_line = f"  MHz: {f_start:.1f}" + f"{f_mid:.1f} MHz".center(width - 18) + f"{f_end:.1f}"
+    freq_line = (
+        f"  MHz: {f_start:.1f}" + f"{f_mid:.1f} MHz".center(width - 18) + f"{f_end:.1f}"
+    )
     lines.append(tick_line)
     lines.append(freq_line)
     return "\n".join(lines)
@@ -468,7 +611,9 @@ def render_horizontal_spectrum(
     band_size = n // n_bands
     lines = []
     lines.append("  " + "-" * 72)
-    lines.append(f"  {'Bin Range':<15} {'Center Freq':<14} {'Power (dB)':<12} {'ASCII Power Bar'}")
+    lines.append(
+        f"  {'Bin Range':<15} {'Center Freq':<14} {'Power (dB)':<12} {'ASCII Power Bar'}"
+    )
     lines.append("  " + "-" * 72)
 
     max_db = float(np.max(db_values))
@@ -497,7 +642,9 @@ def render_horizontal_spectrum(
         filled = min(bar_len, max(0, int(norm * bar_len)))
         bar = "█" * filled + "░" * (bar_len - filled)
         tag = " [PEAK]" if idx == peak_band_idx else ""
-        lines.append(f"  Bin {b0:03d}..{b1:03d}     [{fc:6.1f} MHz]    {p_db:6.1f} dB    | {bar}{tag}")
+        lines.append(
+            f"  Bin {b0:03d}..{b1:03d}     [{fc:6.1f} MHz]    {p_db:6.1f} dB    | {bar}{tag}"
+        )
 
     lines.append("  " + "-" * 72)
     return "\n".join(lines)
@@ -544,7 +691,9 @@ def spectrum_loop(
                 n_time = n_samples // (n_freq * max_beams)
 
                 if n_time > 0:
-                    reshaped = data[: n_time * n_freq * max_beams].reshape((n_time, n_freq, max_beams))
+                    reshaped = data[: n_time * n_freq * max_beams].reshape(
+                        (n_time, n_freq, max_beams)
+                    )
                     beam_v = reshaped[:, :, beam_to_plot]
                     power_per_freq = np.mean(np.abs(beam_v) ** 2, axis=0)
                 else:
@@ -560,7 +709,11 @@ def spectrum_loop(
                     try:
                         b_parts = bins.split(":")
                         b0 = max(0, int(b_parts[0]))
-                        b1 = min(len(db_per_freq), int(b_parts[1])) if len(b_parts) > 1 and b_parts[1] else len(db_per_freq)
+                        b1 = (
+                            min(len(db_per_freq), int(b_parts[1]))
+                            if len(b_parts) > 1 and b_parts[1]
+                            else len(db_per_freq)
+                        )
                         if b1 > b0:
                             db_per_freq = db_per_freq[b0:b1]
                             bin_offset = b0
@@ -581,28 +734,60 @@ def spectrum_loop(
                 now_str = time.strftime("%H:%M:%S")
                 print("=" * 80)
                 print(" CHARTS 32-ANTENNA BEAM TRACKER ASCII FREQUENCY SPECTRUM")
-                zoom_info = f" | Bins: {bin_offset}..{bin_offset+len(db_per_freq)-1}" if bins else ""
-                print(f" Time: {now_str} | Beam: {beam_to_plot} of {n_beams} active{zoom_info} | Frame: {len(raw_data)/1024/1024:.2f} MB | Latency: {t_fetch_ms:.1f} ms")
+                zoom_info = (
+                    f" | Bins: {bin_offset}..{bin_offset+len(db_per_freq)-1}"
+                    if bins
+                    else ""
+                )
+                print(
+                    f" Time: {now_str} | Beam: {beam_to_plot} of {n_beams} active{zoom_info} | Frame: {len(raw_data)/1024/1024:.2f} MB | Latency: {t_fetch_ms:.1f} ms"
+                )
                 print("=" * 80)
 
                 # Render 2D Vertical Spectrum Graph
-                print(render_ascii_spectrum(db_per_freq, height=height, width=width, freq_start_mhz=freq_start_mhz, freq_step_mhz=freq_step_mhz, bin_offset=bin_offset))
+                print(
+                    render_ascii_spectrum(
+                        db_per_freq,
+                        height=height,
+                        width=width,
+                        freq_start_mhz=freq_start_mhz,
+                        freq_step_mhz=freq_step_mhz,
+                        bin_offset=bin_offset,
+                    )
+                )
 
                 # Render Horizontal Table if requested
                 if horizontal:
                     print()
-                    print(render_horizontal_spectrum(db_per_freq, n_bands=min(16, len(db_per_freq)), freq_start_mhz=freq_start_mhz + bin_offset * freq_step_mhz, freq_step_mhz=freq_step_mhz))
+                    print(
+                        render_horizontal_spectrum(
+                            db_per_freq,
+                            n_bands=min(16, len(db_per_freq)),
+                            freq_start_mhz=freq_start_mhz + bin_offset * freq_step_mhz,
+                            freq_step_mhz=freq_step_mhz,
+                        )
+                    )
 
                 print()
-                print(f"  [Summary] Peak Bin : {peak_bin:03d} ({peak_freq_mhz:6.1f} MHz) -> {peak_db:6.1f} dB")
-                print(f"            Mean/RMS : {mean_db:6.1f} dB | Floor: {min_db:6.1f} dB | Dynamic Range: {peak_db - min_db:5.1f} dB")
+                print(
+                    f"  [Summary] Peak Bin : {peak_bin:03d} ({peak_freq_mhz:6.1f} MHz) -> {peak_db:6.1f} dB"
+                )
+                print(
+                    f"            Mean/RMS : {mean_db:6.1f} dB | Floor: {min_db:6.1f} dB | Dynamic Range: {peak_db - min_db:5.1f} dB"
+                )
                 print("=" * 80)
                 if not once:
-                    print(" Press Ctrl+C to stop. Refreshing every {:.1f}s...".format(interval_s))
+                    print(
+                        " Press Ctrl+C to stop. Refreshing every {:.1f}s...".format(
+                            interval_s
+                        )
+                    )
 
             except urllib.error.HTTPError as e:
                 if e.code == 404:
-                    print(f"[{time.strftime('%H:%M:%S')}] Waiting for beam tracker formed beam frames... (HTTP 404)")
+                    print(
+                        f"[{time.strftime('%H:%M:%S')}] Waiting for beam tracker formed beam frames... (HTTP 404)"
+                    )
                 else:
                     print(f"[ERROR] HTTP {e.code}: {e.reason}")
             except Exception as e:
@@ -623,7 +808,9 @@ def interactive_mode(client: KotekanTrackerClient):
     print("   l <beam_id> <l0> <m0> [dl] [dm]   : Steer beam in direction cosines")
     print("   radec <beam_id> <ra> <dec>        : Steer beam to celestial RA/Dec")
     print("   nbeams <count>                    : Set number of active beams (1..8)")
-    print("   mask <ant_id> [0|1]               : Enable/disable antenna (1=alive, 0=dead)")
+    print(
+        "   mask <ant_id> [0|1]               : Enable/disable antenna (1=alive, 0=dead)"
+    )
     print("   status                            : Query status")
     print("   quit                              : Exit")
     print("=" * 80)
@@ -678,7 +865,9 @@ def interactive_mode(client: KotekanTrackerClient):
                 resp = client.mask_antenna(ant_id, enabled)
                 print(f" -> {resp}")
             else:
-                print(f"Unknown command: {cmd}. Type 'status', 'l', 'radec', 'nbeams', 'mask', or 'quit'.")
+                print(
+                    f"Unknown command: {cmd}. Type 'status', 'l', 'radec', 'nbeams', 'mask', or 'quit'."
+                )
         except KeyboardInterrupt:
             break
         except Exception as e:
@@ -686,80 +875,283 @@ def interactive_mode(client: KotekanTrackerClient):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Kotekan Beam Tracker Live Steering & Health Monitor")
-    parser.add_argument("--host", default="127.0.0.1", help="Kotekan host (default: 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=12048, help="Kotekan REST port (default: 12048)")
+    parser = argparse.ArgumentParser(
+        description="Kotekan Beam Tracker Live Steering & Health Monitor"
+    )
+    parser.add_argument(
+        "--host", default="127.0.0.1", help="Kotekan host (default: 127.0.0.1)"
+    )
+    parser.add_argument(
+        "--port", type=int, default=12048, help="Kotekan REST port (default: 12048)"
+    )
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
 
     # Status command
     subparsers.add_parser("status", help="Query and display live status")
 
     # Steer (l, m) command
-    p_lm = subparsers.add_parser("steer-lm", help="Set trajectory using direction cosines (l, m)")
+    p_lm = subparsers.add_parser(
+        "steer-lm", help="Set trajectory using direction cosines (l, m)"
+    )
     p_lm.add_argument("--beam", type=int, default=0, help="Beam ID (0..7)")
-    p_lm.add_argument("--l0", type=float, required=True, help="Direction cosine l0 (East)")
-    p_lm.add_argument("--m0", type=float, required=True, help="Direction cosine m0 (North)")
+    p_lm.add_argument(
+        "--l0", type=float, required=True, help="Direction cosine l0 (East)"
+    )
+    p_lm.add_argument(
+        "--m0", type=float, required=True, help="Direction cosine m0 (North)"
+    )
     p_lm.add_argument("--dl", type=float, default=0.0, help="Direction rate dl/sample")
     p_lm.add_argument("--dm", type=float, default=0.0, help="Direction rate dm/sample")
 
     # Steer (RA, Dec) command
-    p_radec = subparsers.add_parser("steer-radec", help="Set trajectory using celestial coordinates (RA, Dec)")
+    p_radec = subparsers.add_parser(
+        "steer-radec", help="Set trajectory using celestial coordinates (RA, Dec)"
+    )
     p_radec.add_argument("--beam", type=int, default=0, help="Beam ID (0..7)")
-    p_radec.add_argument("--ra", type=float, required=True, help="Right Ascension in degrees")
-    p_radec.add_argument("--dec", type=float, required=True, help="Declination in degrees")
-    p_radec.add_argument("--lst", type=float, default=None, help="Local Sidereal Time in hours")
-    p_radec.add_argument("--now", action="store_true", help="Use current UTC time for LST calculation")
+    p_radec.add_argument(
+        "--ra", type=float, required=True, help="Right Ascension in degrees"
+    )
+    p_radec.add_argument(
+        "--dec", type=float, required=True, help="Declination in degrees"
+    )
+    p_radec.add_argument(
+        "--lst", type=float, default=None, help="Local Sidereal Time in hours"
+    )
+    p_radec.add_argument(
+        "--now", action="store_true", help="Use current UTC time for LST calculation"
+    )
 
     # Enable beams command
     p_eb = subparsers.add_parser("enable-beams", help="Set number of active beams")
-    p_eb.add_argument("--count", type=int, required=True, help="Active beam count (1..8)")
+    p_eb.add_argument(
+        "--count", type=int, required=True, help="Active beam count (1..8)"
+    )
 
     # Mask antenna command
     p_ma = subparsers.add_parser("mask-antenna", help="Mask or unmask antenna element")
     p_ma.add_argument("--id", type=int, required=True, help="Antenna ID (0..255)")
-    p_ma.add_argument("--enable", action="store_true", default=True, help="Enable/unmask antenna")
-    p_ma.add_argument("--disable", action="store_false", dest="enable", help="Disable/mask antenna")
+    p_ma.add_argument(
+        "--enable", action="store_true", default=True, help="Enable/unmask antenna"
+    )
+    p_ma.add_argument(
+        "--disable", action="store_false", dest="enable", help="Disable/mask antenna"
+    )
 
     # Auto-mask command
-    p_am = subparsers.add_parser("auto-mask", help="Automatically detect and mask dead/unplugged antennas")
-    p_am.add_argument("--h5-path", type=str, default=str(get_default_charts_h5_path()), help="Path to baseband data")
-    p_am.add_argument("--threshold", type=float, default=0.05, help="Power threshold for dead antenna detection")
+    p_am = subparsers.add_parser(
+        "auto-mask", help="Automatically detect and mask dead/unplugged antennas"
+    )
+    p_am.add_argument(
+        "--h5-path",
+        type=str,
+        default=str(get_default_charts_h5_path()),
+        help="Path to baseband data",
+    )
+    p_am.add_argument(
+        "--threshold",
+        type=float,
+        default=0.05,
+        help="Power threshold for dead antenna detection",
+    )
 
     # Set working antennas command
-    p_swa = subparsers.add_parser("set-working-antennas", help="Activate working antennas (e.g. raw 24:31 or physical 0:7)")
-    p_swa.add_argument("--raw", type=str, default="24:31", help="Raw elements range (e.g. 24:31) or comma-separated list")
-    p_swa.add_argument("--physical", type=str, default=None, help="Physical antennas range (e.g. 0:7) or comma-separated list")
+    p_swa = subparsers.add_parser(
+        "set-working-antennas",
+        help="Activate working antennas (e.g. raw 24:31 or physical 0:7)",
+    )
+    p_swa.add_argument(
+        "--raw",
+        type=str,
+        default="24:31",
+        help="Raw elements range (e.g. 24:31) or comma-separated list",
+    )
+    p_swa.add_argument(
+        "--physical",
+        type=str,
+        default=None,
+        help="Physical antennas range (e.g. 0:7) or comma-separated list",
+    )
 
     # Watch command
-    p_watch = subparsers.add_parser("watch", help="Watch status in live-updating dashboard")
-    p_watch.add_argument("--interval", type=float, default=1.0, help="Update interval in seconds")
+    p_watch = subparsers.add_parser(
+        "watch", help="Watch status in live-updating dashboard"
+    )
+    p_watch.add_argument(
+        "--interval", type=float, default=1.0, help="Update interval in seconds"
+    )
 
     # Stream command
-    p_stream = subparsers.add_parser("stream", help="Stream live formed beam RF metrics and powers in terminal")
-    p_stream.add_argument("--interval", type=float, default=1.0, help="Poll interval in seconds (default: 1.0)")
-    p_stream.add_argument("--buffer", type=str, default="host_formed_beams_buffer", help="Buffer name to inspect")
+    p_stream = subparsers.add_parser(
+        "stream", help="Stream live formed beam RF metrics and powers in terminal"
+    )
+    p_stream.add_argument(
+        "--interval",
+        type=float,
+        default=1.0,
+        help="Poll interval in seconds (default: 1.0)",
+    )
+    p_stream.add_argument(
+        "--buffer",
+        type=str,
+        default="host_formed_beams_buffer",
+        help="Buffer name to inspect",
+    )
 
     # Spectrum command
-    p_spec = subparsers.add_parser("spectrum", help="Display live ASCII frequency spectrum (dB vs frequency bins)")
-    p_spec.add_argument("--beam", type=int, default=0, help="Beam index to plot (default: 0)")
-    p_spec.add_argument("--interval", type=float, default=1.0, help="Refresh interval in seconds (default: 1.0)")
-    p_spec.add_argument("--height", type=int, default=10, help="Graph height in text lines (default: 10)")
-    p_spec.add_argument("--width", type=int, default=60, help="Graph width in columns (default: 60)")
-    p_spec.add_argument("--bins", type=str, default=None, help="Zoom into bin range e.g. 300:380 (1-channel resolution)")
-    p_spec.add_argument("--horizontal", action="store_true", help="Also display horizontal frequency sub-band table")
-    p_spec.add_argument("--once", action="store_true", help="Print single snapshot and exit")
-    p_spec.add_argument("--freq-start", type=float, default=300.0, help="Band start frequency in MHz (default: 300.0)")
-    p_spec.add_argument("--freq-step", type=float, default=0.3, help="Channel width in MHz (default: 0.3)")
-    p_spec.add_argument("--buffer", type=str, default="host_formed_beams_buffer", help="Buffer name to inspect")
+    p_spec = subparsers.add_parser(
+        "spectrum", help="Display live ASCII frequency spectrum (dB vs frequency bins)"
+    )
+    p_spec.add_argument(
+        "--beam", type=int, default=0, help="Beam index to plot (default: 0)"
+    )
+    p_spec.add_argument(
+        "--interval",
+        type=float,
+        default=1.0,
+        help="Refresh interval in seconds (default: 1.0)",
+    )
+    p_spec.add_argument(
+        "--height",
+        type=int,
+        default=10,
+        help="Graph height in text lines (default: 10)",
+    )
+    p_spec.add_argument(
+        "--width", type=int, default=60, help="Graph width in columns (default: 60)"
+    )
+    p_spec.add_argument(
+        "--bins",
+        type=str,
+        default=None,
+        help="Zoom into bin range e.g. 300:380 (1-channel resolution)",
+    )
+    p_spec.add_argument(
+        "--horizontal",
+        action="store_true",
+        help="Also display horizontal frequency sub-band table",
+    )
+    p_spec.add_argument(
+        "--once", action="store_true", help="Print single snapshot and exit"
+    )
+    p_spec.add_argument(
+        "--freq-start",
+        type=float,
+        default=300.0,
+        help="Band start frequency in MHz (default: 300.0)",
+    )
+    p_spec.add_argument(
+        "--freq-step",
+        type=float,
+        default=0.3,
+        help="Channel width in MHz (default: 0.3)",
+    )
+    p_spec.add_argument(
+        "--buffer",
+        type=str,
+        default="host_formed_beams_buffer",
+        help="Buffer name to inspect",
+    )
 
     # Interactive command
     subparsers.add_parser("interactive", help="Start interactive steering console")
 
     # Mask status command
-    subparsers.add_parser("mask-status", help="Display live antenna health and masking metrics (/antenna_mask/status)")
+    subparsers.add_parser(
+        "mask-status",
+        help="Display live antenna health and masking metrics (/antenna_mask/status)",
+    )
 
     # Reset mask command
-    subparsers.add_parser("reset-mask", help="Reset all antenna masks to active (/antenna_mask/reset)")
+    subparsers.add_parser(
+        "reset-mask", help="Reset all antenna masks to active (/antenna_mask/reset)"
+    )
+
+    # Taper & Fused BiSLC control command
+    p_taper = subparsers.add_parser(
+        "taper", help="Configure spatial windowing / taper and fused weight-space BiSLC"
+    )
+    p_taper.add_argument(
+        "--type",
+        choices=["boxcar", "hamming", "hann", "blackman", "gaussian"],
+        default="boxcar",
+        help="Window function type (default: boxcar)",
+    )
+    p_taper.add_argument(
+        "--pedestal",
+        type=float,
+        default=1.0,
+        help="Taper edge pedestal ratio (0.0=full taper, 1.0=boxcar)",
+    )
+    p_taper.add_argument(
+        "--enable-weight-bislc",
+        action="store_true",
+        help="Enable fused weight-space BiSLC unmixing",
+    )
+    p_taper.add_argument(
+        "--diag-loading",
+        type=float,
+        default=1e-3,
+        help="Diagonal loading regularizer for BiSLC inversion",
+    )
+
+    # BiSLC unmixing stage command
+    p_bislc = subparsers.add_parser("bislc", help="Query or control GPU BiSLC stage")
+    p_bislc.add_argument(
+        "--status", action="store_true", help="Print /bislc/status JSON"
+    )
+    p_bislc.add_argument(
+        "--enable", action="store_true", help="Enable BiSLC beam unmixing"
+    )
+    p_bislc.add_argument(
+        "--disable", action="store_true", help="Disable BiSLC beam unmixing"
+    )
+    p_bislc.add_argument(
+        "--diag-loading",
+        type=float,
+        default=None,
+        help="Set diagonal loading value",
+    )
+
+    # Transient trigger command
+    p_trig = subparsers.add_parser(
+        "trigger", help="Query or control GPU transient trigger stage"
+    )
+    p_trig.add_argument(
+        "--status", action="store_true", help="Print /transient_trigger/status"
+    )
+    p_trig.add_argument(
+        "--sk-threshold", type=float, default=None, help="Spectral Kurtosis threshold"
+    )
+    p_trig.add_argument(
+        "--rfi-threshold", type=float, default=None, help="Inter-beam cross-corr threshold"
+    )
+    p_trig.add_argument(
+        "--min-channels", type=int, default=None, help="Minimum flagged channels"
+    )
+    p_trig.add_argument(
+        "--cooldown", type=int, default=None, help="Cooldown frames after trigger"
+    )
+
+    # Telemetry command
+    subparsers.add_parser(
+        "telemetry", help="Query structured live telemetry (/direct_beam_tracker/telemetry)"
+    )
+
+    # Beam power command
+    subparsers.add_parser(
+        "beam-power", help="Query detected beam power across channels (/beam_tracker/beam_power)"
+    )
+
+    # Subframe interpolation command
+    p_interp = subparsers.add_parser(
+        "interpolation", help="Enable or disable subframe phase interpolation"
+    )
+    p_interp.add_argument(
+        "--enable", action="store_true", help="Enable subframe phase interpolation"
+    )
+    p_interp.add_argument(
+        "--disable", action="store_true", help="Disable subframe phase interpolation"
+    )
 
     args = parser.parse_args()
     client = KotekanTrackerClient(host=args.host, port=args.port)
@@ -811,7 +1203,9 @@ def main():
             else:
                 raw_list = [int(x) for x in args.raw.split(",")]
         resp = client.set_working_antennas(raw_list)
-        print(f"Success: Activated raw elements {raw_list} -> physical antennas {[31 - r for r in raw_list]}")
+        print(
+            f"Success: Activated raw elements {raw_list} -> physical antennas {[31 - r for r in raw_list]}"
+        )
     elif args.command == "watch":
         watch_loop(client, args.interval)
     elif args.command == "stream":
@@ -830,6 +1224,83 @@ def main():
             freq_step_mhz=args.freq_step,
             bins=args.bins,
         )
+    elif args.command == "taper":
+        try:
+            resp = client.set_taper(
+                taper_type=args.type,
+                taper_pedestal=args.pedestal,
+                enable_weight_bislc=args.enable_weight_bislc,
+                bislc_diagonal_loading=args.diag_loading,
+            )
+            print(f"Success: {resp}")
+        except Exception as e:
+            print(f"[ERROR] Failed to set taper: {e}")
+    elif args.command == "bislc":
+        try:
+            if args.enable:
+                resp = client.enable_bislc(True, args.diag_loading)
+                print(f"Success: {resp}")
+            elif args.disable:
+                resp = client.enable_bislc(False, args.diag_loading)
+                print(f"Success: {resp}")
+            elif args.diag_loading is not None:
+                resp = client._post(
+                    "/bislc/set_diagonal_loading",
+                    {"diagonal_loading": float(args.diag_loading)},
+                )
+                print(f"Success: {resp}")
+            else:
+                st = client.get_bislc_status()
+                print(json.dumps(st, indent=2))
+        except Exception as e:
+            print(f"[ERROR] Failed to query/control BiSLC: {e}")
+    elif args.command == "trigger":
+        try:
+            if any(
+                x is not None
+                for x in [
+                    args.sk_threshold,
+                    args.rfi_threshold,
+                    args.min_channels,
+                    args.cooldown,
+                ]
+            ):
+                resp = client.set_transient_trigger_thresholds(
+                    sk_threshold=args.sk_threshold,
+                    rfi_threshold=args.rfi_threshold,
+                    min_flagged_channels=args.min_channels,
+                    cooldown_frames=args.cooldown,
+                )
+                print(f"Success: {resp}")
+            else:
+                st = client.get_transient_trigger_status()
+                print(json.dumps(st, indent=2))
+        except Exception as e:
+            print(f"[ERROR] Failed to query/control trigger: {e}")
+    elif args.command == "telemetry":
+        try:
+            tel = client.get_telemetry()
+            print(json.dumps(tel, indent=2))
+        except Exception as e:
+            print(f"[ERROR] Failed to query telemetry: {e}")
+    elif args.command == "beam-power":
+        try:
+            bp = client.get_beam_power()
+            print(json.dumps(bp, indent=2))
+        except Exception as e:
+            print(f"[ERROR] Failed to query beam power: {e}")
+    elif args.command == "interpolation":
+        try:
+            if args.enable:
+                resp = client.set_subframe_interpolation(True)
+                print(f"Success: {resp}")
+            elif args.disable:
+                resp = client.set_subframe_interpolation(False)
+                print(f"Success: {resp}")
+            else:
+                print("Specify --enable or --disable")
+        except Exception as e:
+            print(f"[ERROR] Failed to set interpolation: {e}")
     elif args.command == "interactive":
         interactive_mode(client)
 

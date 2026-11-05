@@ -1,13 +1,15 @@
 #define BOOST_TEST_MODULE "test_configTracker"
 
-#include "configTracker.hpp" // for configTracker
-#include "restServer.hpp"    // for restServer
+#include "configTracker.hpp"         // for ConfigTracker
+#include "kotekanLoggingFixture.hpp" // for kotekan_logging_fixture
+#include "restServer.hpp"            // for restServer, connectionInstance
 
 #include "json.hpp" // for json_ref, basic_json<>::object_t, json
 
 #include <boost/filesystem.hpp>
 #include <boost/test/included/unit_test.hpp>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 
 using namespace kotekan;
@@ -16,145 +18,320 @@ using json = nlohmann::json;
 // Wrapper structure for ConfigTracker to ensure it is reset/cleared after each test.
 struct ConfigFixture {
     ConfigFixture() {
-        auto& tracker = ConfigTracker::instance();
-        tracker.reset();
+        ConfigTracker::instance().reset();
     }
-
     ~ConfigFixture() {
-        auto& tracker = ConfigTracker::instance();
-        tracker.reset();
+        ConfigTracker::instance().reset();
     }
 };
 
+namespace {
+const json kSampleJson1 = {{"key1", "value1"},
+                           {"key2", {{"subkey1", "subvalue1"}, {"subkey2", "subvalue2"}}},
+                           {"key3", "value3"}};
+const json kSampleJson2 = {{"key4", "value4"},
+                           {"key5", {{"subkey3", "subvalue3"}, {"subkey4", "subvalue4"}}},
+                           {"key6", "value6"}};
+constexpr const char* kVersion = "1.0.0";
+constexpr const char* kBranch = "main";
+constexpr const char* kCommit = "abcdef1234567890";
+constexpr const char* kCmake = "CMAKE_BUILD_TYPE=Release";
+} // namespace
+
 BOOST_FIXTURE_TEST_SUITE(ConfigTrackerTests, ConfigFixture)
 
-BOOST_AUTO_TEST_CASE(add_json) {
 
+BOOST_GLOBAL_FIXTURE(kotekan_logging_fixture);
+
+BOOST_AUTO_TEST_CASE(set_local_config) {
     auto& tracker = ConfigTracker::instance();
 
-    // Example json
-    json j = {{"key1", "value1"},
-              {"key2", {{"subkey1", "subvalue1"}, {"subkey2", "subvalue2"}}},
-              {"key3", "value3"}};
-    // The hash of this should be ...
+    tracker.setLocalConfig(kSampleJson1, kVersion, kBranch, kCommit, kCmake);
 
-    tracker.insertRawConfig("127.0.0.1", 8080, j, "1.0.0", "main", "abcdef1234567890",
-                            "CMAKE_BUILD_TYPE=Release");
+    BOOST_CHECK(tracker.hasLocalConfig());
+    BOOST_CHECK_EQUAL(tracker.n_configs(), 1u);
 
-    // Check hashing
-    BOOST_TEST_MESSAGE("Config hash from getTrackerHash: " << tracker.getTrackerHash());
+    const auto local = tracker.getLocalConfigInfo();
+    BOOST_REQUIRE(local.has_value());
+    BOOST_CHECK_EQUAL(local->config, kSampleJson1);
+    BOOST_CHECK_EQUAL(local->kotekan_version, kVersion);
 
-    BOOST_CHECK_EQUAL(tracker.getTrackerHash(), "c22c499bdcf3ad0414da2bba51d232");
-    BOOST_CHECK_EQUAL(tracker.n_configs(), 1);
+    // Local hash is the JSON-only md5 (no host:port prefix), so it equals
+    // getLocalConfigHash() and is 32 hex chars.
+    BOOST_CHECK_EQUAL(tracker.getLocalConfigHash(), local->json_hash);
+    BOOST_CHECK_EQUAL(local->json_hash.size(), 32u);
+
+    // Tracker hash is non-empty and printed for the curious.
+    BOOST_TEST_MESSAGE("Local hash: " << local->json_hash);
+    BOOST_TEST_MESSAGE("Tracker hash: " << tracker.getTrackerHash());
+    BOOST_CHECK_EQUAL(tracker.getTrackerHash().size(), 32u);
 }
 
-BOOST_AUTO_TEST_CASE(add_two_jsons) {
-
+BOOST_AUTO_TEST_CASE(local_and_upstream_coexist) {
     auto& tracker = ConfigTracker::instance();
 
-    // Some json
-    json j1 = {{"key1", "value1"},
-               {"key2", {{"subkey1", "subvalue1"}, {"subkey2", "subvalue2"}}},
-               {"key3", "value3"}};
+    tracker.setLocalConfig(kSampleJson1, kVersion, kBranch, kCommit, kCmake);
+    tracker.insertUpstreamConfig("10.0.0.1", 9090, kSampleJson2, kVersion, kBranch, kCommit,
+                                 kCmake);
 
-    // Another json
-    json j2 = {{"key4", "value4"},
-               {"key5", {{"subkey3", "subvalue3"}, {"subkey4", "subvalue4"}}},
-               {"key6", "value6"}};
+    BOOST_CHECK_EQUAL(tracker.n_configs(), 2u);
+    BOOST_CHECK(tracker.hasLocalConfig());
+    BOOST_CHECK(tracker.hasUpstreamConfig("10.0.0.1", 9090));
+    BOOST_CHECK(!tracker.hasUpstreamConfig("10.0.0.2", 9090));
 
-    tracker.insertRawConfig("127.0.0.1", 8080, j1, "1.0.0", "main", "abcdef1234567890",
-                            "CMAKE_BUILD_TYPE=Release");
-
-    // different port so no conflict
-    tracker.insertRawConfig("127.0.0.1", 9090, j2, "1.0.0", "main", "abcdef1234567890",
-                            "CMAKE_BUILD_TYPE=Release");
-
-    // Check hashing
-    BOOST_TEST_MESSAGE("Config hash from getTrackerHash: " << tracker.getTrackerHash());
-
-    BOOST_CHECK_EQUAL(tracker.n_configs(), 2);
+    // The upstream and local are independent slots: even if their content
+    // were identical, they wouldn't collide.
+    tracker.reset();
+    tracker.setLocalConfig(kSampleJson1, kVersion, kBranch, kCommit, kCmake);
+    tracker.insertUpstreamConfig("10.0.0.1", 9090, kSampleJson1, kVersion, kBranch, kCommit,
+                                 kCmake);
+    BOOST_CHECK_EQUAL(tracker.n_configs(), 2u);
 }
 
-BOOST_AUTO_TEST_CASE(add_same_two_jsons) {
-
+BOOST_AUTO_TEST_CASE(set_local_config_idempotent) {
     auto& tracker = ConfigTracker::instance();
 
-    // Some json
-    json j1 = {{"key4", "value4"},
-               {"key5", {{"subkey3", "subvalue3"}, {"subkey4", "subvalue4"}}},
-               {"key6", "value6"}};
+    // Same content (modulo a kotekan_update_endpoint block, which is stripped
+    // before hashing) -> second call is a no-op.
+    json j_with_endpoint = kSampleJson1;
+    j_with_endpoint["block"] = {{"kotekan_update_endpoint", "value"}, {"key8", "value8"}};
 
-    // Another identical json with kotekan_update_endpoint
-    json j2 = {{"key4", "value4"},
-               {"key5", {{"subkey3", "subvalue3"}, {"subkey4", "subvalue4"}}},
-               {"key6", "value6"},
-               {"block", {{"kotekan_update_endpoint", "value7"}, {"key8", "value8"}}}};
+    tracker.setLocalConfig(kSampleJson1, kVersion, kBranch, kCommit, kCmake);
+    tracker.setLocalConfig(j_with_endpoint, kVersion, kBranch, kCommit, kCmake);
 
-    tracker.insertRawConfig("127.0.0.1", 8080, j1, "1.0.0", "main", "abcdef1234567890",
-                            "CMAKE_BUILD_TYPE=Release");
-
-    // same port, same config (block with kotekan_update_endpoint should be ignored!), so no
-    // conflict expected
-    tracker.insertRawConfig("127.0.0.1", 8080, j2, "1.0.0", "main", "abcdef1234567890",
-                            "CMAKE_BUILD_TYPE=Release");
-
-    BOOST_CHECK_EQUAL(tracker.n_configs(), 1);
+    BOOST_CHECK_EQUAL(tracker.n_configs(), 1u);
 }
 
-BOOST_AUTO_TEST_CASE(add_same_two_jsons_bad) {
-
+BOOST_AUTO_TEST_CASE(set_local_config_conflict_throws) {
     auto& tracker = ConfigTracker::instance();
 
-    // Some json
-    json j1 = {{"key1", "value1"},
-               {"key2", {{"subkey1", "subvalue1"}, {"subkey2", "subvalue2"}}},
-               {"key3", "value3"}};
-
-    // Another json
-    json j2 = {{"key4", "value4"},
-               {"key5", {{"subkey3", "subvalue3"}, {"subkey4", "subvalue4"}}},
-               {"key6", "value6"}};
-
-    tracker.insertRawConfig("127.0.0.1", 8080, j1, "1.0.0", "main", "abcdef1234567890",
-                            "CMAKE_BUILD_TYPE=Release");
-
-    // same port, different config, so conflict *is* expected
-    BOOST_CHECK_THROW(tracker.insertRawConfig("127.0.0.1", 8080, j2, "1.0.0", "main",
-                                              "abcdef1234567890", "CMAKE_BUILD_TYPE=Release"),
+    tracker.setLocalConfig(kSampleJson1, kVersion, kBranch, kCommit, kCmake);
+    BOOST_CHECK_THROW(tracker.setLocalConfig(kSampleJson2, kVersion, kBranch, kCommit, kCmake),
                       std::runtime_error);
+}
+
+BOOST_AUTO_TEST_CASE(insert_upstream_idempotent) {
+    auto& tracker = ConfigTracker::instance();
+
+    json j_with_endpoint = kSampleJson1;
+    j_with_endpoint["block"] = {{"kotekan_update_endpoint", "value"}, {"key8", "value8"}};
+
+    tracker.insertUpstreamConfig("127.0.0.1", 8080, kSampleJson1, kVersion, kBranch, kCommit,
+                                 kCmake);
+    tracker.insertUpstreamConfig("127.0.0.1", 8080, j_with_endpoint, kVersion, kBranch, kCommit,
+                                 kCmake);
+
+    BOOST_CHECK_EQUAL(tracker.n_configs(), 1u);
+    BOOST_CHECK(tracker.hasUpstreamConfig("127.0.0.1", 8080));
+}
+
+BOOST_AUTO_TEST_CASE(insert_upstream_conflict_throws) {
+    auto& tracker = ConfigTracker::instance();
+
+    tracker.insertUpstreamConfig("127.0.0.1", 8080, kSampleJson1, kVersion, kBranch, kCommit,
+                                 kCmake);
+    BOOST_CHECK_THROW(tracker.insertUpstreamConfig("127.0.0.1", 8080, kSampleJson2, kVersion,
+                                                   kBranch, kCommit, kCmake),
+                      std::runtime_error);
+}
+
+BOOST_AUTO_TEST_CASE(insert_upstream_distinct_ports) {
+    auto& tracker = ConfigTracker::instance();
+
+    tracker.insertUpstreamConfig("127.0.0.1", 8080, kSampleJson1, kVersion, kBranch, kCommit,
+                                 kCmake);
+    tracker.insertUpstreamConfig("127.0.0.1", 9090, kSampleJson2, kVersion, kBranch, kCommit,
+                                 kCmake);
+
+    BOOST_CHECK_EQUAL(tracker.n_configs(), 2u);
+    BOOST_CHECK(tracker.hasUpstreamConfig("127.0.0.1", 8080));
+    BOOST_CHECK(tracker.hasUpstreamConfig("127.0.0.1", 9090));
+}
+
+BOOST_AUTO_TEST_CASE(upstream_hash_lookup) {
+    auto& tracker = ConfigTracker::instance();
+
+    tracker.insertUpstreamConfig("127.0.0.1", 8080, kSampleJson1, kVersion, kBranch, kCommit,
+                                 kCmake);
+
+    // Two upstream entries with identical JSON but different (host, port)
+    // hash to distinct values, so both are findable by hash.
+    tracker.insertUpstreamConfig("127.0.0.1", 9090, kSampleJson1, kVersion, kBranch, kCommit,
+                                 kCmake);
+
+    BOOST_CHECK_EQUAL(tracker.n_configs(), 2u);
 }
 
 BOOST_AUTO_TEST_CASE(write_configs) {
     auto& tracker = ConfigTracker::instance();
 
-    // Some json
-    json j1 = {{"key1", "value1"},
-               {"key2", {{"subkey1", "subvalue1"}, {"subkey2", "subvalue2"}}},
-               {"key3", "value3"}};
+    tracker.setLocalConfig(kSampleJson1, kVersion, kBranch, kCommit, kCmake);
+    tracker.insertUpstreamConfig("127.0.0.1", 8080, kSampleJson2, kVersion, kBranch, kCommit,
+                                 kCmake);
 
-    tracker.insertRawConfig("127.0.0.1", 8080, j1, "1.0.0", "main", "abcdef1234567890",
-                            "CMAKE_BUILD_TYPE=Release");
-
-
-    // Create a temporary file path
     boost::filesystem::path temp_dir = boost::filesystem::temp_directory_path();
+    boost::filesystem::path local_path = temp_dir / "local.json";
+    boost::filesystem::path upstream_path = temp_dir / "127.0.0.1_8080.json";
 
-    tracker.writeConfigsToDisk(temp_dir.string());
+    // Pre-clean in case a previous test run left files behind.
+    boost::filesystem::remove(local_path);
+    boost::filesystem::remove(upstream_path);
 
-    // Verify the file exists and has content
-    BOOST_CHECK(boost::filesystem::exists(temp_dir / "127.0.0.1_8080.json"));
+    size_t n = tracker.writeConfigsToDisk(temp_dir.string());
+    BOOST_CHECK_EQUAL(n, 2u);
+    BOOST_CHECK(boost::filesystem::exists(local_path));
+    BOOST_CHECK(boost::filesystem::exists(upstream_path));
 
-    // Read back and verify content
     {
-        std::ifstream read_file(temp_dir / "127.0.0.1_8080.json");
+        std::ifstream f(local_path.string());
         std::string line;
-        std::getline(read_file, line);
-        BOOST_TEST(!line.empty()); // TODO: Add more specific content checks
+        std::getline(f, line);
+        BOOST_TEST(!line.empty());
     }
 
-    // Clean up - remove the temporary file
-    boost::filesystem::remove(temp_dir / "127.0.0.1_8080.json");
-    BOOST_CHECK(!boost::filesystem::exists(temp_dir / "127.0.0.1_8080.json"));
+    boost::filesystem::remove(local_path);
+    boost::filesystem::remove(upstream_path);
+}
+
+BOOST_AUTO_TEST_CASE(insert_upstream_with_combined_payload) {
+    // Sanity check that an FPGA-style "combined" payload works as a regular
+    // upstream entry: an ordinary JSON object stored, hashed, and FATAL-on-
+    // conflict like any other entry.
+    auto& tracker = ConfigTracker::instance();
+
+    json combined_v1 = {{"config", {{"fpga_serial", "0xdeadbeef"}, {"clock_mhz", 800}}},
+                        {"timing", {{"frame_zero_unix_ns", 1700000000000000000LL}}}};
+    json combined_v2 = combined_v1;
+    combined_v2["config"]["clock_mhz"] = 1200;
+
+    tracker.insertUpstreamConfig("10.6.0.1", 54321, combined_v1, "", "", "", "");
+    BOOST_CHECK_EQUAL(tracker.n_configs(), 1u);
+    BOOST_CHECK(tracker.hasUpstreamConfig("10.6.0.1", 54321));
+
+    // Same content -> no-op.
+    tracker.insertUpstreamConfig("10.6.0.1", 54321, combined_v1, "", "", "", "");
+    BOOST_CHECK_EQUAL(tracker.n_configs(), 1u);
+
+    // Different content under same (host, port) -> conflict.
+    BOOST_CHECK_THROW(tracker.insertUpstreamConfig("10.6.0.1", 54321, combined_v2, "", "", "", ""),
+                      std::runtime_error);
+}
+
+BOOST_AUTO_TEST_CASE(upstream_config_info_lookup) {
+    auto& tracker = ConfigTracker::instance();
+
+    tracker.insertUpstreamConfig("10.6.0.1", 54321, kSampleJson1, "", "", "", "");
+
+    const auto found = tracker.getUpstreamConfigInfo("10.6.0.1", 54321);
+    BOOST_REQUIRE(found.has_value());
+    BOOST_CHECK_EQUAL(found->config, kSampleJson1);
+    BOOST_CHECK_EQUAL(found->json_hash.size(), 32u);
+
+    // Same host, different port is a different entry.
+    BOOST_CHECK(!tracker.getUpstreamConfigInfo("10.6.0.1", 54322).has_value());
+}
+
+BOOST_AUTO_TEST_CASE(require_matching_telescope) {
+    auto& tracker = ConfigTracker::instance();
+    const json telescope = {{"name", "CHORDTelescope"}, {"num_dishes", 2}};
+    json local = kSampleJson1;
+    local["telescope"] = telescope;
+    tracker.setLocalConfig(local, kVersion, kBranch, kCommit, kCmake);
+
+    // The same block passes; the rest of the peer's config does not matter.
+    json peer = kSampleJson2;
+    peer["telescope"] = telescope;
+    BOOST_CHECK_NO_THROW(tracker.requireMatchingTelescope("127.0.0.1", 8080, peer));
+
+    // A differing block, or none at all, is fatal.
+    peer["telescope"]["num_dishes"] = 3;
+    BOOST_CHECK_THROW(tracker.requireMatchingTelescope("127.0.0.1", 8080, peer),
+                      std::runtime_error);
+    BOOST_CHECK_THROW(tracker.requireMatchingTelescope("127.0.0.1", 8080, kSampleJson2),
+                      std::runtime_error);
+}
+
+BOOST_AUTO_TEST_CASE(require_matching_telescope_without_local_block) {
+    // Nothing to enforce when our own config has no telescope block.
+    auto& tracker = ConfigTracker::instance();
+    tracker.setLocalConfig(kSampleJson1, kVersion, kBranch, kCommit, kCmake);
+    json peer = kSampleJson2;
+    peer["telescope"] = {{"name", "CHORDTelescope"}};
+    BOOST_CHECK_NO_THROW(tracker.requireMatchingTelescope("127.0.0.1", 8080, peer));
+}
+
+BOOST_AUTO_TEST_CASE(fpga_check_without_registration) {
+    // Nothing registered: the check reports that rather than trying to talk to
+    // anything, so a monitor can tell "no controller" from "controller moved".
+    auto& tracker = ConfigTracker::instance();
+    BOOST_CHECK(!tracker.getFpgaEndpoint().has_value());
+
+    const auto result = tracker.checkFpgaTracking();
+    BOOST_CHECK(result.status == ConfigTracker::FpgaCheckStatus::not_tracked);
+    BOOST_CHECK(result.observed_hash.empty());
+}
+
+BOOST_AUTO_TEST_CASE(fpga_check_against_live_controller) {
+    // Stand up a fake controller on a kotekan REST server, register it the way
+    // startup does, then poll it: unchanged reads back as ok, and moving
+    // either half is reported as a change naming that half.
+    auto& tracker = ConfigTracker::instance();
+    auto& server = restServer::instance();
+
+    // Port 0 lets the OS pick; restServer::start() binds before returning, so
+    // port() is final here.
+    server.start("127.0.0.1", 0);
+    const uint16_t port = server.port();
+    BOOST_REQUIRE(port != 0);
+
+    json fpga_config = {{"fpga_serial", "0xdeadbeef"}, {"clock_mhz", 800}};
+    json fpga_timing = {{"frame_zero_unix_ns", 1700000000000000000LL}};
+
+    server.register_get_callback(
+        "/fake_fpga_config", [&](connectionInstance& conn) { conn.send_json_reply(fpga_config); });
+    server.register_get_callback(
+        "/fake_fpga_timing", [&](connectionInstance& conn) { conn.send_json_reply(fpga_timing); });
+
+    tracker.fetchAndRegisterFpgaTracking("127.0.0.1", port, "/fake_fpga_config",
+                                         "/fake_fpga_timing");
+
+    const auto endpoint = tracker.getFpgaEndpoint();
+    BOOST_REQUIRE(endpoint.has_value());
+    BOOST_CHECK_EQUAL(endpoint->host, "127.0.0.1");
+    BOOST_CHECK_EQUAL(endpoint->port, port);
+    BOOST_CHECK_EQUAL(endpoint->config_endpoint, "/fake_fpga_config");
+    BOOST_CHECK(tracker.hasUpstreamConfig("127.0.0.1", port));
+
+    {
+        const auto result = tracker.checkFpgaTracking(0, 5);
+        BOOST_CHECK(result.status == ConfigTracker::FpgaCheckStatus::ok);
+        BOOST_CHECK_EQUAL(result.observed_hash, result.recorded_hash);
+    }
+
+    // A resync moves the timing half only.
+    fpga_timing["frame_zero_unix_ns"] = 1800000000000000000LL;
+    {
+        const auto result = tracker.checkFpgaTracking(0, 5);
+        BOOST_CHECK(result.status == ConfigTracker::FpgaCheckStatus::changed);
+        BOOST_CHECK(result.observed_hash != result.recorded_hash);
+        BOOST_CHECK(result.detail.find("timing") != std::string::npos);
+        BOOST_CHECK(result.detail.find("config") == std::string::npos);
+    }
+
+    // A reprogram moves the config half as well.
+    fpga_config["clock_mhz"] = 1200;
+    {
+        const auto result = tracker.checkFpgaTracking(0, 5);
+        BOOST_CHECK(result.status == ConfigTracker::FpgaCheckStatus::changed);
+        BOOST_CHECK(result.detail.find("config") != std::string::npos);
+        BOOST_CHECK(result.detail.find("timing") != std::string::npos);
+    }
+
+    // Polling never writes back: the record still describes the startup state.
+    BOOST_CHECK_EQUAL(tracker.n_configs(), 1u);
+
+    server.remove_get_callback("/fake_fpga_config");
+    server.remove_get_callback("/fake_fpga_timing");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

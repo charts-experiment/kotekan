@@ -1,5 +1,5 @@
-"""Convert a baseband raw file into a standard baseband HDF5 archive
-"""
+"""Convert a baseband raw file into a standard baseband HDF5 archive"""
+
 import time
 import click
 import h5py

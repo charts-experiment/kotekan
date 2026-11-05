@@ -13,14 +13,12 @@
 class correlationAVX : public kotekan::Stage {
 public:
     correlationAVX(kotekan::Config& config, const std::string& unique_name,
-               kotekan::bufferContainer& buffer_container);
+                   kotekan::bufferContainer& buffer_container);
     ~correlationAVX();
     void main_thread() override;
 
 private:
-    void compute_correlations_avx(int8_t* x, int8_t* y,
-                                  uint32_t nsamp,
-                                  float* out);
+    void compute_correlations_avx(int8_t* x, int8_t* y, uint32_t nsamp, float* out);
 
     Buffer* buf_in;
     Buffer* buf_out;

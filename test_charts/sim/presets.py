@@ -25,9 +25,10 @@ from .constants import (
 @dataclass
 class SimulationConfig:
     """Master configuration for CHARTS realistic simulation and pipeline."""
+
     # Identification
-    preset: str = "quick"              # 'quick', '1min', '5min', 'custom'
-    profile: str = "day"               # 'day', 'night', 'both'
+    preset: str = "quick"  # 'quick', '1min', '5min', 'custom'
+    profile: str = "day"  # 'day', 'night', 'both'
     window_name: str = "charts_sim"
 
     # Time & Decimation
@@ -44,27 +45,42 @@ class SimulationConfig:
 
     # Transients & RFI
     num_events: int = 1
+    allowed_event_types: Optional[List[str]] = None
     persistent_rfi_channels: List[int] = field(default_factory=lambda: [94, 133, 147])
     persistent_rfi_freqs: Optional[List[float]] = None
     persistent_rfi_amp: float = 7.0
+    # Signal model of sky sources and RFI: 'gaussian' (independent complex
+    # Gaussian processes, physically correct) or 'tone' (deterministic
+    # phasors, legacy behaviour; all sources mutually coherent).
+    source_model: str = "gaussian"
+    # Scenario control. ``seed`` drives the noise, the antenna gain dispersion
+    # and the random event schedule; None keeps the legacy derivation
+    # int(1000 * utc_hour + 42), which does not depend on start_time.
+    # ``events_json`` (format of <window>_events.json) replaces the random event
+    # schedule; num_events, allowed_event_types and the persistent RFI settings
+    # are then not used.
+    seed: Optional[int] = None
+    events_json: Optional[Path] = None
 
     # Kotekan Pipeline & GPU Buffer Parameters
     max_beams: int = 4
     integration_spectra: int = 320
-    buffer_depth: int = 2              # Conservative default: fits 16-24GB VRAM
+    buffer_depth: int = 2  # Conservative default: fits 16-24GB VRAM
     beam_targets: str = ""
     utc_hour: float = 15.0
     initial_lst_hours: float = 5.575
     start_time: Optional[str] = None
     save_reference: Optional[str] = None
+    skip_tracker: bool = False
 
     # System & Execution Paths
     scratch_dir: Path = field(default_factory=lambda: Path("./scratch_charts_sim"))
-    output_dir: Path = field(default_factory=lambda: Path("./test_charts/data/sim_output"))
+    output_dir: Path = field(
+        default_factory=lambda: Path("./test_charts/data/sim_output")
+    )
     kotekan_bin: Optional[Path] = None
     workers: int = 4
     dry_run: bool = False
-    writer: str = "raw_bin"            # 'raw_bin' | 'hdf5'
 
     # Visualizations & Video
     generate_plots: bool = True
@@ -80,6 +96,7 @@ class SimulationConfig:
         res["scratch_dir"] = str(self.scratch_dir)
         res["output_dir"] = str(self.output_dir)
         res["kotekan_bin"] = str(self.kotekan_bin) if self.kotekan_bin else None
+        res["events_json"] = str(self.events_json) if self.events_json else None
         return res
 
     def save_yaml(self, path: Path):
@@ -156,6 +173,7 @@ def find_kotekan_binary() -> Optional[Path]:
             return cand.resolve()
     # Check PATH
     import shutil
+
     which_bin = shutil.which("kotekan")
     if which_bin:
         return Path(which_bin).resolve()
@@ -236,7 +254,9 @@ def get_preset_config(
     # 3. Explicit overrides
     if antennas is not None:
         cfg.antennas = antennas
-        cfg.window_name = f"{'win15UTC' if cfg.utc_hour == 15 else 'win03UTC'}_{cfg.antennas}ant"
+        cfg.window_name = (
+            f"{'win15UTC' if cfg.utc_hour == 15 else 'win03UTC'}_{cfg.antennas}ant"
+        )
     if num_freq is not None:
         cfg.num_freq = num_freq
 

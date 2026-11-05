@@ -14,12 +14,12 @@
 /**
  * @class chartsFEngineSim
  * @brief Native Kotekan Stage simulating physical complex baseband voltage streams
- *        for the CHARTS telescope array (64, 128, or 256 antenna layouts, 1 or 2 polarizations).
+ *        for the CHARTS 64-antenna array (8x8 grid, dx=dy=0.6m, Carén Observatory).
  *
  * Simulates geometric wavefront delays, celestial radio targets (Sgr A*, Cen A,
  * Crab, Vela, Sun, southern pulsars, FRBs, LEO RFI), independent per-antenna
- * thermal noise, polarization configurations, and ADC saturation, outputting directly
- * into Kotekan's ring buffers as 4-bit packed complex integers (int4x2_t).
+ * thermal noise, and ADC saturation, outputting directly into Kotekan's ring buffers
+ * as 4-bit packed complex integers (int4x2_t).
  */
 class chartsFEngineSim : public kotekan::Stage {
 public:
@@ -35,14 +35,8 @@ private:
     bool _use_noise;
     bool _saturate;
     std::vector<int> _saturated_antennas;
-    float _saturation_factor;
 
     int _num_elements;
-    int _num_polarizations;
-    std::string _pol_layout;
-    int _grid_x;
-    int _grid_y;
-
     int _num_local_freq;
     int _samples_per_data_set;
     int _num_frames;
@@ -53,16 +47,10 @@ private:
     double _spacing_m;
     double _site_lat_deg;
     int _seed;
-
-    // YAML-configurable noise and pulse parameters
-    float _noise_sigma_min;
-    float _noise_sigma_max;
-    float _signal_amplitude;
-    double _pulse_dm;
-    double _pulse_width_s;
-    double _pulse_center_fraction;
-    float _pol_x_amp;
-    float _pol_y_amp;
+    double _frb_dm;
+    double _frb_arrival_time_s;
+    double _frb_pulse_width_s;
+    uint64_t _time0_fpga;
 };
 
 #endif // CHARTS_FENGINE_SIM_HPP

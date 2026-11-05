@@ -8,8 +8,10 @@
 
 #include "Config.hpp"          // for Config
 #include "Stage.hpp"           // for Stage
+#include "Telescope.hpp"       // for ElementOrder
 #include "buffer.hpp"          // for Buffer
 #include "bufferContainer.hpp" // for bufferContainer
+#include "geoUtil.hpp"         // for vec3d_t
 
 #include <stddef.h> // for size_t
 #include <stdint.h> // for uint32_t
@@ -40,6 +42,8 @@
  * @conf  max_age      Float. How old can a frame be in seconds before it is dropped.
  *                     Default is 120 (i.e. two minutes).
  * @conf  do_fringestop  Bool. Whether to apply fringestopping phases before averaging.
+ *                       Every input frame's `fringestop_enabled` must match it, or
+ *                       the stage exits with a fatal error.
  *
  * @metric  kotekan_timedownsample_skipped_frame_total
  *      The number of frames skipped entirely because they were too old.
@@ -72,6 +76,9 @@ private:
 
     // Whether to apply fringestopping phases.
     bool do_fringestop;
+
+    // Feed positions in grid frame
+    std::vector<vec3d_t> feed_positions_m;
 
     // Buffers
     Buffer* in_buf;

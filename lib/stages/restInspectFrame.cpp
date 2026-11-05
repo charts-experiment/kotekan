@@ -36,12 +36,13 @@ restInspectFrame::restInspectFrame(Config& config, const std::string& unique_nam
     registered = false;
     endpoint = "/inspect_frame/" + in_buf_config_name;
 
+    constexpr size_t max_rest_inspect_bytes = 16 * 1024 * 1024; // 16 MB max for HTTP inspection
     if (len == 0) {
-        len = in_buf->frame_size;
+        len = static_cast<int32_t>(std::min(in_buf->frame_size, max_rest_inspect_bytes));
     } else if ((size_t)len > in_buf->frame_size) {
         WARN("Requested len ({:d}) is greater than the frame_size ({:d}).", len,
              in_buf->frame_size);
-        len = in_buf->frame_size;
+        len = static_cast<int32_t>(std::min(in_buf->frame_size, max_rest_inspect_bytes));
     }
 
     frame_copy = (uint8_t*)malloc(len);

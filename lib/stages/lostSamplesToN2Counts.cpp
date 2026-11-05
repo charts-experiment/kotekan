@@ -1,18 +1,22 @@
 #include "lostSamplesToN2Counts.hpp"
 
-#include "Config.hpp" // for Config
-#include "DataType.hpp"
-#include "N2Util.hpp"          // for frameID
+#include "Config.hpp"          // for Config
+#include "DataType.hpp"        // for DataType, GetType_t
+#include "N2Util.hpp"          // for frameID, modulo
+#include "NDArray.hpp"         // for NDArray, GenericNDArray, Config
 #include "StageFactory.hpp"    // for REGISTER_KOTEKAN_STAGE
 #include "buffer.hpp"          // for Buffer
 #include "bufferContainer.hpp" // for bufferContainer
-#include "chordMetadata.hpp"   // for get_chord_metadata, chordMetadata
+#include "chordMetadata.hpp"   // for chordMetadata, get_chord_metadata
+#include "div.hpp"             // for num_triangle_blocks
+#include "kotekanLogging.hpp"  // for FATAL_ERROR, DEBUG
 
 #include "json.hpp" // for basic_json, json, iter_impl
 
-#include <memory>
-#include <string>
-#include <sys/types.h>
+#include <functional> // for bind, function
+#include <memory>     // for shared_ptr, __shared_ptr_access
+#include <stdint.h>   // for uint8_t, int32_t
+#include <string>     // for allocator, basic_string, string
 
 using kotekan::bufferContainer;
 using kotekan::Config;
@@ -88,11 +92,6 @@ lostSamplesToN2Counts::lostSamplesToN2Counts(Config& config, const std::string& 
             "Number of lost_samples buffers ({:d}) does not evenly divide total frequencies ({:d})",
             _nbufs, num_n2k_freq);
 
-    // Check rfi make frame size against expectation
-    size_t _expected_rfi_frame_size = num_n2k_freq * samples_per_data_set / BITS_PER_BYTE;
-    if (rfi_mask_buf->frame_size != _expected_rfi_frame_size)
-        FATAL_ERROR("Unexpected frame size for rfi_mask {:d} - expected {:d}",
-                    rfi_mask_buf->frame_size, _expected_rfi_frame_size);
 
     // This is a bit of a misnomer - the lost_samples buffer does not _include_
     // multiple frequencies, but information may be shared by multiple frequencies
@@ -102,8 +101,8 @@ lostSamplesToN2Counts::lostSamplesToN2Counts(Config& config, const std::string& 
     _num_subintegrations = samples_per_data_set / sub_integration_ntime;
     // Number of instrument elements and the corresponding stride
     // to take in the `counts` array
-    _counts_ntiles = (num_elements / (COUNTS_BLOCK_SIZE * COUNTS_ELEMENT_DOWNSAMPLE))
-                     * (1 + num_elements / (COUNTS_BLOCK_SIZE * COUNTS_ELEMENT_DOWNSAMPLE)) / 2;
+    _counts_ntiles =
+        kotekan::num_triangle_blocks(num_elements / COUNTS_ELEMENT_DOWNSAMPLE, COUNTS_BLOCK_SIZE);
     _counts_stride = _counts_ntiles * COUNTS_BLOCK_SIZE * COUNTS_BLOCK_SIZE;
 
     // Check counts frame size against expectations. counts has type int32
@@ -115,13 +114,21 @@ lostSamplesToN2Counts::lostSamplesToN2Counts(Config& config, const std::string& 
                     n2k_counts_buf->frame_size, _expected_counts_frame_size);
 
     // Set the frame description
+    rfi_mask_buf->require_frame_desc(
+        kotekan::NDArray<kotekan::GetType_t<kotekan::uint1x8>, 3>::describe(
+            "RFImask",
+            {static_cast<ptrdiff_t>(samples_per_data_set) / 1024,
+             static_cast<ptrdiff_t>(num_n2k_freq), 1024 / 8},
+            {"T8hi128", "F", "T8lo128"}, {1024, 1, 8}));
     // The buffer name and axis names are the same as those set in
     // cudaPL1butCorrelator
-    n2k_counts_buf->allocate_ndarray_frame_desc<kotekan::GetType_t<kotekan::int32>, 5>(
-        "n2k_counts",
-        {static_cast<long>(_num_subintegrations), static_cast<long>(num_n2k_freq),
-         static_cast<long>(_counts_ntiles), COUNTS_BLOCK_SIZE, COUNTS_BLOCK_SIZE},
-        {"Tc", "F", "D8Phi", "D8Plo1", "D8Plo2"});
+    n2k_counts_buf->require_frame_desc(
+        kotekan::NDArray<kotekan::GetType_t<kotekan::int32>, 5>::describe(
+            "n2k_counts",
+            {static_cast<long>(_num_subintegrations), static_cast<long>(num_n2k_freq),
+             static_cast<long>(_counts_ntiles), COUNTS_BLOCK_SIZE, COUNTS_BLOCK_SIZE},
+            {"Tc", "F", "D8Phi", "D8Plo1", "D8Plo2"},
+            {static_cast<long>(sub_integration_ntime), 1, 64, 8, 8}));
 }
 
 lostSamplesToN2Counts::~lostSamplesToN2Counts() {}
@@ -154,9 +161,11 @@ void lostSamplesToN2Counts::main_thread() {
         // Get the RFI mask low num samples, which is the last dimension
         std::shared_ptr<chordMetadata> rfi_meta =
             get_chord_metadata(rfi_mask_buf, rfi_mask_buf_frame_id);
-        // rfi_mask fine time samples (last dimension)
+        // rfi_mask fine time samples (last dimension). Note that this
+        // is in *bytes*, not bits
         size_t _rfi_t_lo = rfi_meta->dim[rfi_meta->dims - 1];
-        // Stride between coarse time samples
+        size_t _rfi_t_lo_bits = BITS_PER_BYTE * _rfi_t_lo;
+        // Stride between coarse time samples, also in bytes
         size_t _rfi_f_stride = _rfi_t_lo;
         size_t _rfi_t_hi_stride = num_n2k_freq * _rfi_f_stride;
 
@@ -167,15 +176,49 @@ void lostSamplesToN2Counts::main_thread() {
 
             DEBUG("Waiting on full lost_samples frame from buffer {:d}.", fouter);
             uint8_t* lost_samples_frame =
-                lost_samples_buf->wait_for_full_frame(unique_name, lost_samples_frame_id);
+                (uint8_t*)lost_samples_buf->wait_for_full_frame(unique_name, lost_samples_frame_id);
+            // Shutdown mid-loop: exit without publishing the partial counts frame
             if (lost_samples_frame == nullptr)
-                break;
+                return;
+
+            // Collect science metadata from lost samples
+            const auto lost_samples_meta =
+                get_chord_metadata(lost_samples_buf, lost_samples_frame_id);
+
+            if (fouter == 0) {
+                n2k_counts_buf->allocate_new_metadata_object(n2k_counts_buf_frame_id);
+                std::shared_ptr<chordMetadata> meta =
+                    get_chord_metadata(n2k_counts_buf, n2k_counts_buf_frame_id);
+                meta->deepCopy(lost_samples_meta);
+            } else {
+                // Insert per-frequency metadata from the lost samples buffer
+                auto meta = get_chord_metadata(n2k_counts_buf, n2k_counts_buf_frame_id);
+                const auto lost_samples_coarse_freq = lost_samples_meta->get_coarse_freq();
+                auto n2k_counts_coarse_freq = meta->get_coarse_freq();
+                n2k_counts_coarse_freq.insert(n2k_counts_coarse_freq.end(),
+                                              lost_samples_coarse_freq.begin(),
+                                              lost_samples_coarse_freq.end());
+                meta->set_coarse_freq(n2k_counts_coarse_freq);
+
+                const auto lost_samples_freq_upchan_factor =
+                    lost_samples_meta->get_freq_upchan_factor();
+                auto n2k_counts_freq_upchan_factor = meta->get_freq_upchan_factor();
+                n2k_counts_freq_upchan_factor.insert(n2k_counts_freq_upchan_factor.end(),
+                                                     lost_samples_freq_upchan_factor.begin(),
+                                                     lost_samples_freq_upchan_factor.end());
+                meta->set_freq_upchan_factor(n2k_counts_freq_upchan_factor);
+
+                const auto lost_samples_freq_upchan_index =
+                    lost_samples_meta->get_freq_upchan_index();
+                auto n2k_counts_freq_upchan_index = meta->get_freq_upchan_index();
+                n2k_counts_freq_upchan_index.insert(n2k_counts_freq_upchan_index.end(),
+                                                    lost_samples_freq_upchan_index.begin(),
+                                                    lost_samples_freq_upchan_index.end());
+                meta->set_freq_upchan_index(n2k_counts_freq_upchan_index);
+            }
 
             // Indices in counts and rfi_mask corresponding to the first
             // frequency in the current lost_samples buffer
-            // Note that the rfi mask index is constructed per-bit (i.e. for
-            // a uint1 array) and converted to a uint8 index immediately
-            // before accessing the index in the array
             size_t cidx_f = fouter * _num_freq_per_lost_samples_buffer * _counts_stride;
             size_t ridx_f = fouter * _num_freq_per_lost_samples_buffer * _rfi_f_stride;
 
@@ -188,24 +231,23 @@ void lostSamplesToN2Counts::main_thread() {
                     // Accumulate for this subintegration
                     int32_t _sum = 0;
                     for (size_t ts = t0; ts < t0 + sub_integration_ntime; ++ts) {
-                        // base offset + coarse_time * stride + fine_time
-                        size_t tsr =
-                            ridx_f + (ts / _rfi_t_lo) * _rfi_t_hi_stride + (ts % _rfi_t_lo);
-                        // Convert bit index in a uint1 buffer to byte index in a uint8 buffer
-                        tsr /= BITS_PER_BYTE;
-                        // Assume that this is a uint1 stream viewed as uint8, meaning
-                        // that the MSB is the first sample in a given byte
-                        uint8_t shiftval = (BITS_PER_BYTE - 1) - ts % BITS_PER_BYTE;
+                        // base offset (in bytes) + coarse_time_sample * stride (in bytes)
+                        // + fine_time_sample (in bytes)
+                        size_t tsr = ridx_f + (ts / _rfi_t_lo_bits) * _rfi_t_hi_stride
+                                     + (ts % _rfi_t_lo_bits) / BITS_PER_BYTE;
+                        // Iterate through individual bits in the rfi mask
+                        uint8_t shiftval = ts % BITS_PER_BYTE;
                         // tsr only increments every 8 iterations -
                         // accumulate individual bits
-                        _sum += (lost_samples_frame[ts] ^ 1u)
+                        _sum += ((lost_samples_frame[ts] & 1u) ^ 1u)
                                 & ((rfi_mask_frame[tsr] >> shiftval) & 1u);
                     }
                     // Set the current subintegration and freq in counts. Only
                     // set the 0th value of each stride. If we wanted to set the
                     // entire block, just add an extra loop here
                     size_t idx = cidx_f + tau * num_n2k_freq * _counts_stride;
-                    n2k_count_frame[idx] = _sum;
+                    for (size_t ee = 0; ee < _counts_stride; ee++)
+                        n2k_count_frame[idx + ee] = _sum;
                 }
                 // Shift frequency offset
                 ridx_f += _rfi_f_stride;
@@ -216,11 +258,10 @@ void lostSamplesToN2Counts::main_thread() {
             lost_samples_frame_id++;
         }
 
-        // Set metadata from the frame description
-        n2k_counts_buf->allocate_new_metadata_object(n2k_counts_buf_frame_id);
+        // Update metadata from the frame description
         std::shared_ptr<chordMetadata> meta =
             get_chord_metadata(n2k_counts_buf, n2k_counts_buf_frame_id);
-        meta->set_from_frame_desc(n2k_counts_buf->get_ndarray_frame_desc());
+        meta->set_from_frame_desc(n2k_counts_buf->get_frame_desc<kotekan::GenericNDArray>());
 
         // Set additional metadata not handled by the helper, including
         // the name and FPGA time-sample downsampling
@@ -228,7 +269,7 @@ void lostSamplesToN2Counts::main_thread() {
         meta->set_time_downsampling_fpga(sub_integration_ntime);
 
         // Check that frame desc and metadata match
-        meta->check_frame_desc(n2k_counts_buf->get_ndarray_frame_desc());
+        meta->check_frame_desc(n2k_counts_buf->get_frame_desc<kotekan::GenericNDArray>());
 
         // Release the current frames and increment to the next frame ID
         n2k_counts_buf->mark_frame_full(unique_name, n2k_counts_buf_frame_id);

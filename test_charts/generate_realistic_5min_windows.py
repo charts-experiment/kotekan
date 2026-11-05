@@ -76,34 +76,87 @@ def generate_5min_window(
 
 def main():
     parser = argparse.ArgumentParser(description="CHARTS Realistic Window Generator")
-    parser.add_argument("--utc-hour", type=int, default=15, choices=[15, 3], help="UTC hour (15 = Day, 3 = Night)")
-    parser.add_argument("--date", type=str, default="2026-03-20", help="Observation date YYYY-MM-DD")
-    parser.add_argument("--duration-s", type=float, default=300.0, help="Window duration in seconds")
+    parser.add_argument(
+        "--utc-hour",
+        type=int,
+        default=15,
+        choices=[15, 3],
+        help="UTC hour (15 = Day, 3 = Night)",
+    )
+    parser.add_argument(
+        "--date", type=str, default="2026-03-20", help="Observation date YYYY-MM-DD"
+    )
+    parser.add_argument(
+        "--duration-s", type=float, default=300.0, help="Window duration in seconds"
+    )
     parser.add_argument("--antennas", type=int, default=64, help="Number of antennas")
     parser.add_argument("--num-freq", type=int, default=672, help="Frequency channels")
-    parser.add_argument("--samples-per-frame", type=int, default=1536, help="Samples per frame")
-    parser.add_argument("--background-cadence-s", type=float, default=2.0, help="Background cadence (s)")
-    parser.add_argument("--event-dense-s", type=float, default=1.0, help="Dense capture duration (s)")
-    parser.add_argument("--event-sparse-cadence-ms", type=float, default=51.2, help="Sparse cadence (ms)")
-    parser.add_argument("--num-events", type=int, default=3, help="Number of transient events")
-    parser.add_argument("--events", type=str, default=None, help="Comma-separated event types")
+    parser.add_argument(
+        "--samples-per-frame", type=int, default=1536, help="Samples per frame"
+    )
+    parser.add_argument(
+        "--background-cadence-s", type=float, default=2.0, help="Background cadence (s)"
+    )
+    parser.add_argument(
+        "--event-dense-s", type=float, default=1.0, help="Dense capture duration (s)"
+    )
+    parser.add_argument(
+        "--event-sparse-cadence-ms",
+        type=float,
+        default=51.2,
+        help="Sparse cadence (ms)",
+    )
+    parser.add_argument(
+        "--num-events", type=int, default=3, help="Number of transient events"
+    )
+    parser.add_argument(
+        "--events", type=str, default=None, help="Comma-separated event types"
+    )
     parser.add_argument("--out-dir", type=str, default=None, help="Output directory")
     parser.add_argument("--file-name", type=str, default=None, help="Base file name")
     parser.add_argument("--workers", type=int, default=8, help="Workers")
     parser.add_argument("--seed", type=int, default=None, help="RNG seed")
-    parser.add_argument("--sun-activity", type=str, default="quiet", choices=["quiet", "moderate", "active"])
-    parser.add_argument("--persistent-rfi-channels", type=str, default="94,133,147", help="Persistent RFI channels")
-    parser.add_argument("--persistent-rfi-freqs", type=str, default=None, help="Persistent RFI freqs (MHz)")
-    parser.add_argument("--persistent-rfi-amp", type=float, default=7.0, help="Persistent RFI amplitude")
+    parser.add_argument(
+        "--sun-activity",
+        type=str,
+        default="quiet",
+        choices=["quiet", "moderate", "active"],
+    )
+    parser.add_argument(
+        "--persistent-rfi-channels",
+        type=str,
+        default="94,133,147",
+        help="Persistent RFI channels",
+    )
+    parser.add_argument(
+        "--persistent-rfi-freqs",
+        type=str,
+        default=None,
+        help="Persistent RFI freqs (MHz)",
+    )
+    parser.add_argument(
+        "--persistent-rfi-amp", type=float, default=7.0, help="Persistent RFI amplitude"
+    )
     args = parser.parse_args()
 
     ev_types = [s.strip() for s in args.events.split(",")] if args.events else None
     persistent_chans = None
     if args.persistent_rfi_freqs:
-        freq_list = [float(x.strip()) for x in args.persistent_rfi_freqs.split(",") if x.strip()]
-        persistent_chans = [int(round((f - DEFAULT_FREQUENCY_START_MHZ) / CHARTS_CHANNEL_WIDTH_MHZ)) for f in freq_list]
-    elif args.persistent_rfi_channels and args.persistent_rfi_channels.lower() != "none":
-        persistent_chans = [int(x.strip()) for x in args.persistent_rfi_channels.split(",") if x.strip().isdigit()]
+        freq_list = [
+            float(x.strip()) for x in args.persistent_rfi_freqs.split(",") if x.strip()
+        ]
+        persistent_chans = [
+            int(round((f - DEFAULT_FREQUENCY_START_MHZ) / CHARTS_CHANNEL_WIDTH_MHZ))
+            for f in freq_list
+        ]
+    elif (
+        args.persistent_rfi_channels and args.persistent_rfi_channels.lower() != "none"
+    ):
+        persistent_chans = [
+            int(x.strip())
+            for x in args.persistent_rfi_channels.split(",")
+            if x.strip().isdigit()
+        ]
 
     generate_5min_window(
         utc_hour=args.utc_hour,

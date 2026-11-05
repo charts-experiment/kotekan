@@ -1,8 +1,8 @@
 #include "chartsBasebandReadout.hpp"
 
+#include "BasebandMetadata.hpp"
 #include "StageFactory.hpp"
 #include "kotekanLogging.hpp"
-#include "BasebandMetadata.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -26,13 +26,8 @@ chartsBasebandReadout::chartsBasebandReadout(Config& config, const std::string& 
     _max_dump_samples(config.get_default<int64_t>(unique_name, "max_dump_samples", 1 << 20)),
     _freq_id(config.get<uint64_t>(unique_name, "freq_id")),
 
-    in_buf(get_buffer("in_buf")),
-    out_buf(get_buffer("out_buf")),
-    out_frame_id(out_buf),
-    next_frame(0),
-    oldest_frame(-1),
-    frame_locks(_num_frames_buffer),
-    test_trigger_sent(false) {
+    in_buf(get_buffer("in_buf")), out_buf(get_buffer("out_buf")), out_frame_id(out_buf),
+    next_frame(0), oldest_frame(-1), frame_locks(_num_frames_buffer), test_trigger_sent(false) {
 
     // Assert that the buffers exist and are the right size, and register as consumer/producer
     if (!in_buf || !out_buf) {
@@ -62,7 +57,7 @@ chartsBasebandReadout::chartsBasebandReadout(Config& config, const std::string& 
 void chartsBasebandReadout::main_thread() {
     int frame_id = 0;
 
-    // Loop until shutdown signal is received. 
+    // Loop until shutdown signal is received.
     while (!stop_thread) {
         int in_buf_frame = frame_id % in_buf->num_frames;
 
@@ -87,8 +82,8 @@ void chartsBasebandReadout::main_thread() {
             if (wait_for_data(trig, dump_start_frame, dump_end_frame)) {
                 INFO("chartsBasebandReadout: launching test trigger event_id={} start_fpga={} "
                      "length_fpga={} frames=[{}, {})",
-                     trig.event_id, trig.start_fpga, trig.length_fpga,
-                     dump_start_frame, dump_end_frame);
+                     trig.event_id, trig.start_fpga, trig.length_fpga, dump_start_frame,
+                     dump_end_frame);
 
                 if (!extract_data(trig, dump_start_frame, dump_end_frame)) {
                     WARN("chartsBasebandReadout: extract_data failed");
@@ -114,8 +109,7 @@ int chartsBasebandReadout::add_replace_frame(int frame_id) {
     frame_locks[frame_id % _num_frames_buffer].lock();
 
     bool replace_oldest =
-        (frame_id % _num_frames_buffer ==
-         (oldest_frame + _num_frames_buffer) % _num_frames_buffer);
+        (frame_id % _num_frames_buffer == (oldest_frame + _num_frames_buffer) % _num_frames_buffer);
 
     if (replace_oldest) {
         replaced_frame = oldest_frame;
@@ -140,8 +134,9 @@ void chartsBasebandReadout::unlock_range(int start_frame, int end_frame) {
     }
 }
 
-// Returns true if the trigger could be satisfied, and fills in dump_start_frame and dump_end_frame with the range of frames to dump (end exclusive)
-// bool chartsBasebandReadout::wait_for_data(ChartsTriggerRequest& trigger,
+// Returns true if the trigger could be satisfied, and fills in dump_start_frame and dump_end_frame
+// with the range of frames to dump (end exclusive) bool
+// chartsBasebandReadout::wait_for_data(ChartsTriggerRequest& trigger,
 //                                           int& dump_start_frame,
 //                                           int& dump_end_frame) {
 //     if (trigger.length_fpga <= 0) {
@@ -197,8 +192,7 @@ void chartsBasebandReadout::unlock_range(int start_frame, int end_frame) {
 // }
 
 
-bool chartsBasebandReadout::wait_for_data(ChartsTriggerRequest& trigger,
-                                          int& dump_start_frame,
+bool chartsBasebandReadout::wait_for_data(ChartsTriggerRequest& trigger, int& dump_start_frame,
                                           int& dump_end_frame) {
     std::lock_guard<std::mutex> lock(manager_lock);
 
@@ -224,8 +218,7 @@ bool chartsBasebandReadout::wait_for_data(ChartsTriggerRequest& trigger,
 
 
 // Returns true if data was successfully extracted and written to the output buffer
-bool chartsBasebandReadout::extract_data(const ChartsTriggerRequest& trigger,
-                                         int dump_start_frame,
+bool chartsBasebandReadout::extract_data(const ChartsTriggerRequest& trigger, int dump_start_frame,
                                          int dump_end_frame) {
     if (dump_start_frame >= dump_end_frame) {
         return false;
@@ -240,8 +233,7 @@ bool chartsBasebandReadout::extract_data(const ChartsTriggerRequest& trigger,
 
     const int64_t time0_fpga = first_meta->get_time0_fpga();
 
-    const int64_t data_start_fpga =
-        std::max(trigger.start_fpga, first_meta->get_fpga_seq_num());
+    const int64_t data_start_fpga = std::max(trigger.start_fpga, first_meta->get_fpga_seq_num());
     const int64_t data_end_fpga = trigger.start_fpga + trigger.length_fpga;
 
     const size_t out_frame_specs = out_buf->frame_size / _bytes_per_spec;
@@ -271,7 +263,9 @@ bool chartsBasebandReadout::extract_data(const ChartsTriggerRequest& trigger,
         uint8_t* in_frame = in_buf->frames[in_buf_frame];
         int64_t frame_fpga_seq = meta->get_fpga_seq_num();
 
-        int64_t in_start = std::max<int64_t>(data_start_fpga - frame_fpga_seq, 0); // maximum of 0 and the offset to the start of the data in this frame
+        int64_t in_start = std::max<int64_t>(
+            data_start_fpga - frame_fpga_seq,
+            0); // maximum of 0 and the offset to the start of the data in this frame
         int64_t in_end = std::min<int64_t>(data_end_fpga - frame_fpga_seq, _samples_per_data_set);
 
         while (in_start < in_end) {
@@ -318,8 +312,7 @@ bool chartsBasebandReadout::extract_data(const ChartsTriggerRequest& trigger,
             const int64_t copy_len = std::min<int64_t>(in_end - in_start, out_remaining);
 
             std::memcpy(out_frame + out_start * _bytes_per_spec,
-                        in_frame + in_start * _bytes_per_spec,
-                        copy_len * _bytes_per_spec);
+                        in_frame + in_start * _bytes_per_spec, copy_len * _bytes_per_spec);
 
             in_start += copy_len;
             out_start += copy_len;
@@ -335,8 +328,7 @@ bool chartsBasebandReadout::extract_data(const ChartsTriggerRequest& trigger,
     }
 
     if (out_remaining > 0 && out_frame != nullptr) {
-        std::memset(out_frame + out_start * _bytes_per_spec, 0,
-                    out_remaining * _bytes_per_spec);
+        std::memset(out_frame + out_start * _bytes_per_spec, 0, out_remaining * _bytes_per_spec);
         out_buf->mark_frame_full(unique_name, out_frame_id++);
     }
 

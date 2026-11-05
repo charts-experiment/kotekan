@@ -22,12 +22,16 @@ test_charts/
 │   ├── inspector.py              # Correlator Hermitian verification & tracker diagnostics
 │   ├── visualizer.py             # CASM matrix, multi-baseline waterfalls, and MP4 animations
 │   └── presets.py                # Hardware & observation profiles (quick, 1min, 5min, day, night)
+├── config/                       # Kotekan stage YAML pipeline templates
 ├── tests/                        # Comprehensive unit & integration tests
 │   ├── test_constants_parity.py  # C++/Python physical constants parity
 │   ├── test_charts_sim.py        # Pipeline & simulation suite test cases
 │   └── test_live_control_cli.py  # REST steering & control tests
 ├── kotekan_tracker_control.py    # Live REST steering CLI
-└── kotekan_tracker_dashboard.py  # Interactive browser telemetry dashboard
+├── kotekan_tracker_dashboard.py  # Interactive browser telemetry dashboard
+├── BEAMFORMER_COMPARISON.md      # Julia auto-generated beamformer vs Direct Beam Tracker architecture
+├── REVIEW_BEAM_TRACKERS_COMPARISON.md # Beam tracking & beamforming kernel peer review and audit
+└── CMakeLists.txt                # C++ CUDA test suites & kernel benchmarks
 ```
 
 ---
@@ -62,7 +66,7 @@ python test_charts/charts_sim.py pipeline --preset 1min --profile night
 
 ## 3. Execution on HPC Clusters (Slurm)
 
-The CLI auto-detects Slurm allocations (`SLURM_TMPDIR` for scratch routing, `SLURM_CPUS_PER_TASK` for worker counts), so the same `charts_sim.py` commands above run unchanged inside a cluster job. Site-specific launchers are intentionally kept out of this repository.
+The CLI auto-detects Slurm allocations (`SLURM_TMPDIR` for scratch routing, `SLURM_CPUS_PER_TASK` for worker counts), so the same `charts_sim.py` commands above run unchanged inside an HPC environment. Cluster-specific launchers are managed in the Trillium branch.
 
 ---
 

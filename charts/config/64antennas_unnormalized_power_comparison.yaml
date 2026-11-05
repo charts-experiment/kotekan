@@ -1,0 +1,148 @@
+---
+# ==============================================================================
+# CHARTS Unnormalized vs Normalized Beam Tracker Power Verification
+# ==============================================================================
+
+type: config
+log_level: info
+
+cpu_affinity: [0, 1, 2, 3]
+
+num_elements: 64
+num_local_freq: 336
+spacing_m: 0.6
+
+sample_period_s: 3.333333333333e-6
+samples_per_data_set: 3840
+frame_arrival_period: samples_per_data_set * sample_period_s
+capture_n_frames: 100000
+
+buffer_depth: 4
+gpu_buffer_depth: 4
+
+max_beams: 4
+initial_active_beams: 4
+sizeof_complex_float: 8
+
+main_pool:
+    kotekan_metadata_pool: chartsMetadata
+    num_metadata_objects: 50
+
+network_capture_buf:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set * num_local_freq * num_elements
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+host_formed_beams_buffer:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+# Synthetic Astrophysical Source Generator (Injects Fornax A: amp=5.0 + noise)
+fengine_sim:
+    kotekan_stage: chartsFEngineSim
+    out_buf: network_capture_buf
+    scenario: "fornax_a"
+    use_noise: true
+    noise_sigma_min: 0.40
+    noise_sigma_max: 0.60
+    saturate: false
+    num_elements: 64
+    num_polarizations: 1
+    grid_x: 8
+    grid_y: 8
+    spacing_m: 0.6
+    site_lat_deg: -33.4211146
+    num_local_freq: 336
+    freq_start_mhz: 300.0
+    delta_freq_mhz: 0.3
+    delta_time_us: 3.333333333333
+    samples_per_data_set: 3840
+    num_frames: 100000
+    seed: 42
+
+gpu:
+    commands: &command_list
+        - name: cudaInputData
+          in_buf: host_voltage
+          gpu_mem: voltage
+
+        - name: cudaSyncInput
+
+        # Antenna Masking: All 64 antennas healthy
+        - name: cudaAntennaMaskCommand
+          gpu_mem_voltage: voltage
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 3840
+          buffer_depth: 4
+          sample_stride: 2
+          antenna_order: "ascending"
+          auto_detect_enabled: false
+          blank_voltages_enabled: false
+
+        # Direct Beam Tracker: Initialized with UNNORMALIZED weights
+        - name: cudaDirectBeamTrackerCommand
+          gpu_mem_voltage: voltage
+          gpu_mem_formed_beams: formed_beams
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 3840
+          spacing_m: 0.6
+          antenna_order: "ascending"
+          max_beams: 4
+          initial_active_beams: 4
+          buffer_depth: 4
+          time_chunk_size: 256
+          time_unroll: 4
+          beam_tile_size: 4
+          enable_cuda_graph: false
+          enable_subframe_interpolation: false
+          taper_type: "uniform"
+          normalize_weights: false
+          site_lat_deg: -33.4211146
+          site_lon_deg: -70.8634710
+          site_alt_m: 458.0
+          freq_start_hz: 300000000.0
+          freq_step_hz: 300000.0
+          rest_prefix: "/direct_tracker"
+
+          # Beam 0: On-target (Fornax A transit direction: l0=0.0, m0=-0.0660455)
+          source_l0: 0.0
+          source_m0: -0.0660455
+
+          # Beam 1: Slight offset (l0=0.03, m0=-0.0660455)
+          source_l0_1: 0.03
+          source_m0_1: -0.0660455
+
+          # Beam 2: Faint / Off-target (l0=0.15, m0=0.10)
+          source_l0_2: 0.15
+          source_m0_2: 0.10
+
+          # Beam 3: Completely off-source / Cold sky (l0=0.40, m0=0.30)
+          source_l0_3: 0.40
+          source_m0_3: 0.30
+
+        - name: cudaSyncOutput
+
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: formed_beams
+          out_buf: host_formed_beams
+
+    gpu_0:
+        kotekan_stage: cudaProcess
+        gpu_id: 0
+        commands: *command_list
+        in_buffers:
+            host_voltage: network_capture_buf
+        out_buffers:
+            host_formed_beams: host_formed_beams_buffer

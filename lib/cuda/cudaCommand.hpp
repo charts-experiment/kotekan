@@ -69,15 +69,17 @@ public:
      * @brief Base constructor
      * @param config       The system config, passed by factory.
      * @param unique_name  The stage + command name.
-     * @param host_buffers The list of bufferes handled by this GPU stage.
+     * @param host_buffers The list of buffers handled by this GPU stage.
      * @param device       Abstracted GPU API interface for managing memory and common operations.
+     * @param instance_num Index of this command in the GPU pipeline buffer depth.
+     * @param state_       State shared by this command's buffer-depth instances.
      * @param default_kernel_command   Name of the kernel for profiling read out.
-     * @param default_kernel_file_name Kernel dile name, not really needed with cuda kernels.
+     * @param default_kernel_file_name Kernel file name, not really needed with cuda kernels.
      */
     cudaCommand(kotekan::Config& config, const std::string& unique_name,
                 kotekan::bufferContainer& host_buffers, cudaDeviceInterface& device,
                 int instance_num,
-                std::shared_ptr<cudaCommandState> = std::shared_ptr<cudaCommandState>(),
+                std::shared_ptr<cudaCommandState> state_ = std::shared_ptr<cudaCommandState>(),
                 const std::string& default_kernel_command = "",
                 const std::string& default_kernel_file_name = "");
     /// Destructor that frees memory for the kernel and name.
@@ -121,6 +123,19 @@ public:
 protected:
     void set_command_type(const gpuCommandType& type);
 
+    /**
+     * @brief Page-locks (registers) every frame of a host buffer with the CUDA runtime.
+     *
+     * The frames belong to the buffer as a whole, and a buffer's frame count is
+     * independent of the number of command instances (@c _gpu_buffer_depth), so
+     * this is a no-op for instances other than 0.  Frames that are already
+     * registered are left alone.
+     */
+    void register_host_buffer(Buffer* buf);
+
+    /// Counterpart to @c register_host_buffer; unregisters every frame of @c buf.
+    void unregister_host_buffer(Buffer* buf);
+
     // For subclassers to call to create & record a GPU starting event, IFF profiling is on.
     void record_start_event();
 
@@ -135,7 +150,7 @@ protected:
     cudaDeviceInterface& device;
 
     /// The ID of the cuda stream to run operations on
-    int32_t cuda_stream_id;
+    int32_t cuda_stream_id = 0;
 
     // cudaPipelineState flag required for this command to run, set from config "required_flag"
     std::string _required_flag;

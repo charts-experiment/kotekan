@@ -1,4 +1,5 @@
 """Runner script to persistently run and convert data for new events."""
+
 from MySQLdb import _mysql
 import yaml
 import os

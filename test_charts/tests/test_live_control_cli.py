@@ -45,7 +45,7 @@ buffer_depth: 3
 sizeof_complex_float: 8
 
 main_pool:
-  kotekan_metadata_pool: chordMetadata
+  kotekan_metadata_pool: chartsMetadata
   num_metadata_objects: 20
 
 network_capture_buf:
@@ -117,11 +117,21 @@ sink:
 
         if not KOTEKAN_BIN.exists():
             cls.proc = None
-            raise unittest.SkipTest(f"Kotekan binary not found at {KOTEKAN_BIN}; skipping live binary tests.")
+            raise unittest.SkipTest(
+                f"Kotekan binary not found at {KOTEKAN_BIN}; skipping live binary tests."
+            )
 
         # Launch Kotekan
-        cmd = [str(KOTEKAN_BIN), "-c", str(cls.config_path), "-b", f"127.0.0.1:{cls.port}"]
-        cls.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cmd = [
+            str(KOTEKAN_BIN),
+            "-c",
+            str(cls.config_path),
+            "-b",
+            f"127.0.0.1:{cls.port}",
+        ]
+        cls.proc = subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
         time.sleep(1.0)
         cls.client = KotekanTrackerClient(port=cls.port)
 
@@ -141,7 +151,7 @@ sink:
         """Test GET /beam_tracker/status."""
         status = self.client.get_status()
         self.assertEqual(status["total_elements"], 64)
-        self.assertEqual(status["max_beams_capacity"], 8)
+        self.assertEqual(status["max_beams_capacity"], 16)
         self.assertEqual(status["num_active_beams"], 1)
         self.assertEqual(status["active_antennas"], 64)
         self.assertEqual(status["masked_antennas"], 0)
@@ -162,7 +172,9 @@ sink:
 
     def test_03_steer_celestial_radec(self):
         """Test POST /beam_tracker/set_celestial_target with astrometry."""
-        resp = self.client.steer_radec(1, ra_deg=83.633, dec_deg=22.014, lst_hours=5.575)
+        resp = self.client.steer_radec(
+            1, ra_deg=83.633, dec_deg=22.014, lst_hours=5.575
+        )
         self.assertIn("Celestial target set", resp)
 
         status = self.client.get_status()

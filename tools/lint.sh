@@ -44,6 +44,9 @@ usage() {
                               -DCMAKE_EXPORT_COMPILE_COMMANDS=ON first
                               (include-what-you-use.org)
         - cmakelint           lint CMakeList files
+        - yamlfix_kotekan.py  ruamel.yaml round-trip: fixes indent/--- in place,
+                              raises on duplicate keys or yaml syntax errors
+        - j2lint.py           render .j2 templates and require valid yaml output
 
         -d KOTEKAN_DIR        Path to kotekan root directory
         -i ENABLE_IWYU        \"ON\" or \"OFF\" to enable or disable include-what-you-use (default:
@@ -125,6 +128,20 @@ else
     echo "fast mode enabled, skipping IWYU (add option -i ON to disable fast mode)"
 fi
 
+# ODR guard
+# Logging macros must expand to the same tokens in every translation unit. Defining
+# them conditionally on the boost test macros gives every function defined in a
+# header that logs two different bodies, which is an ODR violation the linker
+# resolves by keeping one arbitrary copy. Only headers can do this, so only
+# headers are scanned. See kotekan::log_event_handler.
+echo "Checking that lib/ does not branch on the boost test macros..."
+if grep -rn --include='*.hpp' --include='*.h' \
+        -E '^[[:space:]]*#[[:space:]]*(if|ifdef|elif).*BOOST_TEST_(MODULE|MAIN|DYN_LINK)' \
+        "$KOTEKAN_DIR/lib"; then
+    echo "Error: lib/ must not change its meaning depending on the boost test macros" >&2
+    ERROR=1
+fi
+
 # clang-format
 echo "Running clang-format..."
 find $KOTEKAN_DIR -type d \( -name "build-iwyu" -o -name "build" -o -name "external" -o -name ".venv" -o -name "scratch" \) -prune -o -type f -regex '.*\.\(cpp\|hpp\|c\|h\)' -exec $CLANG_FORMAT -style=file -i {} \;
@@ -151,6 +168,37 @@ echo "Running cmakelint..."
 if ! source ${KOTEKAN_DIR}/tools/cmakelint.sh ${KOTEKAN_DIR}; then
     echo "Error: cmakelint failed" >&2
     ERROR=1
+fi
+
+# yaml: ruamel.yaml round-trip fixes indent / `---` / trailing whitespace
+# in place, and raises (non-zero exit) on duplicate keys or syntax errors.
+echo "Running yamlfix_kotekan.py..."
+if ! python3 -c "import ruamel.yaml" 2>/dev/null; then
+    echo "Error: ruamel.yaml python package not found" >&2
+    exit 1
+fi
+if ! python3 "${KOTEKAN_DIR}/tools/yamlfix_kotekan.py" "${KOTEKAN_DIR}"; then
+    echo "Error: yamlfix_kotekan.py reported parse issues (duplicate keys / syntax)" >&2
+    ERROR=1
+fi
+if ! git diff --exit-code; then
+    echo "Error: yamlfix_kotekan.py applied formatting changes" >&2
+    ERROR=1
+fi
+
+# Jinja2 templates (.j2): render with empty context and require valid yaml output
+echo "Running j2lint..."
+mapfile -t J2_FILES < <(
+    find "${KOTEKAN_DIR}" -type d \
+        \( -name "build-iwyu" -o -name "build" -o -name "build-*" \
+           -o -name "external" -o -name ".venv" -o -name "scratch" \) -prune \
+        -o -type f -name "*.j2" -print
+)
+if [ ${#J2_FILES[@]} -gt 0 ]; then
+    if ! python3 "${KOTEKAN_DIR}/tools/j2lint.py" "${J2_FILES[@]}"; then
+        echo "Error: j2lint.py found issues" >&2
+        ERROR=1
+    fi
 fi
 
 if [[ ${ERROR} -ne 0 ]]; then

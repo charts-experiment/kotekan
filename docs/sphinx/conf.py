@@ -17,6 +17,7 @@
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 #
+import datetime
 import os
 import subprocess
 # import sys
@@ -54,16 +55,12 @@ extensions = [
     'sphinx.ext.ifconfig',
     'sphinx.ext.viewcode',
     'sphinx.ext.inheritance_diagram',
-    'breathe',
-    'sphinxcontrib.plantuml'
+    'breathe'
 ]
 
 
-# this is to make plantuml extension find stuff
-
 if not read_the_docs_build:
     # Paths (@...@) will be modified by cmake
-    plantuml = 'java -jar @PLANTUML_DIR@/plantuml.jar'
     breathe_projects = { "kotekan": "@BINARY_BUILD_DIR@/../doxygen/build/xml/" }
 else:
     breathe_projects = { "kotekan": "../../build-docs/docs/doxygen/build/xml/" }
@@ -86,7 +83,7 @@ master_doc = 'index'
 
 # General information about the project.
 project = u'kotekan'
-copyright = u'2023, Kotekan et al'
+copyright = u'{}, Kotekan et al'.format(datetime.datetime.now().year)
 author = u'Kotekan et al'
 
 # The version info for the project you're documenting, acts as replacement for

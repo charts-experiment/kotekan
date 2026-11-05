@@ -6,6 +6,12 @@ future
 requests
 pyyaml
 tabulate
-posix_ipc
+posix_ipc; sys_platform != 'win32'
 prometheus-client
 jinja2
+scipy
+matplotlib
+dash
+plotly
+pandas
+astropy

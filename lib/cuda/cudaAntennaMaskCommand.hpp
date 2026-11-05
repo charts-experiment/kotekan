@@ -18,14 +18,13 @@ namespace kotekan {
 
 /**
  * @class cudaAntennaMaskCommand
- * @brief High-throughput GPU stage in Kotekan for dead and saturated antenna detection,
- *        debouncing, in-place voltage blanking, and cross-stage mask propagation.
+ * @brief High-throughput GPU stage in Kotekan for dead, saturated, DC-locked, and
+ *        RFI-contaminated antenna detection, in-place blanking, and cross-stage mask propagation.
  */
 class cudaAntennaMaskCommand : public cudaCommand {
 public:
     cudaAntennaMaskCommand(Config& config, const std::string& unique_name,
-                           bufferContainer& host_buffers,
-                           cudaDeviceInterface& device, int inst);
+                           bufferContainer& host_buffers, cudaDeviceInterface& device, int inst);
     ~cudaAntennaMaskCommand() override;
 
     cudaEvent_t execute(cudaPipelineState& pipestate,
@@ -39,11 +38,40 @@ public:
     static void update_config(const AntennaMaskConfig& cfg);
     static AntennaMaskConfig get_config();
 
+    // Accessors for multi-subband telemetry aggregation
+    int get_subband_id() const {
+        return _subband_id;
+    }
+    double get_freq_start_hz() const {
+        return _freq_start_hz;
+    }
+    int32_t get_num_elements() const {
+        return _num_elements;
+    }
+    std::vector<std::uint8_t> get_last_active_mask() const {
+        std::lock_guard<std::mutex> lk(_metric_mutex);
+        return _last_active_mask;
+    }
+    std::vector<float> get_last_power_rms() const {
+        std::lock_guard<std::mutex> lk(_metric_mutex);
+        return _last_power_rms;
+    }
+    std::vector<float> get_last_clip_fraction() const {
+        std::lock_guard<std::mutex> lk(_metric_mutex);
+        return _last_clip_fraction;
+    }
+
 private:
     void allocate_device_buffers();
     void free_device_buffers();
 
-    int32_t _num_elements = 256;
+    int _subband_id = 0;
+    double _freq_start_hz = 300.0e6;
+
+    int32_t _num_elements = 64;
+    int32_t _num_antennas = 64;
+    int32_t _num_pols = 1;
+    DirectPolLayout _pol_layout = DirectPolLayout::INTERLEAVED;
     int32_t _num_local_freq = 336;
     int32_t _samples_per_data_set = 3840;
     int32_t _buffer_depth = 3;
@@ -51,27 +79,42 @@ private:
     std::string _gpu_mem_voltage;
     std::string _gpu_mem_alive_voltages;
     int32_t _max_alive_antennas = 64;
+    std::string _antenna_order = "descending";
+
+    std::uint64_t _applied_mask_generation = 0;
+    std::uint64_t _frame_counter = 0;
+
+    // Per-subband telemetry
+    mutable std::mutex _metric_mutex;
+    std::vector<std::uint8_t> _last_active_mask;
+    std::vector<float> _last_power_rms;
+    std::vector<float> _last_clip_fraction;
 
     // Device allocations
+    AntennaRawStats* _d_raw_stats = nullptr;
     float* _d_antenna_powers = nullptr;
     std::uint32_t* _d_antenna_clips = nullptr;
+    float* _d_chan_power = nullptr;
+    float* _d_chan_coh = nullptr;
     int* _d_bad_antennas = nullptr;
     int* _d_alive_antennas = nullptr;
 
-    // Pinned host memory for low-latency telemetry copy
-    float* _h_antenna_powers = nullptr;
-    std::uint32_t* _h_antenna_clips = nullptr;
+    // Pinned host memory for single-DMA telemetry transfer
+    AntennaRawStats* _h_raw_stats = nullptr;
+    float* _h_chan_power = nullptr;
+    float* _h_chan_coh = nullptr;
 
     std::vector<int> _current_bad_indices;
     std::vector<int> _current_alive_indices;
 
-    // Thread-safe shared configuration and metrics state
+    static std::mutex _registry_mutex;
+    static std::vector<cudaAntennaMaskCommand*> _instances;
+
     static std::mutex _global_mutex;
     static AntennaMaskConfig _shared_config;
     static std::array<AntennaHealthMetrics, MAX_MASK_ANTENNAS> _shared_metrics;
     static std::array<std::uint8_t, MAX_MASK_ANTENNAS> _shared_mask;
     static bool _endpoints_registered;
-    static bool _mask_dirty;
 };
 
 } // namespace kotekan

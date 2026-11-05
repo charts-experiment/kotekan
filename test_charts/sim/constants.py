@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib
 import logging
 import math
+import os
 from pathlib import Path
 import sys
 from typing import Any, Dict, List, Tuple
@@ -84,6 +85,7 @@ C_LIGHT: float = float(_get_external("C_LIGHT", 299_792_458.0))
 SPEED_OF_LIGHT: float = C_LIGHT
 SPEED_OF_LIGHT_M_PER_S: float = C_LIGHT
 K_BOLTZMANN: float = 1.380649e-23
+EARTH_ROT_RATE_RAD_S: float = 7.292115e-5
 
 
 # ---------------------------------------------------------------------------
@@ -98,14 +100,27 @@ FPGA_NUM_SAMP_FFT: int = int(_get_external("FPGA_NUM_SAMP_FFT", 8192))
 DEFAULT_NFFT: int = FPGA_NUM_SAMP_FFT
 NFFT: int = FPGA_NUM_SAMP_FFT
 
-CHARTS_CHANNEL_WIDTH_HZ: float = float(_get_external("CHARTS_CHANNEL_WIDTH_HZ", 300_000.0))
+CHARTS_CHANNEL_WIDTH_HZ: float = float(
+    _get_external("CHARTS_CHANNEL_WIDTH_HZ", 300_000.0)
+)
 CHARTS_CHANNEL_WIDTH_MHZ: float = float(_get_external("CHARTS_CHANNEL_WIDTH_MHZ", 0.3))
 CHANNEL_WIDTH_MHZ: float = CHARTS_CHANNEL_WIDTH_MHZ
 
-FPGA_TIME_RESOLUTION_US: float = float(_get_external("FPGA_TIME_RESOLUTION_US", 10.0 / 3.0))
+FPGA_TIME_RESOLUTION_US: float = float(
+    _get_external("FPGA_TIME_RESOLUTION_US", 10.0 / 3.0)
+)
+FPGA_TIME_RESOLUTION_S: float = FPGA_TIME_RESOLUTION_US * 1e-6
 TIME_PER_SPECTRUM_US: float = FPGA_TIME_RESOLUTION_US
-TIME_PER_SPECTRUM_S: float = FPGA_TIME_RESOLUTION_US * 1e-6
+TIME_PER_SPECTRUM_S: float = FPGA_TIME_RESOLUTION_S
 SAMPLE_RATE_HZ: float = CHARTS_CHANNEL_WIDTH_HZ
+
+# Digitizer operating point: per-component (Re/Im) channel-noise sigma in LSB at
+# the reference temperature T_ref. Calibrated against the F-engine reference
+# chain (sim/fengine.py, Julia parity): the 15-level (±7) round-clamp quantizer
+# has its minimum SNR loss (~0.06 dB) at sigma ≈ 2.9 LSB; 2.0 LSB is chosen to
+# keep headroom for bright sources (loss ~0.09 dB, well inside the < 0.5 dB
+# equivalence bound of AGENTS.md §3).
+DIGITIZER_NOMINAL_SIGMA_LSB: float = 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -115,8 +130,12 @@ CHARTS_N_FREQ: int = int(_get_external("CHARTS_N_FREQ", 672))
 LOCAL_FREQUENCY_CHANNELS: int = int(_get_external("LOCAL_FREQUENCY_CHANNELS", 336))
 FREQUENCY_SHARD_COUNT: int = int(_get_external("FREQUENCY_SHARD_COUNT", 2))
 
-DEFAULT_FREQUENCY_START_MHZ: float = float(_get_external("DEFAULT_FREQUENCY_START_MHZ", 300.0))
-DEFAULT_FREQUENCY_START_HZ: float = float(_get_external("DEFAULT_FREQUENCY_START_HZ", 300_000_000.0))
+DEFAULT_FREQUENCY_START_MHZ: float = float(
+    _get_external("DEFAULT_FREQUENCY_START_MHZ", 300.0)
+)
+DEFAULT_FREQUENCY_START_HZ: float = float(
+    _get_external("DEFAULT_FREQUENCY_START_HZ", 300_000_000.0)
+)
 
 
 # ---------------------------------------------------------------------------
@@ -172,3 +191,15 @@ def get_frequency_channels_mhz(
 ) -> np.ndarray:
     """Returns array of channel center frequencies in MHz."""
     return f_start_mhz + np.arange(num_channels, dtype=np.float64) * df_mhz
+
+
+def get_default_charts_h5_path() -> Path:
+    """Returns default path to CHARTS virtual baseband HDF5 file."""
+    env_path = os.environ.get("CHARTS_DEFAULT_H5")
+    if env_path:
+        return Path(env_path)
+    return (
+        Path(__file__).resolve().parent.parent
+        / "scratch_charts_sim"
+        / "baseband_virtual.h5"
+    )

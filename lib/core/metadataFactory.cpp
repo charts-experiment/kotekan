@@ -5,15 +5,16 @@
 #include "Config.hpp"           // for Config
 #include "HFBMetadata.hpp"      // for HFBMetadata
 #include "N2Metadata.hpp"       // for N2Metadata
-#include "chordMetadata.hpp"    // for chordMetadata
-#include "kotekanLogging.hpp"   // for INFO_NON_OO
-#include "metadata.hpp"         // for metadataPool
-#include "oneHotMetadata.hpp"   // for oneHotMetadata
-#include "visBuffer.hpp"        // for VisMetadata
 #include "chartsMetadata.hpp"
+#include "chordMetadata.hpp"  // for chordMetadata
+#include "kotekanLogging.hpp" // for INFO_NON_OO
+#include "metadata.hpp"       // for metadataPool
+#include "oneHotMetadata.hpp" // for oneHotMetadata
+#include "visBuffer.hpp"      // for VisMetadata
 
 #include "fmt.hpp" // for compile_string_to_view, format, fmt
 
+#include <json.hpp>  // for basic_json, iter_impl, json
 #include <stdexcept> // for runtime_error
 #include <stdint.h>  // for uint32_t
 
@@ -108,7 +109,7 @@ std::shared_ptr<metadataPool> metadataFactory::new_pool(const std::string& pool_
 
     if (pool_type == "chartsMetadata") {
         return metadataPool::create(num_metadata_objects, sizeof(chartsMetadata), location,
-                                pool_type);
+                                    pool_type);
     }
     // No metadata found
     throw std::runtime_error(fmt::format(fmt("No metadata object named: {:s}"), pool_type));

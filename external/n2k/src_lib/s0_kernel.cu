@@ -1,10 +1,12 @@
 #include "../include/n2k/rfi_kernels.hpp"
 #include "../include/n2k/internals/internals.hpp"
 
-#include <gputils/cuda_utils.hpp>
+#include <ksgpu/cuda_utils.hpp>
+
+#include <cassert>
 
 using namespace std;
-using namespace gputils;
+using namespace ksgpu;
 
 
 // This is a good place to describe the array layout for PL mask.
@@ -141,8 +143,8 @@ __global__ void s0_kernel(ulong4 *s0, const uint *pl, int T, int Tmin, int Tsize
     long pl_stride = long(Fds) * long(S >> 2);
 
     // Shift output pointer, including time and laneId.
-    // Before the shifts, 's0' has shape ulong4[T/Nds, F, S/4].
-    // After the shifts, 's0' has shape ulong4[4] and stride 'out_fstride4'.
+    // Before the shifts, 's0' has shape ulong4_16a[T/Nds, F, S/4].
+    // After the shifts, 's0' has shape ulong4_16a[4] and stride 'out_fstride4'.
     
     s0 += (sds << 1);
     s0 += long(fds << 2) * long(out_fstride4);
@@ -221,6 +223,8 @@ void launch_s0_kernel(ulong* s0, const ulong* pl_mask, long T, long Tmin, long T
 
     if (!s0 || !pl_mask)
         throw runtime_error("launch_s0_kernel: null pointer was specified");
+    if ((reinterpret_cast<uintptr_t>(s0) % 32) != 0)
+        throw runtime_error("launch_s0_kernel: 's0' pointer must be 32-byte aligned");
     if (T <= 0)
 	throw runtime_error("launch_s0_kernel: number of time samples T must be > 0");
     if (Tmin < 0)
@@ -257,7 +261,7 @@ void launch_s0_kernel(ulong* s0, const ulong* pl_mask, long T, long Tmin, long T
 	throw runtime_error("launch_s0_kernel: number of time samples T must be a multiple of downsampling factor 'Nds'");
 
     dim3 nblocks, nthreads;
-    gputils::assign_kernel_dims(nblocks, nthreads, S >> 2, (F+3) >> 2, Tds);
+    ksgpu::assign_kernel_dims(nblocks, nthreads, S >> 2, (F+3) >> 2, Tds);
 
     s0_kernel <<< nblocks, nthreads, 0, stream >>>
         ((ulong4 *) s0, (const uint *) pl_mask, T, Tmin, Tsize, F, S, Nds, out_fstride >> 2);
