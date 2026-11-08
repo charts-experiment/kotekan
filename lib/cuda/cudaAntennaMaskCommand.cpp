@@ -879,14 +879,40 @@ cudaEvent_t cudaAntennaMaskCommand::execute(cudaPipelineState& /*pipestate*/,
                     max_coh = std::max(max_coh, elem_coh[a]);
                 }
             }
-            if (all_coh.size() >= 8) {
+            if (all_coh.size() >= 4) {
                 const float med_coh = compute_median(all_coh);
-                if (med_coh > 0.02f && max_coh > 1.25f * med_coh) {
+                if (all_coh.size() < 8) {
+                    // Sparse explicitly configured array (4..7 active elements):
+                    // use 0.70 * median coherence of the active elements as reference threshold.
+                    if (med_coh > 0.02f) {
+                        has_coherent_sky = true;
+                        coh_thresh = 0.70f * med_coh;
+                        const float med_pb = compute_median(all_pb);
+                        effective_dead_th =
+                            std::max(current_cfg.dead_power_threshold, 0.80f * med_pb);
+                    }
+                } else if (med_coh > 0.02f && max_coh > 1.25f * med_coh) {
                     has_coherent_sky = true;
-                    coh_thresh = 1.15f * med_coh;
+                    // When a sparse sub-array (< 32 alive antennas) is embedded among many
+                    // floating noise ports (~0.06 coherence), anchor coh_thresh above the
+                    // noise floor using the midpoint to max_coh so floating ports cannot
+                    // pull coh_thresh down to 1.15 * 0.06 = 0.069.
+                    if (max_coh > 2.0f * med_coh) {
+                        coh_thresh = std::max(1.15f * med_coh, 0.50f * (med_coh + max_coh));
+                    } else {
+                        coh_thresh = 1.15f * med_coh;
+                    }
 
-                    const float med_pb = compute_median(all_pb);
-                    effective_dead_th = std::max(current_cfg.dead_power_threshold, 0.80f * med_pb);
+                    std::vector<float> coh_pb;
+                    coh_pb.reserve(all_pb.size());
+                    for (std::size_t idx = 0; idx < all_coh.size(); ++idx) {
+                        if (all_coh[idx] >= coh_thresh) {
+                            coh_pb.push_back(all_pb[idx]);
+                        }
+                    }
+                    const float ref_pb =
+                        coh_pb.empty() ? compute_median(all_pb) : compute_median(coh_pb);
+                    effective_dead_th = std::max(current_cfg.dead_power_threshold, 0.80f * ref_pb);
                 }
             }
         }

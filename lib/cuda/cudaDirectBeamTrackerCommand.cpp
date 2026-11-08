@@ -40,8 +40,13 @@ DirectBeamTrackerConfig cudaDirectBeamTrackerCommand::_default_shared_config;
 void cudaDirectBeamTrackerCommand::set_shared_antenna_mask(
     const std::array<std::uint8_t, MAX_DIRECT_ANTENNAS>& mask, int /*n_active*/) {
     std::lock_guard<std::mutex> lock(_registry_mutex);
-    if (_default_shared_config.antenna_mask != mask) {
-        _default_shared_config.antenna_mask = mask;
+    std::array<std::uint8_t, MAX_DIRECT_ANTENNAS> masked_def = mask;
+    for (std::size_t i = 0; i < MAX_DIRECT_ANTENNAS; ++i) {
+        if (_default_shared_config.calibration_valid_mask[i] == 0)
+            masked_def[i] = 0;
+    }
+    if (_default_shared_config.antenna_mask != masked_def) {
+        _default_shared_config.antenna_mask = masked_def;
         _default_shared_config.recompute_normalized_taper();
         _default_shared_config.mask_generation++;
         _default_shared_config.config_generation++;
@@ -49,8 +54,13 @@ void cudaDirectBeamTrackerCommand::set_shared_antenna_mask(
 
     for (auto& [prefix, group] : _tracker_groups) {
         std::lock_guard<std::mutex> glock(group->group_mutex);
-        if (group->config.antenna_mask != mask) {
-            group->config.antenna_mask = mask;
+        std::array<std::uint8_t, MAX_DIRECT_ANTENNAS> masked_grp = mask;
+        for (std::size_t i = 0; i < MAX_DIRECT_ANTENNAS; ++i) {
+            if (group->config.calibration_valid_mask[i] == 0)
+                masked_grp[i] = 0;
+        }
+        if (group->config.antenna_mask != masked_grp) {
+            group->config.antenna_mask = masked_grp;
             group->config.recompute_normalized_taper();
             group->config.mask_generation++;
             group->config.config_generation++;
@@ -67,7 +77,9 @@ void cudaDirectBeamTrackerCommand::set_shared_antenna_mask(
     std::array<std::uint8_t, MAX_DIRECT_ANTENNAS> new_mask = _default_shared_config.antenna_mask;
     for (std::size_t i = 0; i < n_elem; ++i) {
         const std::size_t phys_ant = _default_shared_config.raw_elem_to_physical_ant(i);
-        new_mask[i] = (phys_ant < charts::constants::charts_total_antennas) ? mask[phys_ant] : 0;
+        const std::uint8_t m =
+            (phys_ant < charts::constants::charts_total_antennas) ? mask[phys_ant] : 0;
+        new_mask[i] = (_default_shared_config.calibration_valid_mask[i] != 0) ? m : 0;
     }
     if (_default_shared_config.antenna_mask != new_mask) {
         _default_shared_config.antenna_mask = new_mask;
@@ -82,8 +94,9 @@ void cudaDirectBeamTrackerCommand::set_shared_antenna_mask(
         std::array<std::uint8_t, MAX_DIRECT_ANTENNAS> gnew_mask = group->config.antenna_mask;
         for (std::size_t i = 0; i < gn_elem; ++i) {
             const std::size_t phys_ant = group->config.raw_elem_to_physical_ant(i);
-            gnew_mask[i] =
+            const std::uint8_t gm =
                 (phys_ant < charts::constants::charts_total_antennas) ? mask[phys_ant] : 0;
+            gnew_mask[i] = (group->config.calibration_valid_mask[i] != 0) ? gm : 0;
         }
         if (group->config.antenna_mask != gnew_mask) {
             group->config.antenna_mask = gnew_mask;
@@ -175,6 +188,8 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
     _gpu_mem_voltage = config.get_default<std::string>(unique_name, "gpu_mem_voltage", "voltage");
     _gpu_mem_formed_beams =
         config.get_default<std::string>(unique_name, "gpu_mem_formed_beams", "formed_beams");
+    _gpu_mem_beam_power =
+        config.get_default<std::string>(unique_name, "gpu_mem_beam_power", "");
 
     const double site_lat_deg = config.get_default<double>(unique_name, "site_lat_deg",
                                                            charts::constants::charts_caren_lat_deg);
@@ -936,6 +951,10 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
 
     gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_voltage, true, false, true));
     gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_formed_beams, false, true, true));
+    if (!_gpu_mem_beam_power.empty()) {
+        gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_beam_power, false, true, true));
+        device.register_gpu_memory_name(_gpu_mem_beam_power);
+    }
 
     allocate_device_buffers();
 }
@@ -990,6 +1009,63 @@ void cudaDirectBeamTrackerCommand::upload_calibration_gains(const DirectBeamTrac
         CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_calibration_gains, host.size() * sizeof(float2)));
     CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(_d_calibration_gains, host.data(),
                                        host.size() * sizeof(float2), cudaMemcpyHostToDevice));
+
+    // Lock out any element that has zero calibration gain across all channels so a flickering
+    // floating port can never dilute recompute_normalized_taper() (e.g. dividing by sqrt(5)
+    // instead of sqrt(4)). Merge across subband instances so an uncalibrated subband does not
+    // clear valid elements from another subband sharing the same TrackerGroup.
+    std::array<std::uint8_t, MAX_DIRECT_ANTENNAS> cal_valid;
+    cal_valid.fill(0);
+    bool any_channel_valid = false;
+    for (int r = 0; r < _num_elements && r < static_cast<int>(MAX_DIRECT_ANTENNAS); ++r) {
+        bool any_nonzero = false;
+        for (int f = 0; f < _num_local_freq; ++f) {
+            const float2 c = host[static_cast<std::size_t>(f) * _num_elements + r];
+            if (c.x * c.x + c.y * c.y > 0.0f) {
+                any_nonzero = true;
+                break;
+            }
+        }
+        if (any_nonzero) {
+            cal_valid[static_cast<std::size_t>(r)] = 1;
+            any_channel_valid = true;
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> reg_lock(_registry_mutex);
+        auto apply_cal_mask = [&](DirectBeamTrackerConfig& target_cfg) {
+            if (!any_channel_valid)
+                return;
+            if (!target_cfg.calibration_mask_initialized) {
+                target_cfg.calibration_valid_mask = cal_valid;
+                target_cfg.calibration_mask_initialized = true;
+            } else {
+                for (std::size_t r = 0; r < MAX_DIRECT_ANTENNAS; ++r) {
+                    target_cfg.calibration_valid_mask[r] |= cal_valid[r];
+                }
+            }
+            for (std::size_t r = 0; r < MAX_DIRECT_ANTENNAS; ++r) {
+                if (target_cfg.calibration_valid_mask[r] == 0)
+                    target_cfg.antenna_mask[r] = 0;
+            }
+            target_cfg.recompute_normalized_taper();
+        };
+
+        apply_cal_mask(_default_shared_config);
+
+        auto it = _tracker_groups.find(_rest_prefix);
+        if (it != _tracker_groups.end()) {
+            std::lock_guard<std::mutex> glock(it->second->group_mutex);
+            apply_cal_mask(it->second->config);
+            it->second->config.mask_generation++;
+            it->second->config.config_generation++;
+            CHECK_CUDA_ERROR_NON_OO(
+                cudaMemcpy(_d_norm_taper, it->second->config.normalized_taper_weights.data(),
+                           _num_elements * sizeof(float), cudaMemcpyHostToDevice));
+        }
+    }
+
     INFO_NON_OO("Direct Beam Tracker: calibration gains from {:s} (rows {:d}-{:d}, "
                 "{:d} (channel, element) pairs dropped)",
                 _gains_file, _gains_first_channel, _gains_first_channel + _num_local_freq - 1,
@@ -1471,6 +1547,22 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
                                                     * static_cast<std::size_t>(_num_local_freq)
                                                     * sizeof(float),
                                                 cudaMemcpyDeviceToHost, stream));
+    }
+
+    if (!_gpu_mem_beam_power.empty()) {
+        const std::size_t power_bytes = static_cast<std::size_t>(_max_beams)
+                                        * static_cast<std::size_t>(_num_local_freq) * sizeof(float);
+        void* power_memory = device.get_gpu_memory_array(_gpu_mem_beam_power, gpu_frame_id,
+                                                         _gpu_buffer_depth, power_bytes);
+        if (power_memory) {
+            CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(power_memory, _d_beam_power, power_bytes,
+                                                    cudaMemcpyDeviceToDevice, stream));
+            std::shared_ptr<metadataObject> meta =
+                device.get_gpu_memory_array_metadata(_gpu_mem_voltage, gpu_frame_id);
+            if (meta) {
+                device.claim_gpu_memory_array_metadata(_gpu_mem_beam_power, gpu_frame_id, meta);
+            }
+        }
     }
 
     return record_end_event();

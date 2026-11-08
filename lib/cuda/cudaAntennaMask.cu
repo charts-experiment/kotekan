@@ -505,9 +505,10 @@ inspect_channel_coherence_kernel(
         for (int b = 0; b < lim; ++b) {
             if (b == static_cast<int>(a) || s_valid[b] == 0U) continue;
             // Exclude same-RFSoC ADC-tile interleaving crosstalk partners (|a - b| % 8 == 0)
+            // and adjacent board/balun trace neighbors (|a - b| <= 2 on the same RFSoC)
             if (n_elem == 64 && ((a / 32U) == (static_cast<unsigned int>(b) / 32U))) {
                 const int diff = (static_cast<int>(a) > b) ? (static_cast<int>(a) - b) : (b - static_cast<int>(a));
-                if ((diff & 7) == 0) continue;
+                if ((diff & 7) == 0 || diff <= 2) continue;
             }
 
             int re_ab = 0;
