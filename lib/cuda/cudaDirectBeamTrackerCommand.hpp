@@ -132,6 +132,7 @@ private:
     std::string _gpu_mem_voltage;
     std::string _gpu_mem_formed_beams;
     std::string _gpu_mem_beam_power;
+    std::string _gpu_mem_rfi_mask;
 
     std::vector<double> _frequencies_hz;
 

@@ -145,7 +145,8 @@ void launch_evaluate_rfi_flags(const float* __restrict__ d_chunk_power,
                                RfiChannelStats* __restrict__ d_channel_stats, std::size_t n_chunks,
                                std::size_t n_freq, int num_active_antennas,
                                std::size_t eff_samples_per_chunk, const RfiMitigationConfig& cfg,
-                               cudaStream_t stream);
+                               cudaStream_t stream,
+                               const std::uint8_t* __restrict__ d_exempt_channels = nullptr);
 
 inline void launch_evaluate_rfi_flags(const float* __restrict__ d_chunk_power,
                                       const float* __restrict__ d_chunk_sk,
@@ -157,7 +158,7 @@ inline void launch_evaluate_rfi_flags(const float* __restrict__ d_chunk_power,
                                       cudaStream_t stream) {
     launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, nullptr, d_static_notch, nullptr,
                               d_chunk_rfi_mask, d_channel_stats, n_chunks, n_freq,
-                              num_active_antennas, eff_samples_per_chunk, cfg, stream);
+                              num_active_antennas, eff_samples_per_chunk, cfg, stream, nullptr);
 }
 
 /**
