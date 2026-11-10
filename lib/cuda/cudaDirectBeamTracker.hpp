@@ -150,6 +150,8 @@ struct DirectBeamTrackerConfig {
     bool normalize_weights = true;
 
     std::array<std::uint8_t, MAX_DIRECT_ANTENNAS> antenna_mask;
+    std::array<std::uint8_t, MAX_DIRECT_ANTENNAS> calibration_valid_mask;
+    bool calibration_mask_initialized = false;
     std::array<float3, MAX_DIRECT_ANTENNAS> antenna_positions;
     std::array<float, MAX_DIRECT_ANTENNAS> normalized_taper_weights;
     DirectSiteLocation site;
@@ -162,6 +164,7 @@ struct DirectBeamTrackerConfig {
 
     DirectBeamTrackerConfig() {
         antenna_mask.fill(1);
+        calibration_valid_mask.fill(1);
         normalized_taper_weights.fill(0.0f);
         set_antenna_grid(64, 1, spacing_m, DirectPolLayout::INTERLEAVED, true, 8);
     }
@@ -227,7 +230,7 @@ struct DirectBeamTrackerConfig {
         std::size_t active_cnt = 0;
 
         for (std::size_t r = 0; r < elem_limit; ++r) {
-            if (antenna_mask[r] == 0) {
+            if (antenna_mask[r] == 0 || calibration_valid_mask[r] == 0) {
                 normalized_taper_weights[r] = 0.0f;
                 continue;
             }
@@ -258,7 +261,7 @@ struct DirectBeamTrackerConfig {
             const float inv_norm_pol[2] = {inv_norm(sum_sq_pol[0]), inv_norm(sum_sq_pol[1])};
 
             for (std::size_t r = 0; r < elem_limit; ++r) {
-                if (antenna_mask[r] != 0) {
+                if (antenna_mask[r] != 0 && calibration_valid_mask[r] != 0) {
                     const std::size_t pol = raw_elem_to_pol(r) & 1U;
                     normalized_taper_weights[r] *= inv_norm_pol[pol];
                 }
@@ -289,7 +292,10 @@ struct DirectBeamTrackerConfig {
                 const std::size_t phys_ant = raw_elem_to_physical_ant(r);
                 const std::size_t col = phys_ant % grid_cols;
                 const std::size_t row = phys_ant / grid_cols;
-                antenna_positions[r] = make_float3(static_cast<float>(col) * spacing_m,
+                // CHARTS physical ENU convention: Chain 0 (col=0, D00/A10) is on the East edge
+                // and Chain 7 (col=7, D07/A17) is on the West edge, so East (x) is -col * spacing_m
+                // and North (y) is +row * spacing_m.
+                antenna_positions[r] = make_float3(-static_cast<float>(col) * spacing_m,
                                                    static_cast<float>(row) * spacing_m, 0.0f);
             } else {
                 antenna_positions[r] = make_float3(0.0f, 0.0f, 0.0f);

@@ -1,0 +1,442 @@
+---
+# ==============================================================================
+# CHARTS 64-Antenna DPDK -> 1-Beam Direct Tracker: Fixed Zenith, Calibrated (sun_1104)
+# ==============================================================================
+# - One stationary beam at zenith (l0 = m0 = 0, n0 = 1); no celestial target set.
+# - Frequency-dependent complex gains: /data/calibration/sun_1104/gains_sun_1104_0_4_32_36_interp_672x64.npy
+# - Fitted antenna positions: /data/calibration/sun_1104/positions_1104_sunfit.npy
+# - Active Antennas: Fully dynamic auto-masking (all 64 elements start unmasked;
+#   cudaAntennaMaskCommand auto-detects alive/connected lines via moments & coherence).
+# - Records only the integrated beam power (rawFileWrite, ~1.024 s cadence,
+#   one file per hour per subband). Raw/formed voltages are not written.
+# - Runs until stopped (capture_n_frames: 0, no exit_after_n_files).
+# - base_dir is the `current` symlink that scripts/start_zenith_1beam.sh points
+#   at a fresh run_<timestamp> directory under /home/fpalma/zenith_beam_data.
+# ==============================================================================
+
+type: config
+log_level: info
+
+cpu_affinity: [6, 7, 8, 9]
+
+# ------------------------------------------------------------------------------
+# Array Dimensions & Sampling Parameters
+# ------------------------------------------------------------------------------
+num_elements: 64
+n_channels_per_packet: 168
+local_subbands_per_packet: 2
+num_local_freq: 336
+
+sample_period_s: 3.333333333333e-6
+samples_per_data_set: 15360
+frame_arrival_period: samples_per_data_set * sample_period_s
+bytes_per_dataset: n_channels_per_packet * local_subbands_per_packet * samples_per_data_set
+capture_n_frames: 0               # run until stopped
+
+buffer_depth: 20
+gpu_buffer_depth: 3
+
+spacing_m: 0.6
+max_beams: 1
+initial_active_beams: 1
+sizeof_complex_float: 8
+sizeof_float: 4
+
+custom_antenna_positions: &charts_custom_antenna_positions
+  - [0.0, 0.0, 0.0]          # Ant 0 (D00: SE corner, ref ant)
+  - [0.0, 0.0, 0.0]          # Ant 1
+  - [0.0, 0.0, 0.0]          # Ant 2
+  - [0.0, 0.0, 0.0]          # Ant 3
+  - [-4.24775, 0.0275, 0.0]  # Ant 4 (D07: SW corner, sun_1104 fitted ENU m)
+  - [0.0, 0.0, 0.0]          # Ant 5
+  - [0.0, 0.0, 0.0]          # Ant 6
+  - [0.0, 0.0, 0.0]          # Ant 7
+  - [0.0, 0.0, 0.0]          # Ant 8
+  - [0.0, 0.0, 0.0]          # Ant 9
+  - [0.0, 0.0, 0.0]          # Ant 10
+  - [0.0, 0.0, 0.0]          # Ant 11
+  - [0.0, 0.0, 0.0]          # Ant 12
+  - [0.0, 0.0, 0.0]          # Ant 13
+  - [0.0, 0.0, 0.0]          # Ant 14
+  - [0.0, 0.0, 0.0]          # Ant 15
+  - [0.0, 0.0, 0.0]          # Ant 16
+  - [0.0, 0.0, 0.0]          # Ant 17
+  - [0.0, 0.0, 0.0]          # Ant 18
+  - [0.0, 0.0, 0.0]          # Ant 19
+  - [0.0, 0.0, 0.0]          # Ant 20
+  - [0.0, 0.0, 0.0]          # Ant 21
+  - [0.0, 0.0, 0.0]          # Ant 22
+  - [0.0, 0.0, 0.0]          # Ant 23
+  - [0.0, 0.0, 0.0]          # Ant 24
+  - [0.0, 0.0, 0.0]          # Ant 25
+  - [0.0, 0.0, 0.0]          # Ant 26
+  - [0.0, 0.0, 0.0]          # Ant 27
+  - [0.0, 0.0, 0.0]          # Ant 28
+  - [0.0, 0.0, 0.0]          # Ant 29
+  - [0.0, 0.0, 0.0]          # Ant 30
+  - [0.0, 0.0, 0.0]          # Ant 31
+  - [0.15, 4.30625, 0.0]     # Ant 32 (A10: NE corner, sun_1104 fitted ENU m)
+  - [0.0, 0.0, 0.0]          # Ant 33
+  - [0.0, 0.0, 0.0]          # Ant 34
+  - [0.0, 0.0, 0.0]          # Ant 35
+  - [-4.12725, 4.42725, 0.0] # Ant 36 (A17: NW corner, sun_1104 fitted ENU m)
+  - [0.0, 0.0, 0.0]  # Ant 37
+  - [0.0, 0.0, 0.0]  # Ant 38
+  - [0.0, 0.0, 0.0]  # Ant 39
+  - [0.0, 0.0, 0.0]  # Ant 40
+  - [0.0, 0.0, 0.0]  # Ant 41
+  - [0.0, 0.0, 0.0]  # Ant 42
+  - [0.0, 0.0, 0.0]  # Ant 43
+  - [0.0, 0.0, 0.0]  # Ant 44
+  - [0.0, 0.0, 0.0]  # Ant 45
+  - [0.0, 0.0, 0.0]  # Ant 46
+  - [0.0, 0.0, 0.0]  # Ant 47
+  - [0.0, 0.0, 0.0]  # Ant 48
+  - [0.0, 0.0, 0.0]  # Ant 49
+  - [0.0, 0.0, 0.0]  # Ant 50
+  - [0.0, 0.0, 0.0]  # Ant 51
+  - [0.0, 0.0, 0.0]  # Ant 52
+  - [0.0, 0.0, 0.0]  # Ant 53
+  - [0.0, 0.0, 0.0]  # Ant 54
+  - [0.0, 0.0, 0.0]  # Ant 55
+  - [0.0, 0.0, 0.0]  # Ant 56
+  - [0.0, 0.0, 0.0]  # Ant 57
+  - [0.0, 0.0, 0.0]  # Ant 58
+  - [0.0, 0.0, 0.0]  # Ant 59
+  - [0.0, 0.0, 0.0]  # Ant 60
+  - [0.0, 0.0, 0.0]  # Ant 61
+  - [0.0, 0.0, 0.0]  # Ant 62
+  - [0.0, 0.0, 0.0]  # Ant 63
+
+# ------------------------------------------------------------------------------
+# Metadata Pool
+# ------------------------------------------------------------------------------
+main_pool:
+    kotekan_metadata_pool: chartsMetadata
+    num_metadata_objects: buffer_depth * 15
+
+# ------------------------------------------------------------------------------
+# Host Buffers
+# ------------------------------------------------------------------------------
+network_capture_buf_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: bytes_per_dataset * num_elements # ~330.3 MB
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+mask_buffer_zeros_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set
+    numa_node: 0
+    metadata_pool: main_pool
+
+network_capture_buf_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: bytes_per_dataset * num_elements # ~330.3 MB
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+mask_buffer_zeros_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set
+    numa_node: 0
+    metadata_pool: main_pool
+
+# Output Formed Beams Buffer (Complex Voltages float2: [samples][freq][max_beams])
+host_formed_beams_buffer_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+host_formed_beams_buffer_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+# Output Reduced Beam Power Buffer (float: [max_beams][num_local_freq])
+host_beam_power_buffer_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: max_beams * num_local_freq * sizeof_float
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+host_beam_power_buffer_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: max_beams * num_local_freq * sizeof_float
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+# ------------------------------------------------------------------------------
+# Network Ingest Stage: DPDK Core (Dual Port)
+# ------------------------------------------------------------------------------
+dpdk:
+    kotekan_stage: dpdkCore
+    lcore_start_delay: 1
+    lcore_cpu_map: [3, 5]
+    main_lcore_cpu: 4
+    lcore_port_map:
+        - [0]
+        - [1]
+    max_rx_pkt_len: 9000
+    rx_ring_size: 4096
+    num_mbufs: 65536
+    mbuf_data_size: 9216
+
+    handlers:
+        - dpdk_handler: rfsocHandlerShuffle
+          out_buffer: network_capture_buf_0
+          alignment: 15360
+          mask_buf: mask_buffer_zeros_0
+          first_subband: 0
+          coarse_freq_start: 0
+          num_local_freq: 336
+
+        - dpdk_handler: rfsocHandlerShuffle
+          out_buffer: network_capture_buf_1
+          alignment: 15360
+          mask_buf: mask_buffer_zeros_1
+          first_subband: 2
+          coarse_freq_start: 336
+          num_local_freq: 336
+
+# ------------------------------------------------------------------------------
+# Dropped Packet Zeroing Stages
+# ------------------------------------------------------------------------------
+zero_samples_0:
+    kotekan_stage: zeroSamples
+    out_buf: network_capture_buf_0
+    lost_samples_buf: mask_buffer_zeros_0
+    zero_value: 0
+    sample_size: 21504             # 64 * 336
+
+zero_samples_1:
+    kotekan_stage: zeroSamples
+    out_buf: network_capture_buf_1
+    lost_samples_buf: mask_buffer_zeros_1
+    zero_value: 0
+    sample_size: 21504             # 64 * 336
+
+# ------------------------------------------------------------------------------
+# GPU Direct Beam Tracker & Antenna Health Stages
+# ------------------------------------------------------------------------------
+gpu:
+    profiling: false
+
+    # Command Pipeline for Stream 0 (Frequencies 0..335, 300.0 - 400.5 MHz)
+    commands_0: &command_list_0
+        - name: cudaInputData
+          in_buf: host_voltage
+          gpu_mem: voltage_0
+        - name: cudaSyncInput
+
+        - name: cudaAntennaMaskCommand
+          gpu_mem_voltage: voltage_0
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          buffer_depth: 3
+          sample_stride: 4
+          antenna_order: "descending"
+          active_antennas: [0, 4, 32, 36]
+          auto_detect_enabled: true
+          blank_voltages_enabled: false
+          dead_power_threshold: 1.0
+          sat_power_threshold: 80.0
+          clip_fraction_threshold: 0.15
+          revival_frames: 5
+
+        # Direct Beam Tracker Kernel (1 fixed zenith beam)
+        - name: cudaDirectBeamTrackerCommand
+          gpu_mem_voltage: voltage_0
+          gpu_mem_formed_beams: formed_beams_0
+          gpu_mem_beam_power: beam_power_0
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          spacing_m: 0.6
+          antenna_order: "descending"
+          active_antennas: [0, 4, 32, 36]
+          custom_antenna_positions: *charts_custom_antenna_positions
+          max_beams: 1
+          initial_active_beams: 1
+          buffer_depth: 3
+          time_chunk_size: 256
+          time_unroll: 4
+          taper_type: "none"
+          normalize_weights: true
+          beam_tile_size: 4
+          enable_cuda_graph: false
+          gains_file: /home/fpalma/calibration/gains_sun_1104_0_4_32_36_fringehp_full672_672x64.npy
+          enable_grid_mode: false
+          grid_step: 0.02
+          site_lat_deg: -33.4211146
+          site_lon_deg: -70.8634710
+          site_alt_m: 458.0
+          freq_start_hz: 300000000.0
+          freq_step_hz: 300000.0
+          # Fixed zenith beam
+          source_l0: 0.0
+          source_m0: 0.0
+
+        - name: cudaSyncOutput
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: formed_beams_0
+          out_buf: host_formed_beams
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: beam_power_0
+          out_buf: host_beam_power
+
+    # Command Pipeline for Stream 1 (Frequencies 336..671, 400.8 - 501.3 MHz)
+    commands_1: &command_list_1
+        - name: cudaInputData
+          in_buf: host_voltage
+          gpu_mem: voltage_1
+        - name: cudaSyncInput
+
+        - name: cudaAntennaMaskCommand
+          gpu_mem_voltage: voltage_1
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          buffer_depth: 3
+          sample_stride: 4
+          antenna_order: "descending"
+          active_antennas: [0, 4, 32, 36]
+          auto_detect_enabled: true
+          blank_voltages_enabled: false
+          dead_power_threshold: 1.0
+          sat_power_threshold: 80.0
+          clip_fraction_threshold: 0.15
+          revival_frames: 5
+
+        # Direct Beam Tracker Kernel (1 fixed zenith beam)
+        - name: cudaDirectBeamTrackerCommand
+          gpu_mem_voltage: voltage_1
+          gpu_mem_formed_beams: formed_beams_1
+          gpu_mem_beam_power: beam_power_1
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          spacing_m: 0.6
+          antenna_order: "descending"
+          active_antennas: [0, 4, 32, 36]
+          custom_antenna_positions: *charts_custom_antenna_positions
+          max_beams: 1
+          initial_active_beams: 1
+          buffer_depth: 3
+          time_chunk_size: 256
+          time_unroll: 4
+          taper_type: "none"
+          normalize_weights: true
+          beam_tile_size: 4
+          enable_cuda_graph: false
+          gains_file: /home/fpalma/calibration/gains_sun_1104_0_4_32_36_fringehp_full672_672x64.npy
+          enable_grid_mode: false
+          grid_step: 0.02
+          site_lat_deg: -33.4211146
+          site_lon_deg: -70.8634710
+          site_alt_m: 458.0
+          freq_start_hz: 400800000.0
+          freq_step_hz: 300000.0
+          # Fixed zenith beam
+          source_l0: 0.0
+          source_m0: 0.0
+
+        - name: cudaSyncOutput
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: formed_beams_1
+          out_buf: host_formed_beams
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: beam_power_1
+          out_buf: host_beam_power
+
+stages:
+    gpu_0:
+        kotekan_stage: cudaProcess
+        gpu_id: 0
+        cuda_stream_base: 0
+        num_cuda_streams: 6
+        buffer_depth: 3
+        commands: *command_list_0
+        in_buffers:
+            host_voltage: network_capture_buf_0
+        out_buffers:
+            host_formed_beams: host_formed_beams_buffer_0
+            host_beam_power: host_beam_power_buffer_0
+
+    gpu_1:
+        kotekan_stage: cudaProcess
+        gpu_id: 0
+        cuda_stream_base: 1
+        num_cuda_streams: 6
+        buffer_depth: 3
+        commands: *command_list_1
+        in_buffers:
+            host_voltage: network_capture_buf_1
+        out_buffers:
+            host_formed_beams: host_formed_beams_buffer_1
+            host_beam_power: host_beam_power_buffer_1
+
+# ------------------------------------------------------------------------------
+# REST Telemetry Inspection Stages
+# ------------------------------------------------------------------------------
+inspect_beams_0:
+    kotekan_stage: restInspectFrame
+    in_buf: host_formed_beams_buffer_0
+    len: 4194304
+
+inspect_beams_1:
+    kotekan_stage: restInspectFrame
+    in_buf: host_formed_beams_buffer_1
+    len: 4194304
+
+# ------------------------------------------------------------------------------
+# Integrated Beam Power Recording (1 beam x 336 channels per subband)
+# ------------------------------------------------------------------------------
+raw_file_write_power_0:
+    kotekan_stage: rawFileWrite
+    in_buf: host_beam_power_buffer_0
+    base_dir: /home/fpalma/zenith_beam_data/current
+    file_name: beam_power_freq0
+    file_ext: bin
+    prefix_hostname: false
+    skip_frames: 20
+    write_every_n_frames: 20       # ~1.024s cadence
+    num_frames_per_file: 3600      # 1 hour per file
+
+raw_file_write_power_1:
+    kotekan_stage: rawFileWrite
+    in_buf: host_beam_power_buffer_1
+    base_dir: /home/fpalma/zenith_beam_data/current
+    file_name: beam_power_freq1
+    file_ext: bin
+    prefix_hostname: false
+    skip_frames: 20
+    write_every_n_frames: 20       # ~1.024s cadence
+    num_frames_per_file: 3600
