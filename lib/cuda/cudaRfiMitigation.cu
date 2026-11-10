@@ -52,15 +52,15 @@ __device__ __forceinline__ float device_median_small(float* buf, int n) {
 }
 
 // ============================================================================
-// Pass 1: Scale-Invariant Per-(Chunk, Freq) Spectral Kurtosis & Power Kernel
+// Pass 1: Scale-Invariant Per-(Chunk, Freq) Spectral Kurtosis, Power & Saturation
 // ============================================================================
 
 template <int BLOCK_ANT, int BLOCK_TIME, bool SWAPPED_WITH_OFFSET = false>
 __global__ void __launch_bounds__(256, 4) inspect_rfi_chunks_kernel(
     const std::uint8_t* __restrict__ raw_bytes, const int* __restrict__ active_antennas,
     int num_active_antennas, float* __restrict__ d_chunk_power, float* __restrict__ d_chunk_sk,
-    std::size_t n_time, std::size_t n_freq, std::size_t n_elem, std::size_t chunk_size,
-    std::size_t sample_stride) {
+    float* __restrict__ d_chunk_sat_fraction, std::size_t n_time, std::size_t n_freq,
+    std::size_t n_elem, std::size_t chunk_size, std::size_t sample_stride) {
 
     const std::size_t f = blockIdx.x;
     const std::size_t c = blockIdx.y;
@@ -75,14 +75,17 @@ __global__ void __launch_bounds__(256, 4) inspect_rfi_chunks_kernel(
 
     __shared__ float s_ant_power[BLOCK_ANT];
     __shared__ float s_ant_sk[BLOCK_ANT];
+    __shared__ float s_ant_sat[BLOCK_ANT];
     __shared__ unsigned int s_p1[BLOCK_TIME][BLOCK_ANT];
     __shared__ unsigned long long s_p2[BLOCK_TIME][BLOCK_ANT];
+    __shared__ unsigned int s_sat[BLOCK_TIME][BLOCK_ANT];
 
     const unsigned int ax = threadIdx.x;
     const unsigned int ty = threadIdx.y;
 
     float total_power_sum = 0.0f;
     float total_sk_sum = 0.0f;
+    float total_sat_sum = 0.0f;
     int valid_ant_count = 0;
 
     for (int a_base = 0; a_base < num_active_antennas; a_base += BLOCK_ANT) {
@@ -91,6 +94,7 @@ __global__ void __launch_bounds__(256, 4) inspect_rfi_chunks_kernel(
 
         unsigned int local_p1 = 0U;
         unsigned long long local_p2 = 0ULL;
+        unsigned int local_sat = 0U;
 
         if (raw_elem >= 0 && static_cast<std::size_t>(raw_elem) < n_elem) {
             for (std::size_t t = t_start + ty * sample_stride; t < t_end;
@@ -103,20 +107,28 @@ __global__ void __launch_bounds__(256, 4) inspect_rfi_chunks_kernel(
                 const unsigned int p = static_cast<unsigned int>(re * re + im * im);
                 local_p1 += p;
                 local_p2 += static_cast<unsigned long long>(p) * static_cast<unsigned long long>(p);
+
+                // Quantizer symmetric saturation check: [-7, +7] bounds
+                if (re <= -7 || re >= 7 || im <= -7 || im >= 7) {
+                    local_sat++;
+                }
             }
         }
 
         s_p1[ty][ax] = local_p1;
         s_p2[ty][ax] = local_p2;
+        s_sat[ty][ax] = local_sat;
         __syncthreads();
 
         if (ty == 0 && a_idx < num_active_antennas) {
             unsigned long long sum_p1 = 0ULL;
             unsigned long long sum_p2 = 0ULL;
+            unsigned int sum_sat = 0U;
             #pragma unroll
             for (int r = 0; r < BLOCK_TIME; ++r) {
                 sum_p1 += s_p1[r][ax];
                 sum_p2 += s_p2[r][ax];
+                sum_sat += s_sat[r][ax];
             }
 
             const float m_f = static_cast<float>(eff_m);
@@ -131,6 +143,7 @@ __global__ void __launch_bounds__(256, 4) inspect_rfi_chunks_kernel(
             }
             s_ant_power[ax] = mean_p;
             s_ant_sk[ax] = sk_a;
+            s_ant_sat[ax] = (eff_m > 0) ? (static_cast<float>(sum_sat) / m_f) : 0.0f;
         }
         __syncthreads();
 
@@ -142,6 +155,7 @@ __global__ void __launch_bounds__(256, 4) inspect_rfi_chunks_kernel(
                 if (s_ant_power[k] > 0.0f) {
                     total_power_sum += s_ant_power[k];
                     total_sk_sum += s_ant_sk[k];
+                    total_sat_sum += s_ant_sat[k];
                     valid_ant_count++;
                 }
             }
@@ -152,17 +166,25 @@ __global__ void __launch_bounds__(256, 4) inspect_rfi_chunks_kernel(
     if (ty == 0 && ax == 0) {
         const std::size_t out_idx = c * n_freq + f;
         if (valid_ant_count > 0) {
-            d_chunk_power[out_idx] = total_power_sum / static_cast<float>(valid_ant_count);
-            d_chunk_sk[out_idx] = total_sk_sum / static_cast<float>(valid_ant_count);
+            const float inv_ants = 1.0f / static_cast<float>(valid_ant_count);
+            d_chunk_power[out_idx] = total_power_sum * inv_ants;
+            d_chunk_sk[out_idx] = total_sk_sum * inv_ants;
+            if (d_chunk_sat_fraction != nullptr) {
+                d_chunk_sat_fraction[out_idx] = total_sat_sum * inv_ants;
+            }
         } else {
             d_chunk_power[out_idx] = 0.0f;
             d_chunk_sk[out_idx] = 1.0f;
+            if (d_chunk_sat_fraction != nullptr) {
+                d_chunk_sat_fraction[out_idx] = 0.0f;
+            }
         }
     }
 }
 
 // ============================================================================
-// Pass 2: Fused Temporal Baseline + Sliding Frequency MAD + SK Flag Evaluation
+// Pass 2: Fused Temporal Baseline + Iterative Outlier-Rejected Passband MAD +
+//         Empirical SK Variance + Morphological SIR Extension
 // ============================================================================
 
 constexpr int MAX_STACK_CHUNKS = 128;
@@ -171,20 +193,23 @@ constexpr int MAX_FREQ_WINDOW = 65;
 
 __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
     const float* __restrict__ d_chunk_power, const float* __restrict__ d_chunk_sk,
-    const std::uint8_t* __restrict__ d_static_notch, std::uint8_t* __restrict__ d_chunk_rfi_mask,
+    const float* __restrict__ d_chunk_sat_fraction, const std::uint8_t* __restrict__ d_static_notch,
+    const float* __restrict__ d_channel_gains, std::uint8_t* __restrict__ d_chunk_rfi_mask,
     RfiChannelStats* __restrict__ d_channel_stats, std::size_t n_chunks, std::size_t n_freq,
     float sk_sigma_unit, bool enable_sk, float sk_sigma_thresh, bool enable_burst,
-    float burst_sigma_thresh, bool enable_freq_mad, int freq_win_half, float mad_sigma_thresh) {
+    float burst_sigma_thresh, bool enable_freq_mad, int freq_win_half, float mad_sigma_thresh,
+    bool enable_saturation_check, float sat_fraction_thresh, bool enable_morphology_sir,
+    int edge_channels_to_ignore) {
 
     __shared__ float s_chan_med[MAX_SHARED_FREQ];
     __shared__ float s_chan_mad[MAX_SHARED_FREQ];
     __shared__ float s_chan_med_sk[MAX_SHARED_FREQ];
+    __shared__ float s_chan_mad_sk[MAX_SHARED_FREQ];
 
     const int n_f = static_cast<int>((n_freq < MAX_SHARED_FREQ) ? n_freq : MAX_SHARED_FREQ);
     const int nc = static_cast<int>((n_chunks < MAX_STACK_CHUNKS) ? n_chunks : MAX_STACK_CHUNKS);
 
-    // Phase A: Each thread computes temporal median power, temporal MAD power, and median SK
-    // across the chunks of frequency channel f.
+    // Phase A: Temporal statistics per frequency channel
     for (int f = static_cast<int>(threadIdx.x); f < n_f; f += static_cast<int>(blockDim.x)) {
         float buf[MAX_STACK_CHUNKS];
         for (int c = 0; c < nc; ++c) {
@@ -203,14 +228,21 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
         }
         const float med_sk = device_median_small(buf, nc);
 
+        // Compute empirical SK MAD to account for spatial correlation across antennas
+        for (int c = 0; c < nc; ++c) {
+            const float sk = d_chunk_sk[static_cast<std::size_t>(c) * n_freq + f];
+            buf[c] = fabsf(sk - med_sk);
+        }
+        const float mad_sk = 1.4826f * device_median_small(buf, nc);
+
         s_chan_med[f] = med_p;
         s_chan_mad[f] = mad_p;
         s_chan_med_sk[f] = med_sk;
+        s_chan_mad_sk[f] = mad_sk;
     }
     __syncthreads();
 
-    // Compute empirical SK center from local window or global thermal baseline (~0.97-1.00)
-    // Phase B: Evaluate sliding frequency passband MAD and per-chunk flags
+    // Phase B: Frequency baseline and chunk flag evaluation
     for (int f = static_cast<int>(threadIdx.x); f < n_f; f += static_cast<int>(blockDim.x)) {
         const float chan_med_p = s_chan_med[f];
         const float chan_mad_p = s_chan_mad[f];
@@ -219,7 +251,10 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
         bool is_freq_mad_outlier = false;
         float local_sk_center = 1.0f;
 
-        if (n_f >= 5) {
+        // Skip edge channels near PFB roll-off from triggering passband false alarms
+        const bool is_edge = (f < edge_channels_to_ignore) || (f >= n_f - edge_channels_to_ignore);
+
+        if (n_f >= 5 && !is_edge) {
             float win_buf[MAX_FREQ_WINDOW];
             float sk_win_buf[MAX_FREQ_WINDOW];
             int half_w = freq_win_half;
@@ -239,7 +274,15 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
 
             int count = 0;
             for (int idx = f_lo; idx <= f_hi && count < MAX_FREQ_WINDOW; ++idx) {
-                win_buf[count] = s_chan_med[idx];
+                // If digital gains provided, evaluate pre-quantizer spectra P_pre = P / g^2
+                float p_val = s_chan_med[idx];
+                if (d_channel_gains != nullptr) {
+                    const float g = d_channel_gains[idx];
+                    if (g > 0.0f) {
+                        p_val /= (g * g);
+                    }
+                }
+                win_buf[count] = p_val;
                 sk_win_buf[count] = s_chan_med_sk[idx];
                 count++;
             }
@@ -252,12 +295,47 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
             if (enable_freq_mad) {
                 int count_dev = 0;
                 for (int idx = f_lo; idx <= f_hi && count_dev < MAX_FREQ_WINDOW; ++idx) {
-                    win_buf[count_dev++] = fabsf(s_chan_med[idx] - local_med);
+                    float p_val = s_chan_med[idx];
+                    if (d_channel_gains != nullptr) {
+                        const float g = d_channel_gains[idx];
+                        if (g > 0.0f) {
+                            p_val /= (g * g);
+                        }
+                    }
+                    win_buf[count_dev++] = fabsf(p_val - local_med);
                 }
-                const float local_mad = 1.4826f * device_median_small(win_buf, count_dev);
+                const float prelim_mad = 1.4826f * device_median_small(win_buf, count_dev);
+
+                // Iterative outlier-rejection (f-engine smooth_bandpass):
+                // exclude channels with dev >= 4.0 * max(prelim_mad, 0.05 * local_med)
+                const float mad_cutoff = 4.0f * fmaxf(prelim_mad, 0.05f * local_med);
+                int inlier_count = 0;
+                for (int idx = f_lo; idx <= f_hi && inlier_count < MAX_FREQ_WINDOW; ++idx) {
+                    float p_val = s_chan_med[idx];
+                    if (d_channel_gains != nullptr) {
+                        const float g = d_channel_gains[idx];
+                        if (g > 0.0f) {
+                            p_val /= (g * g);
+                        }
+                    }
+                    const float dev = fabsf(p_val - local_med);
+                    if (dev < mad_cutoff) {
+                        win_buf[inlier_count++] = dev;
+                    }
+                }
+                const float local_mad = (inlier_count >= 3)
+                                            ? (1.4826f * device_median_small(win_buf, inlier_count))
+                                            : prelim_mad;
                 const float eff_sigma = fmaxf(local_mad, 0.015f * fmaxf(local_med, 1.0e-3f));
 
-                freq_z = (chan_med_p - local_med) / eff_sigma;
+                float p_target = chan_med_p;
+                if (d_channel_gains != nullptr) {
+                    const float g = d_channel_gains[f];
+                    if (g > 0.0f) {
+                        p_target /= (g * g);
+                    }
+                }
+                freq_z = (p_target - local_med) / eff_sigma;
                 if (freq_z >= mad_sigma_thresh) {
                     is_freq_mad_outlier = true;
                 }
@@ -266,7 +344,9 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
 
         const bool is_static_notch = (d_static_notch != nullptr && d_static_notch[f] != 0);
 
-        const float sk_half_width = sk_sigma_thresh * fmaxf(sk_sigma_unit, 0.025f);
+        // Effective SK standard error bounded by both theoretical and empirical temporal MAD
+        const float eff_sk_unit = fmaxf(sk_sigma_unit, fmaxf(s_chan_mad_sk[f], 0.025f));
+        const float sk_half_width = sk_sigma_thresh * eff_sk_unit;
         const float sk_hi = local_sk_center + sk_half_width;
         const float sk_lo = fmaxf(0.05f, local_sk_center - sk_half_width);
 
@@ -308,11 +388,50 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
                     mask_bits |= RFI_TIME_BURST;
                 }
             }
+            if (enable_saturation_check && d_chunk_sat_fraction != nullptr) {
+                const float sat_frac = d_chunk_sat_fraction[idx];
+                if (sat_frac >= sat_fraction_thresh) {
+                    mask_bits |= RFI_SATURATION_CLIP;
+                }
+            }
 
             d_chunk_rfi_mask[idx] = mask_bits;
             if (mask_bits != RFI_CLEAN) {
                 flagged_chunks++;
                 chan_flag_bits |= static_cast<std::uint32_t>(mask_bits);
+            }
+        }
+
+        // 1D Temporal SIR / Morphology Dilation: expand flags to neighboring chunks with elevated power
+        if (enable_morphology_sir && n_chunks >= 3) {
+            for (std::size_t c = 0; c < n_chunks; ++c) {
+                const std::size_t idx = c * n_freq + static_cast<std::size_t>(f);
+                if (d_chunk_rfi_mask[idx] & (RFI_TIME_BURST | RFI_SK_IMPULSIVE | RFI_SATURATION_CLIP)) {
+                    if (c > 0) {
+                        const std::size_t prev_idx = (c - 1) * n_freq + static_cast<std::size_t>(f);
+                        if (d_chunk_rfi_mask[prev_idx] == RFI_CLEAN) {
+                            const float prev_p = d_chunk_power[prev_idx];
+                            const float prev_z = (prev_p - chan_med_p) / burst_eff_sigma;
+                            if (prev_z >= 0.5f * burst_sigma_thresh) {
+                                d_chunk_rfi_mask[prev_idx] |= RFI_MORPHOLOGY_SIR;
+                                flagged_chunks++;
+                                chan_flag_bits |= static_cast<std::uint32_t>(RFI_MORPHOLOGY_SIR);
+                            }
+                        }
+                    }
+                    if (c + 1 < n_chunks) {
+                        const std::size_t next_idx = (c + 1) * n_freq + static_cast<std::size_t>(f);
+                        if (d_chunk_rfi_mask[next_idx] == RFI_CLEAN) {
+                            const float next_p = d_chunk_power[next_idx];
+                            const float next_z = (next_p - chan_med_p) / burst_eff_sigma;
+                            if (next_z >= 0.5f * burst_sigma_thresh) {
+                                d_chunk_rfi_mask[next_idx] |= RFI_MORPHOLOGY_SIR;
+                                flagged_chunks++;
+                                chan_flag_bits |= static_cast<std::uint32_t>(RFI_MORPHOLOGY_SIR);
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -372,6 +491,7 @@ __global__ void __launch_bounds__(256, 4) blank_rfi_chunks_kernel(
 void launch_inspect_rfi_chunks(const int4x2_t* __restrict__ d_voltages,
                                const int* __restrict__ d_active_antennas, int num_active_antennas,
                                float* __restrict__ d_chunk_power, float* __restrict__ d_chunk_sk,
+                               float* __restrict__ d_chunk_sat_fraction,
                                std::size_t n_time, std::size_t n_freq, std::size_t n_elem,
                                std::size_t chunk_size, std::size_t sample_stride,
                                cudaStream_t stream, bool is_swapped_withoffset) {
@@ -391,18 +511,20 @@ void launch_inspect_rfi_chunks(const int4x2_t* __restrict__ d_voltages,
 
     if (is_swapped_withoffset) {
         inspect_rfi_chunks_kernel<BLOCK_ANT, BLOCK_TIME, true><<<grid, block, 0, stream>>>(
-            raw_bytes, d_active_antennas, num_active_antennas, d_chunk_power, d_chunk_sk, n_time,
-            n_freq, n_elem, chunk_size, stride);
+            raw_bytes, d_active_antennas, num_active_antennas, d_chunk_power, d_chunk_sk,
+            d_chunk_sat_fraction, n_time, n_freq, n_elem, chunk_size, stride);
     } else {
         inspect_rfi_chunks_kernel<BLOCK_ANT, BLOCK_TIME, false><<<grid, block, 0, stream>>>(
-            raw_bytes, d_active_antennas, num_active_antennas, d_chunk_power, d_chunk_sk, n_time,
-            n_freq, n_elem, chunk_size, stride);
+            raw_bytes, d_active_antennas, num_active_antennas, d_chunk_power, d_chunk_sk,
+            d_chunk_sat_fraction, n_time, n_freq, n_elem, chunk_size, stride);
     }
 }
 
 void launch_evaluate_rfi_flags(const float* __restrict__ d_chunk_power,
                                const float* __restrict__ d_chunk_sk,
+                               const float* __restrict__ d_chunk_sat_fraction,
                                const std::uint8_t* __restrict__ d_static_notch,
+                               const float* __restrict__ d_channel_gains,
                                std::uint8_t* __restrict__ d_chunk_rfi_mask,
                                RfiChannelStats* __restrict__ d_channel_stats, std::size_t n_chunks,
                                std::size_t n_freq, int num_active_antennas,
@@ -419,10 +541,12 @@ void launch_evaluate_rfi_flags(const float* __restrict__ d_chunk_power,
     const float sk_sigma_unit = 2.0f / std::sqrt(total_dof);
 
     evaluate_rfi_flags_fused_kernel<<<1, 512, 0, stream>>>(
-        d_chunk_power, d_chunk_sk, d_static_notch, d_chunk_rfi_mask, d_channel_stats, n_chunks,
-        n_freq, sk_sigma_unit, cfg.enable_sk_check, cfg.sk_sigma_threshold,
-        cfg.enable_time_burst_check, cfg.burst_sigma_threshold, cfg.enable_freq_mad_check,
-        cfg.freq_window_half_width, cfg.mad_sigma_threshold);
+        d_chunk_power, d_chunk_sk, d_chunk_sat_fraction, d_static_notch, d_channel_gains,
+        d_chunk_rfi_mask, d_channel_stats, n_chunks, n_freq, sk_sigma_unit, cfg.enable_sk_check,
+        cfg.sk_sigma_threshold, cfg.enable_time_burst_check, cfg.burst_sigma_threshold,
+        cfg.enable_freq_mad_check, cfg.freq_window_half_width, cfg.mad_sigma_threshold,
+        cfg.enable_saturation_check, cfg.saturation_fraction_threshold, cfg.enable_morphology_sir,
+        cfg.edge_channels_to_ignore);
 }
 
 void launch_blank_rfi_chunks(int4x2_t* __restrict__ d_voltages,

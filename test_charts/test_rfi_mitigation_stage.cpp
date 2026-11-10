@@ -16,8 +16,9 @@ using namespace kotekan;
 namespace {
 
 inline int4x2_t pack_int4x2_signed(int re, int im) {
-    re = std::max(-8, std::min(7, re));
-    im = std::max(-8, std::min(7, im));
+    // 15-level quantizer: symmetric clipping to [-7, +7] (F-Engine quantizer.v)
+    re = std::max(-7, std::min(7, re));
+    im = std::max(-7, std::min(7, im));
     std::uint8_t lo = static_cast<std::uint8_t>(re & 0x0F);
     std::uint8_t hi = static_cast<std::uint8_t>((im & 0x0F) << 4);
     int4x2_t out;
@@ -30,8 +31,9 @@ inline int4x2_t pack_int4x2_signed(int re, int im) {
 int main() {
     std::printf("====================================================================================================\n");
     std::printf(" CHARTS Radio Telescope: Lightweight Real-Time GPU RFI Mitigation Stage Test & Benchmark Suite\n");
-    std::printf(" Verifying: Scale-Invariant Spectral Kurtosis, Temporal Burst MAD, Sliding Passband MAD,\n");
-    std::printf("            In-Place Voltage Blanking, and Direct Beamformer RFI Isolation\n");
+    std::printf(" Grounded in F-Engine Quantization Bias Theory (Mena-Parra et al. 2018; Target q-RMS=3.5)\n");
+    std::printf(" Verifying: Scale-Invariant SK, Temporal Burst MAD, Outlier-Rejected Passband MAD,\n");
+    std::printf("            Quantizer Saturation Clipping, Pre-Gain Equalization, and Voltage Blanking\n");
     std::printf("====================================================================================================\n\n");
 
     const std::size_t n_time = 15360;
@@ -44,13 +46,15 @@ int main() {
     // 4 calibrated corner antennas [0, 4, 32, 36] -> raw descending elements [63, 59, 31, 27]
     const std::vector<int> active_raw = {63, 59, 31, 27};
     const int num_active = static_cast<int>(active_raw.size());
-    const float ant_sigmas[4] = {1.8f, 2.2f, 2.6f, 3.0f}; // Distinct uncalibrated RF gain levels!
+    // F-Engine operating point: target q-RMS = 3.5 -> sigma = 1.70 total, sigma_c = 1.20 LSB per component
+    const float ant_sigmas[4] = {1.10f, 1.20f, 1.35f, 1.50f}; // Per-antenna gains around optimal window
 
     std::printf("Configuration:\n");
     std::printf("  - Time Samples/Frame  : %zu (51.20 ms frame)\n", n_time);
     std::printf("  - Frequency Channels  : %zu (100.8 MHz subband)\n", n_freq);
     std::printf("  - Total Elements      : %zu (Active calibrated subset: 4 corner elements [63, 59, 31, 27])\n", n_elem);
-    std::printf("  - SK Time Chunk Size  : %zu samples (853.3 us, %zu chunks/frame)\n\n", chunk_size, n_chunks);
+    std::printf("  - SK Time Chunk Size  : %zu samples (853.3 us, %zu chunks/frame)\n", chunk_size, n_chunks);
+    std::printf("  - F-Engine Baseline   : 15-level quantizer [-7..+7], target q-RMS=3.5 (sigma_c ~ 1.20 LSB)\n\n");
 
     const std::size_t frame_elems = n_time * n_freq * n_elem;
     std::vector<int4x2_t> h_voltages(frame_elems);
@@ -79,7 +83,9 @@ int main() {
     int* d_active_antennas = nullptr;
     float* d_chunk_power = nullptr;
     float* d_chunk_sk = nullptr;
+    float* d_chunk_sat_frac = nullptr;
     std::uint8_t* d_static_notch = nullptr;
+    float* d_channel_gains = nullptr;
     std::uint8_t* d_chunk_rfi_mask = nullptr;
     RfiChannelStats* d_channel_stats = nullptr;
 
@@ -87,13 +93,16 @@ int main() {
     cudaMalloc(&d_active_antennas, num_active * sizeof(int));
     cudaMalloc(&d_chunk_power, total_cells * sizeof(float));
     cudaMalloc(&d_chunk_sk, total_cells * sizeof(float));
+    cudaMalloc(&d_chunk_sat_frac, total_cells * sizeof(float));
     cudaMalloc(&d_static_notch, n_freq * sizeof(std::uint8_t));
+    cudaMalloc(&d_channel_gains, n_freq * sizeof(float));
     cudaMalloc(&d_chunk_rfi_mask, total_cells * sizeof(std::uint8_t));
     cudaMalloc(&d_channel_stats, n_freq * sizeof(RfiChannelStats));
 
     cudaMemcpy(d_voltages, h_voltages.data(), frame_elems * sizeof(int4x2_t), cudaMemcpyHostToDevice);
     cudaMemcpy(d_active_antennas, active_raw.data(), num_active * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemset(d_static_notch, 0, n_freq * sizeof(std::uint8_t));
+    cudaMemset(d_channel_gains, 0, n_freq * sizeof(float));
 
     RfiMitigationConfig cfg;
     cfg.enabled = true;
@@ -101,19 +110,23 @@ int main() {
     cfg.time_chunk_size = chunk_size;
     cfg.sample_stride = 1;
     cfg.enable_sk_check = true;
-    cfg.sk_sigma_threshold = 5.0f;
+    cfg.sk_sigma_threshold = 4.5f;
     cfg.enable_time_burst_check = true;
-    cfg.burst_sigma_threshold = 5.5f;
+    cfg.burst_sigma_threshold = 5.0f;
     cfg.enable_freq_mad_check = true;
     cfg.freq_window_half_width = 8;
     cfg.mad_sigma_threshold = 6.0f;
+    cfg.enable_saturation_check = true;
+    cfg.saturation_fraction_threshold = 0.02f;
+    cfg.enable_morphology_sir = true;
+    cfg.edge_channels_to_ignore = 16;
 
-    // >>> TEST 1: Scale-Invariant Thermal Noise Baseline (Unequal Antenna Gains) <<<
+    // >>> TEST 1: Scale-Invariant Thermal Noise Baseline (Target q-RMS=3.5) <<<
     launch_inspect_rfi_chunks(d_voltages, d_active_antennas, num_active, d_chunk_power, d_chunk_sk,
-                              n_time, n_freq, n_elem, chunk_size, 1, nullptr, false);
-    launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_static_notch, d_chunk_rfi_mask,
-                              d_channel_stats, n_chunks, n_freq, num_active, chunk_size, cfg,
-                              nullptr);
+                              d_chunk_sat_frac, n_time, n_freq, n_elem, chunk_size, 1, nullptr, false);
+    launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_chunk_sat_frac, d_static_notch,
+                              d_channel_gains, d_chunk_rfi_mask, d_channel_stats, n_chunks, n_freq,
+                              num_active, chunk_size, cfg, nullptr);
     cudaDeviceSynchronize();
 
     std::vector<RfiChannelStats> h_stats(n_freq);
@@ -132,8 +145,8 @@ int main() {
             false_positives++;
     }
 
-    std::printf(">>> TEST 1: Scale-Invariant Thermal Noise Baseline (Unequal Antenna Gains 1.8..3.0) <<<\n");
-    std::printf("  Measured Mean Spectral Kurtosis : %.4f (Expected ~0.90 - 1.02 for 4-bit clipped Gaussian)\n", mean_thermal_sk);
+    std::printf(">>> TEST 1: Scale-Invariant Thermal Noise Baseline (Target q-RMS=3.5) <<<\n");
+    std::printf("  Measured Mean Spectral Kurtosis : %.4f (Expected ~0.90 - 1.02 for 15-level Gaussian)\n", mean_thermal_sk);
     std::printf("  False Positive Cells Flagged    : %d / %zu (%.3f%%)\n", false_positives, total_cells,
                 100.0 * double(false_positives) / double(total_cells));
     if (std::abs(mean_thermal_sk - 0.95) > 0.08 || false_positives > 5) {
@@ -142,16 +155,18 @@ int main() {
     }
     std::printf("  Result: [PASSED] Scale-invariant per-antenna SK is immune to inter-antenna gain spread!\n\n");
 
-    // >>> TEST 2: Multi-Modal RFI Injection (Impulsive Burst, Telemetry Burst, CW Tone, Narrowband Carrier, Notch) <<<
-    const std::size_t f_impulsive = 45;  // Sub-chunk radar pulse in chunk 12 (only 20 samples out of 256!)
+    // >>> TEST 2: Multi-Modal RFI Injection (Impulsive, Telemetry, CW, Narrowband, Notch) <<<
+    const std::size_t f_impulsive = 45;  // Sub-chunk radar pulse in chunk 12
     const std::size_t c_impulsive = 12;
 
     const std::size_t f_burst = 130;     // Full-chunk telemetry burst in chunk 33
     const std::size_t c_burst = 33;
 
-    const std::size_t f_cw = 210;        // Constant-modulus phase-rotating CW carrier across all chunks
-    const std::size_t f_narrow = 280;    // Stationary narrowband noise jammer across all chunks
+    const std::size_t f_cw = 210;        // Constant-modulus phase-rotating CW carrier
+    const std::size_t f_narrow = 280;    // Stationary narrowband noise jammer
     const std::size_t f_notch = 310;     // Static notch channel
+    const std::size_t f_sat = 90;        // Heavy saturating radar burst hitting +-7
+    const std::size_t c_sat = 20;
 
     // Inject sub-chunk impulsive burst (20 samples hitting +7/-7 inside chunk 12 of channel 45)
     for (std::size_t dt = 40; dt < 60; ++dt) {
@@ -162,22 +177,31 @@ int main() {
         }
     }
 
+    // Inject heavy saturating radar burst in chunk 20 of channel 90 (35 samples saturating at +-7)
+    for (std::size_t dt = 10; dt < 45; ++dt) {
+        const std::size_t t = c_sat * chunk_size + dt;
+        const std::size_t base = (t * n_freq + f_sat) * n_elem;
+        for (int a = 0; a < num_active; ++a) {
+            h_voltages[base + active_raw[a]] = pack_int4x2_signed(7, 7);
+        }
+    }
+
     // Inject full-chunk telemetry burst in chunk 33 of channel 130
     for (std::size_t dt = 0; dt < chunk_size; ++dt) {
         const std::size_t t = c_burst * chunk_size + dt;
         const std::size_t base = (t * n_freq + f_burst) * n_elem;
         for (int a = 0; a < num_active; ++a) {
-            const int re = static_cast<int>(std::round(norm(rng) * 6.0f));
-            const int im = static_cast<int>(std::round(norm(rng) * 6.0f));
+            const int re = static_cast<int>(std::round(norm(rng) * 5.5f));
+            const int im = static_cast<int>(std::round(norm(rng) * 5.5f));
             h_voltages[base + active_raw[a]] = pack_int4x2_signed(re, im);
         }
     }
 
-    // Inject constant-envelope rotating CW tone on channel 210 (amplitude 6.0 -> |z|^2 = const -> SK -> 0)
+    // Inject constant-envelope rotating CW tone on channel 210
     for (std::size_t t = 0; t < n_time; ++t) {
         const float phase = 0.37f * static_cast<float>(t);
-        const int re = static_cast<int>(std::round(6.0f * std::cos(phase)));
-        const int im = static_cast<int>(std::round(6.0f * std::sin(phase)));
+        const int re = static_cast<int>(std::round(5.5f * std::cos(phase)));
+        const int im = static_cast<int>(std::round(5.5f * std::sin(phase)));
         const std::size_t base = (t * n_freq + f_cw) * n_elem;
         for (int a = 0; a < num_active; ++a) {
             h_voltages[base + active_raw[a]] = pack_int4x2_signed(re, im);
@@ -188,8 +212,8 @@ int main() {
     for (std::size_t t = 0; t < n_time; ++t) {
         const std::size_t base = (t * n_freq + f_narrow) * n_elem;
         for (int a = 0; a < num_active; ++a) {
-            const int re = static_cast<int>(std::round(norm(rng) * 5.8f));
-            const int im = static_cast<int>(std::round(norm(rng) * 5.8f));
+            const int re = static_cast<int>(std::round(norm(rng) * 5.0f));
+            const int im = static_cast<int>(std::round(norm(rng) * 5.0f));
             h_voltages[base + active_raw[a]] = pack_int4x2_signed(re, im);
         }
     }
@@ -206,10 +230,10 @@ int main() {
 
     cudaEventRecord(ev_start);
     launch_inspect_rfi_chunks(d_voltages, d_active_antennas, num_active, d_chunk_power, d_chunk_sk,
-                              n_time, n_freq, n_elem, chunk_size, 1, nullptr, false);
-    launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_static_notch, d_chunk_rfi_mask,
-                              d_channel_stats, n_chunks, n_freq, num_active, chunk_size, cfg,
-                              nullptr);
+                              d_chunk_sat_frac, n_time, n_freq, n_elem, chunk_size, 1, nullptr, false);
+    launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_chunk_sat_frac, d_static_notch,
+                              d_channel_gains, d_chunk_rfi_mask, d_channel_stats, n_chunks, n_freq,
+                              num_active, chunk_size, cfg, nullptr);
     launch_blank_rfi_chunks(d_voltages, d_chunk_rfi_mask, n_time, n_freq, n_elem, chunk_size,
                             nullptr, false);
     cudaEventRecord(ev_stop);
@@ -222,6 +246,7 @@ int main() {
     cudaMemcpy(h_mask.data(), d_chunk_rfi_mask, total_cells * sizeof(std::uint8_t), cudaMemcpyDeviceToHost);
 
     const std::uint8_t imp_flag = h_mask[c_impulsive * n_freq + f_impulsive];
+    const std::uint8_t sat_flag = h_mask[c_sat * n_freq + f_sat];
     const std::uint8_t burst_flag = h_mask[c_burst * n_freq + f_burst];
     const std::uint32_t cw_flags = h_stats[f_cw].flag_bits;
     const std::uint32_t narrow_flags = h_stats[f_narrow].flag_bits;
@@ -231,24 +256,27 @@ int main() {
     std::printf("  1. Sub-Chunk Impulsive Pulse (ch=%zu, chunk=%zu): max_SK=%.2f, flag=0x%02x (RFI_SK_IMPULSIVE=%d)\n",
                 f_impulsive, c_impulsive, h_stats[f_impulsive].max_sk, imp_flag,
                 (imp_flag & RFI_SK_IMPULSIVE) != 0);
-    std::printf("  2. Telemetry Chunk Burst     (ch=%zu, chunk=%zu): flag=0x%02x (RFI_TIME_BURST=%d)\n",
+    std::printf("  2. Quantizer Saturation Radar (ch=%zu, chunk=%zu): flag=0x%02x (RFI_SATURATION_CLIP=%d)\n",
+                f_sat, c_sat, sat_flag, (sat_flag & RFI_SATURATION_CLIP) != 0);
+    std::printf("  3. Telemetry Chunk Burst     (ch=%zu, chunk=%zu): flag=0x%02x (RFI_TIME_BURST=%d)\n",
                 f_burst, c_burst, burst_flag, (burst_flag & RFI_TIME_BURST) != 0);
-    std::printf("  3. Constant-Modulus CW Tone  (ch=%zu)          : mean_SK=%.3f, MAD_Z=%.1f, flags=0x%02x\n",
+    std::printf("  4. Constant-Modulus CW Tone  (ch=%zu)          : mean_SK=%.3f, MAD_Z=%.1f, flags=0x%02x\n",
                 f_cw, h_stats[f_cw].mean_sk, h_stats[f_cw].freq_mad_z, cw_flags);
-    std::printf("  4. Narrowband Noise Jammer   (ch=%zu)          : MAD_Z=%.1f, flagged_frac=%.2f, flags=0x%02x\n",
+    std::printf("  5. Narrowband Noise Jammer   (ch=%zu)          : MAD_Z=%.1f, flagged_frac=%.2f, flags=0x%02x\n",
                 f_narrow, h_stats[f_narrow].freq_mad_z, h_stats[f_narrow].flagged_chunk_fraction, narrow_flags);
-    std::printf("  5. Static Notch Band         (ch=%zu)          : flagged_frac=%.2f, flags=0x%02x\n",
+    std::printf("  6. Static Notch Band         (ch=%zu)          : flagged_frac=%.2f, flags=0x%02x\n",
                 f_notch, h_stats[f_notch].flagged_chunk_fraction, notch_flags);
 
-    if ((imp_flag & RFI_SK_IMPULSIVE) == 0 || (burst_flag & RFI_TIME_BURST) == 0
+    if ((imp_flag & RFI_SK_IMPULSIVE) == 0 || (sat_flag & RFI_SATURATION_CLIP) == 0
+        || (burst_flag & RFI_TIME_BURST) == 0
         || (cw_flags & (RFI_SK_CW_TONE | RFI_FREQ_MAD)) == 0
         || (narrow_flags & RFI_FREQ_MAD) == 0 || (notch_flags & RFI_STATIC_NOTCH) == 0) {
         std::printf("  Result: [FAILED] One or more RFI injections were not detected!\n");
         return 1;
     }
-    std::printf("  Result: [PASSED] 100%% detection across all 5 RFI classes!\n\n");
+    std::printf("  Result: [PASSED] 100%% detection across all 6 RFI classes!\n\n");
 
-    // >>> TEST 3: In-Place Blanking & Direct Beamformer Output Verification <<<
+    // >>> TEST 3: In-Place Blanking & Surgical Preservation <<<
     std::vector<int4x2_t> h_cleaned(frame_elems);
     cudaMemcpy(h_cleaned.data(), d_voltages, frame_elems * sizeof(int4x2_t), cudaMemcpyDeviceToHost);
 
@@ -261,7 +289,6 @@ int main() {
         }
     }
 
-    // Verify adjacent clean chunk (c_impulsive + 1) on same channel f_impulsive is untouched!
     long long clean_chunk_energy_after = 0;
     for (std::size_t dt = 0; dt < chunk_size; ++dt) {
         const std::size_t t = (c_impulsive + 1) * chunk_size + dt;
@@ -294,7 +321,9 @@ int main() {
     cudaFree(d_active_antennas);
     cudaFree(d_chunk_power);
     cudaFree(d_chunk_sk);
+    cudaFree(d_chunk_sat_frac);
     cudaFree(d_static_notch);
+    cudaFree(d_channel_gains);
     cudaFree(d_chunk_rfi_mask);
     cudaFree(d_channel_stats);
     return 0;

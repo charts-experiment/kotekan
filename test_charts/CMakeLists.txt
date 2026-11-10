@@ -24,6 +24,10 @@ if(CUDAToolkit_FOUND)
         ${CMAKE_CURRENT_SOURCE_DIR}/../external/gputils/src_lib
         ${CMAKE_CURRENT_SOURCE_DIR}/../external/gputils/src_include)
 
+    if(WIN32)
+        list(INSERT COMMON_INCLUDE_DIRS 0 ${CMAKE_CURRENT_SOURCE_DIR}/win_compat)
+    endif()
+
     # 1. Benchmark Kotekan CUDA Tracker V5
     add_executable(benchmark_kotekan_cuda_tracker_v5 benchmark_kotekan_cuda_tracker_v5.cpp
                                                      ${COMMON_TEST_SRCS})

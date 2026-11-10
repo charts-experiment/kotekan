@@ -97,6 +97,15 @@ cudaRfiMitigationCommand::cudaRfiMitigationCommand(Config& config, const std::st
     init_cfg.mad_sigma_threshold =
         config.get_default<float>(unique_name, "mad_sigma_threshold", 6.0f);
 
+    init_cfg.enable_saturation_check =
+        config.get_default<bool>(unique_name, "enable_saturation_check", true);
+    init_cfg.saturation_fraction_threshold =
+        config.get_default<float>(unique_name, "saturation_fraction_threshold", 0.02f);
+    init_cfg.enable_morphology_sir =
+        config.get_default<bool>(unique_name, "enable_morphology_sir", true);
+    init_cfg.edge_channels_to_ignore =
+        config.get_default<int>(unique_name, "edge_channels_to_ignore", 16);
+
     auto notch_flat =
         config.get_default<std::vector<double>>(unique_name, "static_notch_bands_mhz", {});
     for (std::size_t i = 0; i + 1 < notch_flat.size(); i += 2) {
@@ -148,6 +157,10 @@ cudaRfiMitigationCommand::cudaRfiMitigationCommand(Config& config, const std::st
                 reply["enable_freq_mad_check"] = cfg.enable_freq_mad_check;
                 reply["freq_window_half_width"] = cfg.freq_window_half_width;
                 reply["mad_sigma_threshold"] = cfg.mad_sigma_threshold;
+                reply["enable_saturation_check"] = cfg.enable_saturation_check;
+                reply["saturation_fraction_threshold"] = cfg.saturation_fraction_threshold;
+                reply["enable_morphology_sir"] = cfg.enable_morphology_sir;
+                reply["edge_channels_to_ignore"] = cfg.edge_channels_to_ignore;
 
                 int total_channels = 0;
                 int flagged_channels = 0;
@@ -231,31 +244,65 @@ cudaRfiMitigationCommand::cudaRfiMitigationCommand(Config& config, const std::st
                         if (j.contains("mad_sigma_threshold"))
                             _shared_config.mad_sigma_threshold =
                                 j["mad_sigma_threshold"].get<float>();
+                        if (j.contains("enable_saturation_check"))
+                            _shared_config.enable_saturation_check =
+                                j["enable_saturation_check"].get<bool>();
+                        if (j.contains("saturation_fraction_threshold"))
+                            _shared_config.saturation_fraction_threshold =
+                                j["saturation_fraction_threshold"].get<float>();
+                        if (j.contains("enable_morphology_sir"))
+                            _shared_config.enable_morphology_sir =
+                                j["enable_morphology_sir"].get<bool>();
+                        if (j.contains("edge_channels_to_ignore"))
+                            _shared_config.edge_channels_to_ignore =
+                                std::max<int>(0, j["edge_channels_to_ignore"].get<int>());
+
                         _config_generation++;
 
                         conn.send_text_reply(fmt::format(
                             "RFI mitigation updated: enabled={:s}, blank={:s}, sk_sigma={:.2f}, "
-                            "burst_sigma={:.2f}, mad_sigma={:.2f}\n",
+                            "burst_sigma={:.2f}, mad_sigma={:.2f}, sat_check={:s}\n",
                             _shared_config.enabled ? "true" : "false",
                             _shared_config.blank_voltages_enabled ? "true" : "false",
                             _shared_config.sk_sigma_threshold, _shared_config.burst_sigma_threshold,
-                            _shared_config.mad_sigma_threshold));
+                            _shared_config.mad_sigma_threshold,
+                            _shared_config.enable_saturation_check ? "true" : "false"));
                     } catch (const std::exception& e) {
-                        conn.send_error(e.what(), HTTP_RESPONSE::BAD_REQUEST);
+                        conn.send_text_reply(fmt::format("Error configuring RFI mitigation: {:s}\n",
+                                                         e.what()),
+                                             HTTP_RESPONSE::BAD_REQUEST);
+                    }
+                });
+
+            rest.register_post_callback(
+                "/rfi_mitigation/set_gains", [](connectionInstance& conn, nlohmann::json& j) {
+                    try {
+                        if (!j.contains("freq_start_hz") || !j.contains("gains")) {
+                            conn.send_text_reply("Missing freq_start_hz or gains in JSON\n",
+                                                 HTTP_RESPONSE::BAD_REQUEST);
+                            return;
+                        }
+                        const double f0 = j["freq_start_hz"].get<double>();
+                        const auto gains = j["gains"].get<std::vector<float>>();
+                        const bool ok = set_channel_gains_by_freq(f0, gains);
+                        if (ok) {
+                            conn.send_text_reply(fmt::format(
+                                "Updated {:zu} digital calibration gains for subband f0={:.1f} MHz\n",
+                                gains.size(), f0 * 1.0e-6));
+                        } else {
+                            conn.send_text_reply(fmt::format(
+                                "No active RFI instance matching freq_start_hz={:.1f} MHz\n",
+                                f0 * 1.0e-6),
+                                HTTP_RESPONSE::NOT_FOUND);
+                        }
+                    } catch (const std::exception& e) {
+                        conn.send_text_reply(fmt::format("Error setting gains: {:s}\n", e.what()),
+                                             HTTP_RESPONSE::BAD_REQUEST);
                     }
                 });
 
             _endpoints_registered = true;
         }
-    }
-
-    set_command_type(gpuCommandType::KERNEL);
-    set_name("cudaRfiMitigationCommand");
-
-    gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_voltage, true, true, true));
-    if (!_gpu_mem_rfi_mask.empty()) {
-        gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_rfi_mask, false, true, true));
-        device.register_gpu_memory_name(_gpu_mem_rfi_mask);
     }
 
     allocate_device_buffers();
@@ -274,7 +321,9 @@ void cudaRfiMitigationCommand::allocate_device_buffers() {
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_active_antennas, _num_elements * sizeof(int)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_chunk_power, n_cells * sizeof(float)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_chunk_sk, n_cells * sizeof(float)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_chunk_sat_frac, n_cells * sizeof(float)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_static_notch, _num_local_freq * sizeof(std::uint8_t)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_channel_gains, _num_local_freq * sizeof(float)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_chunk_rfi_mask, n_cells * sizeof(std::uint8_t)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_channel_stats, _num_local_freq * sizeof(RfiChannelStats)));
     CHECK_CUDA_ERROR_NON_OO(
@@ -282,6 +331,8 @@ void cudaRfiMitigationCommand::allocate_device_buffers() {
 
     CHECK_CUDA_ERROR_NON_OO(cudaMemset(_d_chunk_power, 0, n_cells * sizeof(float)));
     CHECK_CUDA_ERROR_NON_OO(cudaMemset(_d_chunk_sk, 0, n_cells * sizeof(float)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemset(_d_chunk_sat_frac, 0, n_cells * sizeof(float)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemset(_d_channel_gains, 0, _num_local_freq * sizeof(float)));
     CHECK_CUDA_ERROR_NON_OO(cudaMemset(_d_chunk_rfi_mask, 0, n_cells * sizeof(std::uint8_t)));
     CHECK_CUDA_ERROR_NON_OO(
         cudaMemset(_d_channel_stats, 0, _num_local_freq * sizeof(RfiChannelStats)));
@@ -311,9 +362,17 @@ void cudaRfiMitigationCommand::free_device_buffers() {
         cudaFree(_d_chunk_sk);
         _d_chunk_sk = nullptr;
     }
+    if (_d_chunk_sat_frac) {
+        cudaFree(_d_chunk_sat_frac);
+        _d_chunk_sat_frac = nullptr;
+    }
     if (_d_static_notch) {
         cudaFree(_d_static_notch);
         _d_static_notch = nullptr;
+    }
+    if (_d_channel_gains) {
+        cudaFree(_d_channel_gains);
+        _d_channel_gains = nullptr;
     }
     if (_d_chunk_rfi_mask) {
         cudaFree(_d_chunk_rfi_mask);
@@ -341,8 +400,29 @@ void cudaRfiMitigationCommand::rebuild_static_notch_mask(const RfiMitigationConf
         }
     }
     CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(_d_static_notch, h_notch.data(),
-                                       _num_local_freq * sizeof(std::uint8_t),
-                                       cudaMemcpyHostToDevice));
+                                        _num_local_freq * sizeof(std::uint8_t),
+                                        cudaMemcpyHostToDevice));
+}
+
+void cudaRfiMitigationCommand::set_local_channel_gains(const std::vector<float>& gains) {
+    const std::size_t n = std::min<std::size_t>(gains.size(), static_cast<std::size_t>(_num_local_freq));
+    if (n > 0 && _d_channel_gains != nullptr) {
+        CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(_d_channel_gains, gains.data(), n * sizeof(float),
+                                           cudaMemcpyHostToDevice));
+    }
+}
+
+bool cudaRfiMitigationCommand::set_channel_gains_by_freq(double freq_start_hz,
+                                                         const std::vector<float>& gains) {
+    std::lock_guard<std::mutex> lk(_global_mutex);
+    bool found = false;
+    for (auto* ptr : _instances) {
+        if (std::abs(ptr->get_freq_start_hz() - freq_start_hz) < 1.0e5) {
+            ptr->set_local_channel_gains(gains);
+            found = true;
+        }
+    }
+    return found;
 }
 
 RfiMitigationConfig cudaRfiMitigationCommand::get_config() {
@@ -358,24 +438,24 @@ void cudaRfiMitigationCommand::update_config(const RfiMitigationConfig& cfg) {
 
 cudaEvent_t cudaRfiMitigationCommand::execute(cudaPipelineState& /*pipestate*/,
                                               const std::vector<cudaEvent_t>&) {
-    pre_execute();
+    record_start_event();
 
-    const std::size_t frame_bytes = static_cast<std::size_t>(_num_elements)
+    cudaStream_t stream = get_cuda_stream();
+    const int gpu_frame_id = get_gpu_frame_id();
+
+    const std::size_t frame_bytes = static_cast<std::size_t>(_samples_per_data_set)
                                     * static_cast<std::size_t>(_num_local_freq)
-                                    * static_cast<std::size_t>(_samples_per_data_set)
+                                    * static_cast<std::size_t>(_num_elements)
                                     * sizeof(int4x2_t);
-    void* input_memory =
-        device.get_gpu_memory_array(_gpu_mem_voltage, gpu_frame_id, _gpu_buffer_depth, frame_bytes);
-    if (!input_memory) {
+
+    auto* d_voltages = reinterpret_cast<int4x2_t*>(
+        device.get_gpu_memory_array(_gpu_mem_voltage, gpu_frame_id, _gpu_buffer_depth, frame_bytes));
+    if (!d_voltages) {
         return record_end_event();
     }
 
-    record_start_event();
-    cudaStream_t stream = device.getStream(cuda_stream_id);
-    auto* d_voltages = reinterpret_cast<int4x2_t*>(input_memory);
-
     bool is_swapped_withoffset = false;
-    std::shared_ptr<metadataObject> meta =
+    auto meta =
         device.get_gpu_memory_array_metadata(_gpu_mem_voltage, gpu_frame_id);
     if (auto c_meta = std::dynamic_pointer_cast<chartsMetadata>(meta)) {
         if (c_meta->type == kotekan::int4x2_swapped_withoffset) {
@@ -425,16 +505,17 @@ cudaEvent_t cudaRfiMitigationCommand::execute(cudaPipelineState& /*pipestate*/,
         const std::size_t stride = std::max<std::size_t>(1, cfg.sample_stride);
         const std::size_t eff_m = (cfg.time_chunk_size + stride - 1) / stride;
 
-        // Pass 1: Per-(chunk, freq) scale-invariant Spectral Kurtosis and mean power
+        // Pass 1: Per-(chunk, freq) scale-invariant Spectral Kurtosis, mean power, and saturation
         launch_inspect_rfi_chunks(d_voltages, _d_active_antennas, num_active, _d_chunk_power,
-                                  _d_chunk_sk, static_cast<std::size_t>(_samples_per_data_set),
+                                  _d_chunk_sk, _d_chunk_sat_frac,
+                                  static_cast<std::size_t>(_samples_per_data_set),
                                   static_cast<std::size_t>(_num_local_freq),
                                   static_cast<std::size_t>(_num_elements), cfg.time_chunk_size,
                                   stride, stream, is_swapped_withoffset);
 
-        // Pass 2: Fused temporal burst MAD, sliding frequency passband MAD, and SK thresholding
-        launch_evaluate_rfi_flags(_d_chunk_power, _d_chunk_sk, _d_static_notch, _d_chunk_rfi_mask,
-                                  _d_channel_stats, _num_chunks,
+        // Pass 2: Fused temporal burst MAD, iterative outlier-rejected passband MAD, SK & saturation
+        launch_evaluate_rfi_flags(_d_chunk_power, _d_chunk_sk, _d_chunk_sat_frac, _d_static_notch,
+                                  _d_channel_gains, _d_chunk_rfi_mask, _d_channel_stats, _num_chunks,
                                   static_cast<std::size_t>(_num_local_freq), num_active, eff_m, cfg,
                                   stream);
 

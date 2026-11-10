@@ -51,8 +51,11 @@ public:
         return _last_channel_stats;
     }
 
+    void set_local_channel_gains(const std::vector<float>& gains);
+
     static RfiMitigationConfig get_config();
     static void update_config(const RfiMitigationConfig& cfg);
+    static bool set_channel_gains_by_freq(double freq_start_hz, const std::vector<float>& gains);
 
 private:
     void allocate_device_buffers();
@@ -82,7 +85,9 @@ private:
     int* _d_active_antennas = nullptr;
     float* _d_chunk_power = nullptr;
     float* _d_chunk_sk = nullptr;
+    float* _d_chunk_sat_frac = nullptr;
     std::uint8_t* _d_static_notch = nullptr;
+    float* _d_channel_gains = nullptr;
     std::uint8_t* _d_chunk_rfi_mask = nullptr;
     RfiChannelStats* _d_channel_stats = nullptr;
 
