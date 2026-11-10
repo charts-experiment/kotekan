@@ -268,9 +268,9 @@ cudaRfiMitigationCommand::cudaRfiMitigationCommand(Config& config, const std::st
                             _shared_config.mad_sigma_threshold,
                             _shared_config.enable_saturation_check ? "true" : "false"));
                     } catch (const std::exception& e) {
-                        conn.send_text_reply(fmt::format("Error configuring RFI mitigation: {:s}\n",
-                                                         e.what()),
-                                             HTTP_RESPONSE::BAD_REQUEST);
+                        conn.send_error(
+                            fmt::format("Error configuring RFI mitigation: {:s}\n", e.what()),
+                            HTTP_RESPONSE::BAD_REQUEST);
                     }
                 });
 
@@ -278,8 +278,8 @@ cudaRfiMitigationCommand::cudaRfiMitigationCommand(Config& config, const std::st
                 "/rfi_mitigation/set_gains", [](connectionInstance& conn, nlohmann::json& j) {
                     try {
                         if (!j.contains("freq_start_hz") || !j.contains("gains")) {
-                            conn.send_text_reply("Missing freq_start_hz or gains in JSON\n",
-                                                 HTTP_RESPONSE::BAD_REQUEST);
+                            conn.send_error("Missing freq_start_hz or gains in JSON\n",
+                                            HTTP_RESPONSE::BAD_REQUEST);
                             return;
                         }
                         const double f0 = j["freq_start_hz"].get<double>();
@@ -287,17 +287,17 @@ cudaRfiMitigationCommand::cudaRfiMitigationCommand(Config& config, const std::st
                         const bool ok = set_channel_gains_by_freq(f0, gains);
                         if (ok) {
                             conn.send_text_reply(fmt::format(
-                                "Updated {:zu} digital calibration gains for subband f0={:.1f} MHz\n",
-                                gains.size(), f0 * 1.0e-6));
+                                "Updated {:d} digital calibration gains for subband f0={:.1f} MHz\n",
+                                static_cast<int>(gains.size()), f0 * 1.0e-6));
                         } else {
-                            conn.send_text_reply(fmt::format(
+                            conn.send_error(fmt::format(
                                 "No active RFI instance matching freq_start_hz={:.1f} MHz\n",
                                 f0 * 1.0e-6),
                                 HTTP_RESPONSE::NOT_FOUND);
                         }
                     } catch (const std::exception& e) {
-                        conn.send_text_reply(fmt::format("Error setting gains: {:s}\n", e.what()),
-                                             HTTP_RESPONSE::BAD_REQUEST);
+                        conn.send_error(fmt::format("Error setting gains: {:s}\n", e.what()),
+                                        HTTP_RESPONSE::BAD_REQUEST);
                     }
                 });
 
@@ -438,10 +438,7 @@ void cudaRfiMitigationCommand::update_config(const RfiMitigationConfig& cfg) {
 
 cudaEvent_t cudaRfiMitigationCommand::execute(cudaPipelineState& /*pipestate*/,
                                               const std::vector<cudaEvent_t>&) {
-    record_start_event();
-
-    cudaStream_t stream = get_cuda_stream();
-    const int gpu_frame_id = get_gpu_frame_id();
+    pre_execute();
 
     const std::size_t frame_bytes = static_cast<std::size_t>(_samples_per_data_set)
                                     * static_cast<std::size_t>(_num_local_freq)
@@ -453,6 +450,9 @@ cudaEvent_t cudaRfiMitigationCommand::execute(cudaPipelineState& /*pipestate*/,
     if (!d_voltages) {
         return record_end_event();
     }
+
+    record_start_event();
+    cudaStream_t stream = device.getStream(cuda_stream_id);
 
     bool is_swapped_withoffset = false;
     auto meta =
