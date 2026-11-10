@@ -77,6 +77,9 @@ private:
 
     std::vector<int> _configured_active_raw;
     std::vector<int> _current_active_raw;
+    std::vector<int> _excision_exempt_freq_ids;
+    std::vector<std::uint8_t> _h_exempt_channels;
+    bool _exempt_resolved = false;
     std::uint64_t _applied_mask_gen = 0;
     std::uint64_t _applied_rfi_cfg_gen = 0;
     std::uint64_t _frame_counter = 0;
@@ -89,6 +92,7 @@ private:
     std::uint8_t* _d_static_notch = nullptr;
     float* _d_channel_gains = nullptr;
     std::uint8_t* _d_chunk_rfi_mask = nullptr;
+    std::uint8_t* _d_exempt_channels = nullptr;
     RfiChannelStats* _d_channel_stats = nullptr;
 
     // Pinned host telemetry buffer

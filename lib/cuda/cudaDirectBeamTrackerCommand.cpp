@@ -190,6 +190,8 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
         config.get_default<std::string>(unique_name, "gpu_mem_formed_beams", "formed_beams");
     _gpu_mem_beam_power =
         config.get_default<std::string>(unique_name, "gpu_mem_beam_power", "");
+    _gpu_mem_rfi_mask =
+        config.get_default<std::string>(unique_name, "gpu_mem_rfi_mask", "");
 
     const double site_lat_deg = config.get_default<double>(unique_name, "site_lat_deg",
                                                            charts::constants::charts_caren_lat_deg);
@@ -955,6 +957,9 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
         gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_beam_power, false, true, true));
         device.register_gpu_memory_name(_gpu_mem_beam_power);
     }
+    if (!_gpu_mem_rfi_mask.empty()) {
+        gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_rfi_mask, true, false, true));
+    }
 
     allocate_device_buffers();
 }
@@ -1536,11 +1541,25 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
 
     // Launch reduction kernel & copy to pinned host buffer
     if (_d_beam_power && _h_beam_power) {
+        const std::uint8_t* d_mask_ptr = nullptr;
+        if (!_gpu_mem_rfi_mask.empty()) {
+            const std::size_t n_chunks =
+                (_samples_per_data_set + _time_chunk_size - 1) / _time_chunk_size;
+            const std::size_t mask_bytes =
+                n_chunks * static_cast<std::size_t>(_num_local_freq) * sizeof(std::uint8_t);
+            void* mask_mem = device.get_gpu_memory_array(_gpu_mem_rfi_mask, gpu_frame_id,
+                                                         _gpu_buffer_depth, mask_bytes);
+            if (mask_mem) {
+                d_mask_ptr = reinterpret_cast<const std::uint8_t*>(mask_mem);
+            }
+        }
+
         launch_reduce_beam_power(reinterpret_cast<const float2*>(output_memory), _d_beam_power,
                                  static_cast<std::size_t>(_samples_per_data_set),
                                  static_cast<std::size_t>(_num_local_freq), active_beams,
                                  static_cast<std::size_t>(_max_beams), stream,
-                                 static_cast<std::size_t>(_num_pols));
+                                 static_cast<std::size_t>(_num_pols), d_mask_ptr,
+                                 _time_chunk_size);
 
         CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_h_beam_power, _d_beam_power,
                                                 static_cast<std::size_t>(_max_beams)

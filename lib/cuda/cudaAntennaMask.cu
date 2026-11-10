@@ -82,8 +82,8 @@ inspect_antenna_moments_kernel(
         local_im2 += static_cast<unsigned int>(i2);
         local_p2  += static_cast<unsigned int>(p * p);
 
-        local_clips += static_cast<std::uint32_t>((re == 7) | (re == -8))
-                     + static_cast<std::uint32_t>((im == 7) | (im == -8));
+        local_clips += static_cast<std::uint32_t>((re >= 7) | (re <= -7))
+                     + static_cast<std::uint32_t>((im >= 7) | (im <= -7));
     }
 
     // Intra-block reduction across BLOCK_SPEC rows in shared memory

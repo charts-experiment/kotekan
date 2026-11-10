@@ -1150,7 +1150,10 @@ __global__ void reduce_beam_power_kernel(
     std::size_t n_freq,
     std::size_t active_beams,
     std::size_t max_beams_stride,
-    std::size_t n_pol)
+    std::size_t n_pol,
+    const std::uint8_t* __restrict__ d_rfi_mask = nullptr,
+    std::size_t chunk_size = 256,
+    std::size_t n_chunks = 0)
 {
     const std::size_t b = blockIdx.x; // Beam index: 0 .. max_beams_stride - 1
     const std::size_t f = blockIdx.y; // Frequency index: 0 .. n_freq - 1
@@ -1203,7 +1206,20 @@ __global__ void reduce_beam_power_kernel(
             block_sum += __shfl_down_sync(0xffffffff, block_sum, offset);
         }
         if (lane == 0) {
-            const float inv_time = (n_time > 0) ? (1.0f / static_cast<float>(n_time)) : 0.0f;
+            float inv_time = 0.0f;
+            if (d_rfi_mask != nullptr && n_chunks > 0 && chunk_size > 0) {
+                std::size_t valid_samples = 0;
+                for (std::size_t c = 0; c < n_chunks; ++c) {
+                    if (d_rfi_mask[c * n_freq + f] == 0) {
+                        const std::size_t c_start = c * chunk_size;
+                        const std::size_t c_end = (c_start + chunk_size < n_time) ? (c_start + chunk_size) : n_time;
+                        valid_samples += (c_end > c_start) ? (c_end - c_start) : 0;
+                    }
+                }
+                inv_time = (valid_samples > 0) ? (1.0f / static_cast<float>(valid_samples)) : 0.0f;
+            } else {
+                inv_time = (n_time > 0) ? (1.0f / static_cast<float>(n_time)) : 0.0f;
+            }
             power[b * n_freq + f] = block_sum * inv_time;
         }
     }
@@ -1217,13 +1233,17 @@ void launch_reduce_beam_power(
     std::size_t active_beams,
     std::size_t max_beams_stride,
     cudaStream_t stream,
-    std::size_t n_pol)
+    std::size_t n_pol,
+    const std::uint8_t* d_rfi_mask,
+    std::size_t chunk_size)
 {
     if (max_beams_stride == 0 || n_freq == 0 || d_voltages == nullptr || d_power == nullptr) return;
     const dim3 grid(static_cast<unsigned int>(max_beams_stride), static_cast<unsigned int>(n_freq));
     constexpr int BLOCK_THREADS = 256;
+    const std::size_t n_chunks = (chunk_size > 0) ? ((n_time + chunk_size - 1) / chunk_size) : 0;
     reduce_beam_power_kernel<BLOCK_THREADS><<<grid, BLOCK_THREADS, 0, stream>>>(
-        d_voltages, d_power, n_time, n_freq, active_beams, max_beams_stride, n_pol);
+        d_voltages, d_power, n_time, n_freq, active_beams, max_beams_stride, n_pol,
+        d_rfi_mask, chunk_size, n_chunks);
 }
 
 } // namespace kotekan

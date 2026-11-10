@@ -55,6 +55,7 @@ int main() {
     std::printf("  - Total Elements      : %zu (Active calibrated subset: 4 corner elements [63, 59, 31, 27])\n", n_elem);
     std::printf("  - SK Time Chunk Size  : %zu samples (853.3 us, %zu chunks/frame)\n", chunk_size, n_chunks);
     std::printf("  - F-Engine Baseline   : 15-level quantizer [-7..+7], target q-RMS=3.5 (sigma_c ~ 1.20 LSB)\n\n");
+    std::fflush(stdout);
 
     const std::size_t frame_elems = n_time * n_freq * n_elem;
     std::vector<int4x2_t> h_voltages(frame_elems);
@@ -63,14 +64,19 @@ int main() {
     std::mt19937 rng(20261107);
     std::normal_distribution<float> norm(0.0f, 1.0f);
 
+    std::vector<float> passband_scale(n_freq);
+    for (std::size_t f = 0; f < n_freq; ++f) {
+        passband_scale[f] = 1.0f + 0.15f * std::sin(3.14159265f * float(f) / float(n_freq));
+    }
+
     // 1. Synthesize clean thermal noise with unequal per-antenna gains + realistic passband slope
     for (std::size_t t = 0; t < n_time; ++t) {
         for (std::size_t f = 0; f < n_freq; ++f) {
-            const float passband_scale = 1.0f + 0.15f * std::sin(3.14159265f * float(f) / float(n_freq));
+            const float pb_scale = passband_scale[f];
             const std::size_t base = (t * n_freq + f) * n_elem;
             for (int a = 0; a < num_active; ++a) {
                 const int raw_e = active_raw[a];
-                const float sig = ant_sigmas[a] * passband_scale;
+                const float sig = ant_sigmas[a] * pb_scale;
                 const int re = static_cast<int>(std::round(norm(rng) * sig));
                 const int im = static_cast<int>(std::round(norm(rng) * sig));
                 h_voltages[base + raw_e] = pack_int4x2_signed(re, im);
@@ -151,9 +157,11 @@ int main() {
                 100.0 * double(false_positives) / double(total_cells));
     if (std::abs(mean_thermal_sk - 0.95) > 0.08 || false_positives > 5) {
         std::printf("  Result: [FAILED]\n");
+        std::fflush(stdout);
         return 1;
     }
     std::printf("  Result: [PASSED] Scale-invariant per-antenna SK is immune to inter-antenna gain spread!\n\n");
+    std::fflush(stdout);
 
     // >>> TEST 2: Multi-Modal RFI Injection (Impulsive, Telemetry, CW, Narrowband, Notch) <<<
     const std::size_t f_impulsive = 45;  // Sub-chunk radar pulse in chunk 12
@@ -272,9 +280,11 @@ int main() {
         || (cw_flags & (RFI_SK_CW_TONE | RFI_FREQ_MAD)) == 0
         || (narrow_flags & RFI_FREQ_MAD) == 0 || (notch_flags & RFI_STATIC_NOTCH) == 0) {
         std::printf("  Result: [FAILED] One or more RFI injections were not detected!\n");
+        std::fflush(stdout);
         return 1;
     }
     std::printf("  Result: [PASSED] 100%% detection across all 6 RFI classes!\n\n");
+    std::fflush(stdout);
 
     // >>> TEST 3: In-Place Blanking & Surgical Preservation <<<
     std::vector<int4x2_t> h_cleaned(frame_elems);
@@ -307,9 +317,99 @@ int main() {
 
     if (imp_chunk_energy_after != 0 || clean_chunk_energy_after == 0) {
         std::printf("  Result: [FAILED] Blanking verification failed!\n");
+        std::fflush(stdout);
         return 1;
     }
     std::printf("  Result: [PASSED] Surgical chunk blanking verified at %.3f ms/frame!\n\n", elapsed_ms);
+    std::fflush(stdout);
+
+    // >>> TEST 4: Excision Exempt Channels & Beam Power Blanking Compensation <<<
+    std::vector<std::uint8_t> h_exempt(n_freq, 0);
+    h_exempt[f_burst] = 1; // Exempt channel 130 from blanking
+    std::uint8_t* d_exempt = nullptr;
+    cudaMalloc(&d_exempt, n_freq * sizeof(std::uint8_t));
+    cudaMemcpy(d_exempt, h_exempt.data(), n_freq * sizeof(std::uint8_t), cudaMemcpyHostToDevice);
+
+    launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_chunk_sat_frac, d_static_notch,
+                              d_channel_gains, d_chunk_rfi_mask, d_channel_stats, n_chunks, n_freq,
+                              num_active, chunk_size, cfg, nullptr, d_exempt);
+    cudaDeviceSynchronize();
+
+    cudaMemcpy(h_mask.data(), d_chunk_rfi_mask, total_cells * sizeof(std::uint8_t), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_stats.data(), d_channel_stats, n_freq * sizeof(RfiChannelStats), cudaMemcpyDeviceToHost);
+
+    const std::uint8_t exempt_chunk_flag = h_mask[c_burst * n_freq + f_burst];
+    const std::uint32_t exempt_chan_flags = h_stats[f_burst].flag_bits;
+
+    std::printf(">>> TEST 4: Excision Exempt Channels & Beam Power Blanking Compensation <<<\n");
+    std::printf("  1. Exempt Telemetry Channel (%zu): chunk_mask=0x%02x (Expected 0x00 / CLEAN), stats_flags=0x%02x (Expected TIME_BURST)\n",
+                f_burst, exempt_chunk_flag, exempt_chan_flags);
+
+    if (exempt_chunk_flag != RFI_CLEAN || (exempt_chan_flags & RFI_TIME_BURST) == 0) {
+        std::printf("  Result: [FAILED] Excision exempt channel handling failed!\n");
+        std::fflush(stdout);
+        return 1;
+    }
+
+    // Verify beam power reduction with blanking compensation
+    const std::size_t max_beams = 1;
+    const std::size_t n_pol = 1;
+    const std::size_t beam_samples = n_time * n_freq * max_beams * n_pol;
+    std::vector<float2> h_formed_beams(beam_samples);
+    const float true_pwr = 4.0f; // amplitude 2.0 -> |v|^2 = 4.0
+    for (std::size_t t = 0; t < n_time; ++t) {
+        for (std::size_t f = 0; f < n_freq; ++f) {
+            h_formed_beams[t * n_freq + f] = make_float2(2.0f, 0.0f);
+        }
+    }
+
+    // Blank 10 out of 60 chunks in channel 0 in the mask
+    std::vector<std::uint8_t> h_comp_mask(total_cells, 0);
+    const std::size_t f_test = 0;
+    const std::size_t blanked_chunks = 10;
+    for (std::size_t c = 0; c < blanked_chunks; ++c) {
+        h_comp_mask[c * n_freq + f_test] = RFI_TIME_BURST;
+    }
+    // Zero out those blanked chunk samples in formed beams
+    for (std::size_t c = 0; c < blanked_chunks; ++c) {
+        for (std::size_t dt = 0; dt < chunk_size; ++dt) {
+            const std::size_t t = c * chunk_size + dt;
+            h_formed_beams[t * n_freq + f_test] = make_float2(0.0f, 0.0f);
+        }
+    }
+
+    float2* d_formed = nullptr;
+    float* d_power = nullptr;
+    std::uint8_t* d_comp_mask = nullptr;
+    cudaMalloc(&d_formed, beam_samples * sizeof(float2));
+    cudaMalloc(&d_power, max_beams * n_freq * sizeof(float));
+    cudaMalloc(&d_comp_mask, total_cells * sizeof(std::uint8_t));
+
+    cudaMemcpy(d_formed, h_formed_beams.data(), beam_samples * sizeof(float2), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_comp_mask, h_comp_mask.data(), total_cells * sizeof(std::uint8_t), cudaMemcpyHostToDevice);
+
+    launch_reduce_beam_power(d_formed, d_power, n_time, n_freq, 1, 1, nullptr, 1, d_comp_mask, chunk_size);
+    cudaDeviceSynchronize();
+
+    std::vector<float> h_reduced_power(n_freq);
+    cudaMemcpy(h_reduced_power.data(), d_power, n_freq * sizeof(float), cudaMemcpyDeviceToHost);
+
+    const float measured_pwr = h_reduced_power[f_test];
+    std::printf("  2. Blanking Compensated Power on ch=%zu (%zu/60 chunks blanked): %.4f (Expected %.4f, Uncompensated would be %.4f)\n",
+                f_test, blanked_chunks, measured_pwr, true_pwr, true_pwr * (50.0f / 60.0f));
+
+    if (std::abs(measured_pwr - true_pwr) > 1e-3f) {
+        std::printf("  Result: [FAILED] Beam power blanking compensation failed!\n");
+        std::fflush(stdout);
+        return 1;
+    }
+    std::printf("  Result: [PASSED] Exempt channels and beam power blanking compensation verified!\n\n");
+    std::fflush(stdout);
+
+    cudaFree(d_exempt);
+    cudaFree(d_formed);
+    cudaFree(d_power);
+    cudaFree(d_comp_mask);
 
     std::printf("====================================================================================================\n");
     std::printf(" RFI MITIGATION STAGE TEST RESULT: ALL TESTS PASSED (100%% OPERATIONAL)\n");

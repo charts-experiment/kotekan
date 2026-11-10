@@ -4,6 +4,7 @@
 #include "chartsMetadata.hpp"
 #include "chordMetadata.hpp"
 #include "cudaDirectBeamTrackerCommand.hpp"
+#include "cudaRfiMitigationCommand.hpp"
 #include "cudaUtils.hpp"
 #include "gpuCommand.hpp"
 #include "kotekanLogging.hpp"
@@ -150,7 +151,7 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
         _shared_config.sample_stride =
             static_cast<std::size_t>(config.get_default<int>(unique_name, "sample_stride", 1));
         _shared_config.auto_detect_cadence_frames = static_cast<std::size_t>(
-            config.get_default<int>(unique_name, "auto_detect_cadence_frames", 1));
+            config.get_default<int>(unique_name, "auto_detect_cadence_frames", 10));
 
         _shared_mask.fill(1);
         _shared_config.manual_mask.fill(1);
@@ -987,6 +988,7 @@ cudaEvent_t cudaAntennaMaskCommand::execute(cudaPipelineState& /*pipestate*/,
         std::vector<std::uint8_t> candidate_mask(_num_elements, 1);
 
         if (is_authoritative_subband && (!run_coherence || num_valid_freqs > 0)) {
+            const bool rfi_mitigation_active = cudaRfiMitigationCommand::get_config().enabled;
             for (int a = 0; a < _num_elements; ++a) {
                 const std::size_t pol = current_cfg.raw_elem_to_pol(a) & 1U;
                 const float ref_p =
@@ -1042,8 +1044,10 @@ cudaEvent_t cudaAntennaMaskCommand::execute(cudaPipelineState& /*pipestate*/,
                            && (m.kurtosis >= _shared_config.max_kurtosis_threshold
                                || m.kurtosis <= _shared_config.min_kurtosis_threshold)) {
                     m.status = AntennaHealthStatus::RFI_KURTOSIS;
-                    m.consecutive_healthy = 0;
-                    new_mask_val = 0;
+                    if (!rfi_mitigation_active) {
+                        m.consecutive_healthy = 0;
+                        new_mask_val = 0;
+                    }
                 } else if (_shared_config.enable_mad_outlier_check
                            && z_score >= _shared_config.mad_sigma_threshold) {
                     m.status = AntennaHealthStatus::OUTLIER_POWER;

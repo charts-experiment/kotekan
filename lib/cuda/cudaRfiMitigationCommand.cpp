@@ -4,6 +4,7 @@
 #include "chartsMetadata.hpp"
 #include "chordMetadata.hpp"
 #include "cudaAntennaMaskCommand.hpp"
+#include "cudaDirectBeamTrackerCommand.hpp"
 #include "cudaUtils.hpp"
 #include "gpuCommand.hpp"
 #include "kotekanLogging.hpp"
@@ -71,6 +72,21 @@ cudaRfiMitigationCommand::cudaRfiMitigationCommand(Config& config, const std::st
         }
     }
     _current_active_raw = _configured_active_raw;
+
+    _excision_exempt_freq_ids = config.get_default<std::vector<int>>(
+        unique_name, "rfi_first_stage_excision_exempt_freq_ids", {});
+    if (_excision_exempt_freq_ids.empty()) {
+        _excision_exempt_freq_ids = config.get_default<std::vector<int>>(
+            unique_name, "rfi_excision_exempt_freq_ids", {});
+    }
+    auto exempt_chans = config.get_default<std::vector<int>>(
+        unique_name, "rfi_excision_exempt_local_freqs", {});
+    _h_exempt_channels.assign(static_cast<std::size_t>(_num_local_freq), 0);
+    for (int ch : exempt_chans) {
+        if (ch >= 0 && ch < _num_local_freq) {
+            _h_exempt_channels[ch] = 1;
+        }
+    }
 
     RfiMitigationConfig init_cfg;
     init_cfg.enabled = config.get_default<bool>(unique_name, "enabled", true);
@@ -305,6 +321,14 @@ cudaRfiMitigationCommand::cudaRfiMitigationCommand(Config& config, const std::st
         }
     }
 
+    set_command_type(gpuCommandType::KERNEL);
+    set_name("cudaRfiMitigationCommand");
+    gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_voltage, true, true, true));
+    if (!_gpu_mem_rfi_mask.empty()) {
+        gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_rfi_mask, false, true, true));
+        device.register_gpu_memory_name(_gpu_mem_rfi_mask);
+    }
+
     allocate_device_buffers();
 }
 
@@ -326,6 +350,7 @@ void cudaRfiMitigationCommand::allocate_device_buffers() {
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_channel_gains, _num_local_freq * sizeof(float)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_chunk_rfi_mask, n_cells * sizeof(std::uint8_t)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_channel_stats, _num_local_freq * sizeof(RfiChannelStats)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_exempt_channels, _num_local_freq * sizeof(std::uint8_t)));
     CHECK_CUDA_ERROR_NON_OO(
         cudaMallocHost(&_h_channel_stats, _num_local_freq * sizeof(RfiChannelStats)));
 
@@ -334,6 +359,9 @@ void cudaRfiMitigationCommand::allocate_device_buffers() {
     CHECK_CUDA_ERROR_NON_OO(cudaMemset(_d_chunk_sat_frac, 0, n_cells * sizeof(float)));
     CHECK_CUDA_ERROR_NON_OO(cudaMemset(_d_channel_gains, 0, _num_local_freq * sizeof(float)));
     CHECK_CUDA_ERROR_NON_OO(cudaMemset(_d_chunk_rfi_mask, 0, n_cells * sizeof(std::uint8_t)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(_d_exempt_channels, _h_exempt_channels.data(),
+                                       _num_local_freq * sizeof(std::uint8_t),
+                                       cudaMemcpyHostToDevice));
     CHECK_CUDA_ERROR_NON_OO(
         cudaMemset(_d_channel_stats, 0, _num_local_freq * sizeof(RfiChannelStats)));
     for (int f = 0; f < _num_local_freq; ++f) {
@@ -377,6 +405,10 @@ void cudaRfiMitigationCommand::free_device_buffers() {
     if (_d_chunk_rfi_mask) {
         cudaFree(_d_chunk_rfi_mask);
         _d_chunk_rfi_mask = nullptr;
+    }
+    if (_d_exempt_channels) {
+        cudaFree(_d_exempt_channels);
+        _d_exempt_channels = nullptr;
     }
     if (_d_channel_stats) {
         cudaFree(_d_channel_stats);
@@ -461,6 +493,25 @@ cudaEvent_t cudaRfiMitigationCommand::execute(cudaPipelineState& /*pipestate*/,
         if (c_meta->type == kotekan::int4x2_swapped_withoffset) {
             is_swapped_withoffset = true;
         }
+        if (c_meta->has_coarse_freq()) {
+            const auto cf = c_meta->get_coarse_freq();
+            if (!cf.empty()) {
+                _freq_start_hz = charts::constants::charts_frequency_start_hz
+                                 + static_cast<double>(cf.front()) * _freq_step_hz;
+                if (!_excision_exempt_freq_ids.empty() && !_exempt_resolved && _d_exempt_channels != nullptr) {
+                    for (int f = 0; f < _num_local_freq && f < static_cast<int>(cf.size()); ++f) {
+                        if (std::find(_excision_exempt_freq_ids.begin(), _excision_exempt_freq_ids.end(), cf[f])
+                            != _excision_exempt_freq_ids.end()) {
+                            _h_exempt_channels[f] = 1;
+                        }
+                    }
+                    CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_d_exempt_channels, _h_exempt_channels.data(),
+                                                            _num_local_freq * sizeof(std::uint8_t),
+                                                            cudaMemcpyHostToDevice, stream));
+                    _exempt_resolved = true;
+                }
+            }
+        }
     } else if (auto ch_meta = std::dynamic_pointer_cast<chordMetadata>(meta)) {
         if (ch_meta->type == kotekan::int4x2_swapped_withoffset) {
             is_swapped_withoffset = true;
@@ -480,13 +531,20 @@ cudaEvent_t cudaRfiMitigationCommand::execute(cudaPipelineState& /*pipestate*/,
         _applied_rfi_cfg_gen = cfg_gen;
     }
 
-    // Sync active antenna mask from cudaAntennaMaskCommand if updated
+    // Sync active antenna mask from cudaAntennaMaskCommand and tracker calibration mask
     const auto mask_cfg = cudaAntennaMaskCommand::get_config();
-    if (_applied_mask_gen != mask_cfg.mask_generation) {
-        const auto mask = cudaAntennaMaskCommand::get_current_mask();
+    const auto tracker_cfg = cudaDirectBeamTrackerCommand::get_shared_config();
+    const std::uint64_t combined_gen = mask_cfg.mask_generation ^ (tracker_cfg.mask_generation << 16);
+    if (_applied_mask_gen != combined_gen) {
+        const auto ant_mask = cudaAntennaMaskCommand::get_current_mask();
+        const auto tracker_mask = cudaDirectBeamTrackerCommand::get_shared_antenna_mask();
         std::vector<int> alive;
         for (int r = 0; r < _num_elements && r < static_cast<int>(MAX_RFI_ANTENNAS); ++r) {
-            if (mask[static_cast<std::size_t>(r)] != 0) {
+            bool is_alive = (ant_mask[static_cast<std::size_t>(r)] != 0);
+            if (tracker_cfg.calibration_mask_initialized) {
+                is_alive = is_alive && (tracker_mask[static_cast<std::size_t>(r)] != 0);
+            }
+            if (is_alive) {
                 alive.push_back(r);
             }
         }
@@ -497,7 +555,7 @@ cudaEvent_t cudaRfiMitigationCommand::execute(cudaPipelineState& /*pipestate*/,
         CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_d_active_antennas, _current_active_raw.data(),
                                                 _current_active_raw.size() * sizeof(int),
                                                 cudaMemcpyHostToDevice, stream));
-        _applied_mask_gen = mask_cfg.mask_generation;
+        _applied_mask_gen = combined_gen;
     }
 
     if (cfg.enabled && !_current_active_raw.empty()) {
@@ -517,7 +575,7 @@ cudaEvent_t cudaRfiMitigationCommand::execute(cudaPipelineState& /*pipestate*/,
         launch_evaluate_rfi_flags(_d_chunk_power, _d_chunk_sk, _d_chunk_sat_frac, _d_static_notch,
                                   _d_channel_gains, _d_chunk_rfi_mask, _d_channel_stats, _num_chunks,
                                   static_cast<std::size_t>(_num_local_freq), num_active, eff_m, cfg,
-                                  stream);
+                                  stream, _d_exempt_channels);
 
         // Pass 3: Optional in-place voltage blanking of flagged (chunk, freq) cells
         if (cfg.blank_voltages_enabled) {

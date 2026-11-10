@@ -199,7 +199,7 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
     float sk_sigma_unit, bool enable_sk, float sk_sigma_thresh, bool enable_burst,
     float burst_sigma_thresh, bool enable_freq_mad, int freq_win_half, float mad_sigma_thresh,
     bool enable_saturation_check, float sat_fraction_thresh, bool enable_morphology_sir,
-    int edge_channels_to_ignore) {
+    int edge_channels_to_ignore, const std::uint8_t* __restrict__ d_exempt_channels) {
 
     __shared__ float s_chan_med[MAX_SHARED_FREQ];
     __shared__ float s_chan_mad[MAX_SHARED_FREQ];
@@ -343,6 +343,7 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
         }
 
         const bool is_static_notch = (d_static_notch != nullptr && d_static_notch[f] != 0);
+        const bool is_exempt = (d_exempt_channels != nullptr && d_exempt_channels[f] != 0);
 
         // Effective SK standard error bounded by both theoretical and empirical temporal MAD
         const float eff_sk_unit = fmaxf(sk_sigma_unit, fmaxf(s_chan_mad_sk[f], 0.025f));
@@ -395,7 +396,7 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
                 }
             }
 
-            d_chunk_rfi_mask[idx] = mask_bits;
+            d_chunk_rfi_mask[idx] = is_exempt ? RFI_CLEAN : mask_bits;
             if (mask_bits != RFI_CLEAN) {
                 flagged_chunks++;
                 chan_flag_bits |= static_cast<std::uint32_t>(mask_bits);
@@ -403,7 +404,7 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
         }
 
         // 1D Temporal SIR / Morphology Dilation: expand flags to neighboring chunks with elevated power
-        if (enable_morphology_sir && n_chunks >= 3) {
+        if (!is_exempt && enable_morphology_sir && n_chunks >= 3) {
             for (std::size_t c = 0; c < n_chunks; ++c) {
                 const std::size_t idx = c * n_freq + static_cast<std::size_t>(f);
                 if (d_chunk_rfi_mask[idx] & (RFI_TIME_BURST | RFI_SK_IMPULSIVE | RFI_SATURATION_CLIP)) {
@@ -529,7 +530,8 @@ void launch_evaluate_rfi_flags(const float* __restrict__ d_chunk_power,
                                RfiChannelStats* __restrict__ d_channel_stats, std::size_t n_chunks,
                                std::size_t n_freq, int num_active_antennas,
                                std::size_t eff_samples_per_chunk, const RfiMitigationConfig& cfg,
-                               cudaStream_t stream) {
+                               cudaStream_t stream,
+                               const std::uint8_t* __restrict__ d_exempt_channels) {
     if (d_chunk_power == nullptr || d_chunk_sk == nullptr || d_chunk_rfi_mask == nullptr
         || n_chunks == 0 || n_freq == 0) {
         return;
@@ -546,7 +548,7 @@ void launch_evaluate_rfi_flags(const float* __restrict__ d_chunk_power,
         cfg.sk_sigma_threshold, cfg.enable_time_burst_check, cfg.burst_sigma_threshold,
         cfg.enable_freq_mad_check, cfg.freq_window_half_width, cfg.mad_sigma_threshold,
         cfg.enable_saturation_check, cfg.saturation_fraction_threshold, cfg.enable_morphology_sir,
-        cfg.edge_channels_to_ignore);
+        cfg.edge_channels_to_ignore, d_exempt_channels);
 }
 
 void launch_blank_rfi_chunks(int4x2_t* __restrict__ d_voltages,
