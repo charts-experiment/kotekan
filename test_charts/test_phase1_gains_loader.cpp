@@ -3,6 +3,7 @@
 #include <vector>
 #include <complex>
 #include <cmath>
+#undef NDEBUG
 #include <cassert>
 #include <fstream>
 #include <cstring>

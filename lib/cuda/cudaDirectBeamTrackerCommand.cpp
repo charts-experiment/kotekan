@@ -693,13 +693,8 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                 using namespace std::chrono;
                 double unix_s =
                     duration_cast<duration<double>>(system_clock::now().time_since_epoch()).count();
-                const double d = unix_s / 86400.0 - 10957.5;
-                double gmst = std::fmod(18.697374558 + 24.06570982441908 * d, 24.0);
-                if (gmst < 0.0)
-                    gmst += 24.0;
-                double cur_lst = std::fmod(gmst + group->config.site.lon_deg / 15.0, 24.0);
-                if (cur_lst < 0.0)
-                    cur_lst += 24.0;
+                double cur_lst =
+                    charts::constants::lst_hours_from_unix(unix_s, group->config.site.lon_deg);
                 reply["current_utc_timestamp"] = unix_s;
                 reply["current_lst_hours"] = cur_lst;
 
@@ -1062,9 +1057,9 @@ void cudaDirectBeamTrackerCommand::upload_calibration_gains(const DirectBeamTrac
     }
 
     INFO_NON_OO("Direct Beam Tracker: calibration gains from {:s} (rows {:d}-{:d}, "
-                "{:d} (channel, element) pairs dropped)",
+                "conjugate={}, {:d} (channel, element) pairs dropped)",
                 _gains_file, _gains_first_channel, _gains_first_channel + _num_local_freq - 1,
-                dropped);
+                _conjugate_gains, dropped);
 }
 
 void cudaDirectBeamTrackerCommand::allocate_device_buffers() {

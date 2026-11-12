@@ -186,14 +186,14 @@ size_t chartsMetadata::set_from_bytes(const char* bytes, [[maybe_unused]] size_t
 
     offset = fmt->offset;
 
-    if (fmt->nfreq > 0) {
+    if (fmt->nfreq > 0 && fmt->nfreq <= CHARTS_META_MAX_FREQ) {
         set_coarse_freq(std::vector<int>(fmt->coarse_freq, fmt->coarse_freq + fmt->nfreq));
     }
 
     if (fmt->lost_timesamples != -1)
         set_lost_timesamples(fmt->lost_timesamples);
 
-    if (fmt->first_packet_recv_time.tv_sec != 0) // sometime in 1970
+    if (fmt->first_packet_recv_time.tv_sec != 0 || fmt->first_packet_recv_time.tv_usec != 0)
         this->set_first_packet_recv_time(fmt->first_packet_recv_time);
 
     if (fmt->time0_fpga != 0)
@@ -213,8 +213,9 @@ nlohmann::json chartsMetadata::to_json() {
     j["type"] = type;
     j["offset"] = offset;
 
-    j["dim"] = std::vector<int>(dim, dim + dims);
-    j["stride"] = std::vector<int64_t>(stride, stride + dims);
+    const int ndims = std::min(std::max(dims, 0), CHARTS_META_MAX_DIM);
+    j["dim"] = std::vector<int>(dim, dim + ndims);
+    j["stride"] = std::vector<int64_t>(stride, stride + ndims);
 
     if (has_fpga_seq_num())
         j["fpga_seq_num"] = get_fpga_seq_num();

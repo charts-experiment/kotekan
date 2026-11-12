@@ -264,15 +264,8 @@ cudaBeamTrackerCommand::cudaBeamTrackerCommand(Config& config, const std::string
 
                         if (!j.contains("lst_hours") && j.contains("unix_timestamp_s")) {
                             const double unix_s = j["unix_timestamp_s"];
-                            const double d = unix_s / 86400.0 - 10957.5;
-                            double gmst_hours =
-                                std::fmod(18.697374558 + 24.06570982441908 * d, 24.0);
-                            if (gmst_hours < 0.0)
-                                gmst_hours += 24.0;
-                            lst_hours =
-                                std::fmod(gmst_hours + _shared_config.site.lon_deg / 15.0, 24.0);
-                            if (lst_hours < 0.0)
-                                lst_hours += 24.0;
+                            lst_hours = charts::constants::lst_hours_from_unix(
+                                unix_s, _shared_config.site.lon_deg);
                         }
 
                         std::lock_guard<std::mutex> lk(_global_mutex);
