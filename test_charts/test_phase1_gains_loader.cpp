@@ -6,6 +6,7 @@
 #include <cassert>
 #include <fstream>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 
 // Helper to write a simple .npy file (C-order, little-endian complex128)
@@ -324,6 +325,35 @@ int main() {
             // Non-redundant UV coverage: Baselines available are 0.6m, 3.0m, 3.6m, 4.2m
             std::cout << "   Physical 1D East-West Baselines: {0.6, 3.0, 3.6, 4.2}m verified [PASS]\n";
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // 5. Voltage-Domain Gains Toggle (conjugate_gains = true vs false)
+    // -------------------------------------------------------------------------
+    std::cout << "5. Testing conjugate_gains toggle (format-1 vs voltage-domain .npy)...\n";
+    {
+        const std::string tmp_conj =
+            (std::filesystem::temp_directory_path() / "test_gains_conjugate_toggle.npy").string();
+        std::vector<std::complex<double>> raw_vals = {
+            std::complex<double>(2.0, 3.0),
+            std::complex<double>(-1.5, 0.25),
+            std::complex<double>(0.5, -2.0),
+            std::complex<double>(4.0, 0.0),
+        };
+        write_test_npy(tmp_conj, 1, 4, raw_vals);
+
+        const auto conj_true =
+            charts_mvdr::load_gains_npy(tmp_conj, 0, 1, 64, active_antennas, true);
+        const auto conj_false =
+            charts_mvdr::load_gains_npy(tmp_conj, 0, 1, 64, active_antennas, false);
+
+        for (std::size_t idx = 0; idx < active_antennas.size(); ++idx) {
+            const int ant = active_antennas[idx];
+            assert(std::abs(conj_true[ant] - std::conj(raw_vals[idx])) < 1e-12);
+            assert(std::abs(conj_false[ant] - raw_vals[idx]) < 1e-12);
+        }
+        std::filesystem::remove(tmp_conj);
+        std::cout << "   conjugate_gains=true conjugates, conjugate_gains=false preserves [PASS]\n";
     }
 
     std::cout << "\n========================================================\n";

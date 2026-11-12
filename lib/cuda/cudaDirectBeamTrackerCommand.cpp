@@ -217,6 +217,7 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
         static_cast<int>(std::lround(
             (_freq_start_hz - charts::constants::subband0_freq_start_hz) / _freq_step_hz)));
     _gains_antennas = config.get_default<std::vector<int>>(unique_name, "gains_antennas", {});
+    _conjugate_gains = config.get_default<bool>(unique_name, "conjugate_gains", true);
 
     std::shared_ptr<TrackerGroup> group;
     {
@@ -292,16 +293,10 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                 double lst_hours = config.get_default<double>(unique_name, lst_key, -1.0);
                 if (lst_hours < 0.0) {
                     using namespace std::chrono;
-                    double unix_s =
+                    const double unix_s =
                         duration_cast<duration<double>>(system_clock::now().time_since_epoch())
                             .count();
-                    const double d = unix_s / 86400.0 - 10957.5;
-                    double gmst_hours = std::fmod(18.697374558 + 24.06570982441908 * d, 24.0);
-                    if (gmst_hours < 0.0)
-                        gmst_hours += 24.0;
-                    lst_hours = std::fmod(gmst_hours + site_lon_deg / 15.0, 24.0);
-                    if (lst_hours < 0.0)
-                        lst_hours += 24.0;
+                    lst_hours = charts::constants::lst_hours_from_unix(unix_s, site_lon_deg);
                 }
                 compute_celestial_direction(ra_deg, dec_deg, lst_hours, site_lat_deg,
                                             group->config.targets[b].direction);
@@ -491,13 +486,8 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                                          system_clock::now().time_since_epoch())
                                          .count();
                         }
-                        const double d = unix_s / 86400.0 - 10957.5;
-                        double gmst = std::fmod(18.697374558 + 24.06570982441908 * d, 24.0);
-                        if (gmst < 0.0)
-                            gmst += 24.0;
-                        lst_hours = std::fmod(gmst + group->config.site.lon_deg / 15.0, 24.0);
-                        if (lst_hours < 0.0)
-                            lst_hours += 24.0;
+                        lst_hours = charts::constants::lst_hours_from_unix(
+                            unix_s, group->config.site.lon_deg);
                     }
 
                     const double frame_duration_s =
@@ -1000,7 +990,7 @@ void cudaDirectBeamTrackerCommand::upload_calibration_gains(const DirectBeamTrac
     // zero gains drop the element (corrector 0).
     const auto gains = charts_mvdr::load_gains_npy(_gains_file, _gains_first_channel,
                                                    _num_local_freq, _num_antennas,
-                                                   _gains_antennas);
+                                                   _gains_antennas, _conjugate_gains);
     std::vector<int> elem_to_ant(static_cast<std::size_t>(_num_elements));
     for (int r = 0; r < _num_elements; ++r)
         elem_to_ant[r] = static_cast<int>(cfg.raw_elem_to_physical_ant(r));

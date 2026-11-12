@@ -146,10 +146,11 @@ private:
     float* _d_norm_taper = nullptr;
     float2* _d_calibration_gains = nullptr;
 
-    // Complex antenna gains (charts-utils .npy, x_obs = g x; conjugated on load); empty: none
+    // Complex antenna gains (charts-utils .npy, x_obs = g x; conjugated on load when enabled); empty: none
     std::string _gains_file;
     int32_t _gains_first_channel = 0;
     std::vector<int> _gains_antennas;
+    bool _conjugate_gains = true;
 
     // Power reduction buffers
     float* _d_beam_power = nullptr;

@@ -114,7 +114,8 @@ LoadingRef parse_loading_ref(const std::string& name) {
 
 std::vector<cplx> load_gains_npy(const std::string& path, int first_channel, int num_freq,
                                  int num_elements,
-                                 const std::vector<int>& antenna_subset) {
+                                 const std::vector<int>& antenna_subset,
+                                 bool conjugate_gains) {
     std::ifstream in(path, std::ios::binary);
     if (!in)
         throw std::runtime_error("charts_mvdr: cannot open gains file " + path);
@@ -208,9 +209,11 @@ std::vector<cplx> load_gains_npy(const std::string& path, int first_channel, int
                 in.read(reinterpret_cast<char*>(re_im), 16);
                 val = cplx(re_im[0], re_im[1]);
             }
-            // File: charts-utils convention (x = conj(v)); returned: voltage domain.
+            // File: charts-utils convention (x = conj(v)) when conjugate_gains is true,
+            // or voltage domain (v_obs = g v) directly when false.
             const int ant = col_map[c];
-            out[static_cast<std::size_t>(f) * num_elements + ant] = std::conj(val);
+            out[static_cast<std::size_t>(f) * num_elements + ant] =
+                conjugate_gains ? std::conj(val) : val;
         }
     }
     if (!in)

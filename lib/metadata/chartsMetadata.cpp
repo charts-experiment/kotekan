@@ -154,6 +154,9 @@ size_t chartsMetadata::serialize(char* bytes) {
 
     fmt->lost_timesamples = has_lost_timesamples() ? get_lost_timesamples() : -1;
 
+    fmt->first_packet_recv_time =
+        has_first_packet_recv_time() ? get_first_packet_recv_time() : timeval{0, 0};
+
     fmt->time0_fpga = has_time0_fpga() ? get_time0_fpga() : 0;
 
 
@@ -217,10 +220,14 @@ nlohmann::json chartsMetadata::to_json() {
         j["fpga_seq_num"] = get_fpga_seq_num();
     if (has_frame_counter())
         j["frame_counter"] = get_frame_counter();
+    if (has_time_downsampling_fpga())
+        j["time_downsampling_fpga"] = get_time_downsampling_fpga();
     if (has_coarse_freq())
         j["coarse_freq"] = get_coarse_freq();
     if (has_lost_timesamples())
         j["lost_timesamples"] = get_lost_timesamples();
+    if (has_first_packet_recv_time())
+        j["first_packet_recv_time"] = get_first_packet_recv_time();
     if (has_time0_fpga())
         j["time0_fpga"] = get_time0_fpga();
     return j;
