@@ -101,15 +101,15 @@ DEFAULT_NFFT: int = FPGA_NUM_SAMP_FFT
 NFFT: int = FPGA_NUM_SAMP_FFT
 
 CHARTS_CHANNEL_WIDTH_HZ: float = float(
-    _get_external("CHARTS_CHANNEL_WIDTH_HZ", 300_000.0)
+    _get_external("FPGA_FREQUENCY_HZ", 300_000.0)
 )
 CHARTS_CHANNEL_WIDTH_MHZ: float = float(_get_external("CHARTS_CHANNEL_WIDTH_MHZ", 0.3))
 CHANNEL_WIDTH_MHZ: float = CHARTS_CHANNEL_WIDTH_MHZ
 
-FPGA_TIME_RESOLUTION_US: float = float(
-    _get_external("FPGA_TIME_RESOLUTION_US", 10.0 / 3.0)
+FPGA_TIME_RESOLUTION_S: float = float(
+    _get_external("DELTA_TIME", 1.0e-5 / 3.0)
 )
-FPGA_TIME_RESOLUTION_S: float = FPGA_TIME_RESOLUTION_US * 1e-6
+FPGA_TIME_RESOLUTION_US: float = FPGA_TIME_RESOLUTION_S * 1e6
 TIME_PER_SPECTRUM_US: float = FPGA_TIME_RESOLUTION_US
 TIME_PER_SPECTRUM_S: float = FPGA_TIME_RESOLUTION_S
 SAMPLE_RATE_HZ: float = CHARTS_CHANNEL_WIDTH_HZ
@@ -127,21 +127,21 @@ DIGITIZER_NOMINAL_SIGMA_LSB: float = 2.0
 # 3. Frequency Grid & Sharding
 # ---------------------------------------------------------------------------
 CHARTS_N_FREQ: int = int(_get_external("CHARTS_N_FREQ", 672))
-LOCAL_FREQUENCY_CHANNELS: int = int(_get_external("LOCAL_FREQUENCY_CHANNELS", 336))
-FREQUENCY_SHARD_COUNT: int = int(_get_external("FREQUENCY_SHARD_COUNT", 2))
+FREQUENCY_SHARD_COUNT: int = int(_get_external("CPT_NUM_BANDS", 2))
+LOCAL_FREQUENCY_CHANNELS: int = CHARTS_N_FREQ // FREQUENCY_SHARD_COUNT
+UPCHANNELIZED_FACTOR: int = int(_get_external("UPCHANNELIZED_FACTOR", 32))
+UPCHANNELIZED_N_FREQ: int = int(_get_external("UPCHANNELIZED_N_FREQ", 21504))
 
 DEFAULT_FREQUENCY_START_MHZ: float = float(
-    _get_external("DEFAULT_FREQUENCY_START_MHZ", 300.0)
+    _get_external("CPT_FREQ_0_BAND1", 300.0)
 )
-DEFAULT_FREQUENCY_START_HZ: float = float(
-    _get_external("DEFAULT_FREQUENCY_START_HZ", 300_000_000.0)
-)
+DEFAULT_FREQUENCY_START_HZ: float = DEFAULT_FREQUENCY_START_MHZ * 1e6
 
 
 # ---------------------------------------------------------------------------
 # 4. Array Geometry & Dimensions
 # ---------------------------------------------------------------------------
-DEFAULT_SPACING_M: float = float(_get_external("DEFAULT_SPACING_M", 0.6))
+DEFAULT_SPACING_M: float = float(_get_external("CHARTS_ANTENNA_SPACING_M", 0.6))
 CHARTS_N_ANTENNAS: int = int(_get_external("CHARTS_N_ANTENNAS", 256))
 DEFAULT_ANTENNAS: int = 64
 

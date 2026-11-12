@@ -134,6 +134,24 @@ class TestKotekanConstants(unittest.TestCase):
         self.assertEqual(
             c.DEFAULT_SPACING_M, float(charts_constants.CHARTS_ANTENNA_SPACING_M)
         )
+        self.assertEqual(c.CHARTS_CHANNEL_WIDTH_HZ, float(charts_constants.FPGA_FREQUENCY_HZ))
+        self.assertAlmostEqual(c.FPGA_TIME_RESOLUTION_S, float(charts_constants.DELTA_TIME), places=15)
+        self.assertEqual(c.DEFAULT_FREQUENCY_START_MHZ, float(charts_constants.CPT_FREQ_0_BAND1))
+        self.assertEqual(c.UPCHANNELIZED_FACTOR, int(charts_constants.UPCHANNELIZED_FACTOR))
+        self.assertEqual(c.UPCHANNELIZED_N_FREQ, int(charts_constants.UPCHANNELIZED_N_FREQ))
+        for external_key in (
+            "FPGA_FREQUENCY_HZ",
+            "DELTA_TIME",
+            "CPT_NUM_BANDS",
+            "UPCHANNELIZED_FACTOR",
+            "UPCHANNELIZED_N_FREQ",
+            "CPT_FREQ_0_BAND1",
+            "CHARTS_ANTENNA_SPACING_M",
+        ):
+            self.assertTrue(
+                hasattr(charts_constants, external_key),
+                f"charts_constants missing expected attribute {external_key}",
+            )
 
         caren_lat, caren_lon, caren_alt = charts_constants.PRESET_LOCATIONS["Caren"]
         self.assertAlmostEqual(c.CHARTS_LATITUDE_DEG, float(caren_lat), places=6)
@@ -210,6 +228,8 @@ class TestKotekanConstants(unittest.TestCase):
             "CHARTS_N_FREQ",
             "LOCAL_FREQUENCY_CHANNELS",
             "FREQUENCY_SHARD_COUNT",
+            "UPCHANNELIZED_FACTOR",
+            "UPCHANNELIZED_N_FREQ",
             "DEFAULT_FREQUENCY_START_MHZ",
             "DEFAULT_SPACING_M",
             "CHARTS_N_ANTENNAS",
