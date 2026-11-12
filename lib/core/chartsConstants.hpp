@@ -41,7 +41,8 @@ inline constexpr std::size_t charts_upchannelized_channels =
 inline constexpr float charts_default_spacing_m = 0.6F;
 inline constexpr std::size_t charts_total_antennas = 256;
 
-// 4-Element Calibrated Solar Transit East-West Sub-Array (slots 0, 1, 6, 7)
+// 4-Element Calibrated Solar Transit East-West Sub-Array
+// Physical antenna IDs {0, 5, 32, 37} mapped to 1D baseline grid slots {0, 1, 6, 7} * 0.6m
 inline constexpr int calibrated_antennas_sun_transit[4] = {0, 5, 32, 37};
 inline constexpr float calibrated_antenna_positions_x[4] = {0.0F, 0.6F, 3.6F, 4.2F};
 
@@ -49,6 +50,12 @@ inline constexpr float calibrated_antenna_positions_x[4] = {0.0F, 0.6F, 3.6F, 4.
 inline constexpr double charts_caren_lat_deg = -33.4211146;
 inline constexpr double charts_caren_lon_deg = -70.8634710;
 inline constexpr double charts_caren_alt_m = 458.0;
+
+// Antenna Array Reference Coordinates (Observatorio Carén Array Center)
+// Note: Offset ~30m from the Carén main station entrance coordinates above
+inline constexpr double charts_antenna_ref_lat_deg = -33.4212167;
+inline constexpr double charts_antenna_ref_lon_deg = -70.8637972;
+inline constexpr double charts_antenna_ref_alt_m = 458.0;
 
 // Site Coordinates (Calán Observatory Site)
 inline constexpr double charts_calan_lat_deg = -33.39628;

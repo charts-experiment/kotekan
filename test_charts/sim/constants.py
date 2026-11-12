@@ -153,10 +153,35 @@ CHARTS_LATITUDE_DEG: float = float(_get_external("CHARTS_LATITUDE_DEG", -33.4211
 CHARTS_LONGITUDE_DEG: float = float(_get_external("CHARTS_LONGITUDE_DEG", -70.8634710))
 CHARTS_ALTITUDE_M: float = float(_get_external("CHARTS_ALTITUDE_M", 458.0))
 
+# Antenna Array Reference Coordinates (Observatorio Carén Array Center)
+# Offset ~30m from the Carén main station entrance coordinates above
+CHARTS_ANTENNA_REF_LATITUDE_DEG: float = float(
+    _get_external("CHARTS_ANTENNA_REF_LATITUDE_DEG", -33.4212167)
+)
+CHARTS_ANTENNA_REF_LONGITUDE_DEG: float = float(
+    _get_external("CHARTS_ANTENNA_REF_LONGITUDE_DEG", -70.8637972)
+)
+CHARTS_ANTENNA_REF_ALTITUDE_M: float = float(
+    _get_external("CHARTS_ANTENNA_REF_ALTITUDE_M", 458.0)
+)
+CHARTS_ANTENNA_REF_LOCATION: Tuple[float, float, float] = (
+    CHARTS_ANTENNA_REF_LATITUDE_DEG,
+    CHARTS_ANTENNA_REF_LONGITUDE_DEG,
+    CHARTS_ANTENNA_REF_ALTITUDE_M,
+)
+
 # Calán Observatory (Auxiliary)
-CALAN_LATITUDE_DEG: float = float(_get_external("CALAN_LATITUDE_DEG", -33.397222))
-CALAN_LONGITUDE_DEG: float = float(_get_external("CALAN_LONGITUDE_DEG", -70.536111))
-CALAN_ALTITUDE_M: float = float(_get_external("CALAN_ALTITUDE_M", 867.0))
+_calan_preset = None
+if _has_external("PRESET_LOCATIONS"):
+    _calan_preset = _get_external("PRESET_LOCATIONS", {}).get("Calan")
+if _calan_preset is not None:
+    _def_calan_lat, _def_calan_lon, _def_calan_alt = _calan_preset
+else:
+    _def_calan_lat, _def_calan_lon, _def_calan_alt = -33.39628, -70.536695, 860.0
+
+CALAN_LATITUDE_DEG: float = float(_get_external("CALAN_LATITUDE_DEG", _def_calan_lat))
+CALAN_LONGITUDE_DEG: float = float(_get_external("CALAN_LONGITUDE_DEG", _def_calan_lon))
+CALAN_ALTITUDE_M: float = float(_get_external("CALAN_ALTITUDE_M", _def_calan_alt))
 
 
 # ---------------------------------------------------------------------------
