@@ -513,3 +513,9 @@ raw_file_write_beams_1:
     write_every_n_frames: 17578
     num_frames_per_file: 1
     exit_after_n_files: 13
+
+run_metadata:
+    kotekan_stage: runMetadataWriter
+    base_dir: /data/tracker/dump_sun_transit
+    num_antennas: num_elements
+    signal_antennas: [0, 5, 32, 37]

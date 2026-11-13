@@ -440,3 +440,9 @@ raw_file_write_power_1:
     skip_frames: 20
     write_every_n_frames: 20       # ~1.024s cadence
     num_frames_per_file: 3600
+
+run_metadata:
+    kotekan_stage: runMetadataWriter
+    base_dir: /home/fpalma/zenith_beam_data/current
+    num_antennas: num_elements
+    signal_antennas: [0, 4, 32, 36]

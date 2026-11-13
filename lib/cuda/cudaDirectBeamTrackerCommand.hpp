@@ -83,7 +83,9 @@ private:
     void invalidate_cuda_graphs();
     void update_weights_if_needed(const DirectBeamTrackerConfig& cfg, cudaStream_t stream,
                                    double frame_timestamp_utc = -1.0);
-    void upload_calibration_gains(const DirectBeamTrackerConfig& cfg);
+    void upload_calibration_gains(const DirectBeamTrackerConfig& cfg,
+                                  cudaStream_t stream = nullptr);
+    void upload_wavenumbers(cudaStream_t stream = nullptr);
 
     std::string _rest_prefix = "/direct_tracker";
     double _freq_start_hz = 300.0e6;
@@ -121,6 +123,7 @@ private:
     // Per-instance generation trackers for multi-stream synchronization
     std::uint64_t _applied_config_generation = 0;
     std::uint64_t _applied_mask_generation = 0;
+    std::uint64_t _applied_beam_calibration_mask = ~0ULL;
 
     // CUDA Graph state
     bool _enable_cuda_graph = false;
@@ -135,6 +138,8 @@ private:
     std::string _gpu_mem_rfi_mask;
 
     std::vector<double> _frequencies_hz;
+    std::vector<double> _h_wavenumbers;
+    double _loaded_freq_start_hz = -1.0;
 
     // Persistent GPU buffers
     float2* _d_weights = nullptr;
@@ -149,7 +154,9 @@ private:
     // Complex antenna gains (charts-utils .npy, x_obs = g x; conjugated on load when enabled); empty: none
     std::string _gains_file;
     int32_t _gains_first_channel = 0;
+    int32_t _loaded_gains_first_channel = -1;
     std::vector<int> _gains_antennas;
+    std::vector<float2> _h_calibration_gains;
     bool _conjugate_gains = true;
 
     // Power reduction buffers

@@ -218,6 +218,10 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
             (_freq_start_hz - charts::constants::subband0_freq_start_hz) / _freq_step_hz)));
     _gains_antennas = config.get_default<std::vector<int>>(unique_name, "gains_antennas", {});
     _conjugate_gains = config.get_default<bool>(unique_name, "conjugate_gains", true);
+    const bool apply_calibration_gains =
+        config.get_default<bool>(unique_name, "apply_calibration_gains", true);
+    const auto uncalibrated_beams =
+        config.get_default<std::vector<int>>(unique_name, "uncalibrated_beams", {});
 
     std::shared_ptr<TrackerGroup> group;
     {
@@ -262,6 +266,7 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
         group->config.bislc_diagonal_loading = bislc_diag;
         group->config.coherent_gain_normalization = coherent_gain_normalization;
         group->config.normalize_weights = normalize_weights;
+        group->config.apply_calibration_gains = apply_calibration_gains;
         group->config.spacing_m = _spacing_m;
         group->config.time_chunk_size = _time_chunk_size;
         group->config.time_unroll = _time_unroll;
@@ -303,6 +308,12 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                 group->config.targets[b].celestial.ra_deg = ra_deg;
                 group->config.targets[b].celestial.dec_deg = dec_deg;
                 group->config.targets[b].celestial.is_set = true;
+            }
+            group->config.targets[b].calibrated = true;
+        }
+        for (int beam_idx : uncalibrated_beams) {
+            if (beam_idx >= 0 && static_cast<std::size_t>(beam_idx) < group->config.max_beams) {
+                group->config.targets[static_cast<std::size_t>(beam_idx)].calibrated = false;
             }
         }
 
@@ -443,6 +454,9 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                     group->config.targets[beam_id].direction_end = DirectDirection3D{lx1, my1, nz1};
                     group->config.targets[beam_id].celestial.is_set = false;
                     group->config.targets[beam_id].grid_index = -1;
+                    if (src.contains("calibrated")) {
+                        group->config.targets[beam_id].calibrated = src["calibrated"].get<bool>();
+                    }
                     group->config.config_generation++;
 
                     conn.send_text_reply(fmt::format("Target updated for beam {:d}\n", beam_id));
@@ -644,6 +658,39 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                 rest.register_post_callback("/beam_tracker/set_taper", set_taper_cb);
             }
 
+            // 6b. Live Calibration Toggle (global or per-beam for A/B comparison)
+            auto set_cal_cb = [group](connectionInstance& conn, nlohmann::json& j) {
+                try {
+                    std::lock_guard<std::mutex> lk(group->group_mutex);
+                    if (j.contains("beam_id")) {
+                        const std::size_t beam_id = j["beam_id"].get<std::size_t>();
+                        if (beam_id >= group->config.max_beams) {
+                            conn.send_error("beam_id exceeds configured max_beams",
+                                            HTTP_RESPONSE::BAD_REQUEST);
+                            return;
+                        }
+                        const bool enabled = j.value("enabled", true);
+                        group->config.targets[beam_id].calibrated = enabled;
+                        group->config.config_generation++;
+                        conn.send_text_reply(fmt::format("Calibration for beam {:d} set to {:s}\n",
+                                                         beam_id,
+                                                         enabled ? "ENABLED" : "DISABLED"));
+                        return;
+                    }
+                    const bool enabled = j.value("enabled", true);
+                    group->config.apply_calibration_gains = enabled;
+                    group->config.config_generation++;
+                    conn.send_text_reply(fmt::format("Calibration gains set to {:s}\n",
+                                                     enabled ? "ENABLED" : "DISABLED"));
+                } catch (const std::exception& e) {
+                    conn.send_error(e.what(), HTTP_RESPONSE::BAD_REQUEST);
+                }
+            };
+            rest.register_post_callback(group->rest_prefix + "/set_calibration", set_cal_cb);
+            if (group->rest_prefix == "/direct_tracker") {
+                rest.register_post_callback("/beam_tracker/set_calibration", set_cal_cb);
+            }
+
             // 7. Status Telemetry
             auto status_cb = [group](connectionInstance& conn) {
                 nlohmann::json reply;
@@ -673,6 +720,7 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                 reply["bislc_diagonal_loading"] = group->config.bislc_diagonal_loading;
                 reply["normalize_weights"] = group->config.normalize_weights;
                 reply["coherent_gain_normalization"] = group->config.coherent_gain_normalization;
+                reply["apply_calibration_gains"] = group->config.apply_calibration_gains;
                 {
                     std::vector<float> tw;
                     for (std::size_t i = 0; i < std::min<std::size_t>(8, group->config.total_elements()); ++i) {
@@ -739,6 +787,8 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                                   / group->config.samples_per_data_set
                             : 0.0;
                     b_info["grid_index"] = group->config.targets[b].grid_index;
+                    b_info["calibrated"] = group->config.apply_calibration_gains
+                                           && group->config.targets[b].calibrated;
                     if (group->config.targets[b].celestial.is_set) {
                         b_info["celestial_target"] = {
                             {"is_set", true},
@@ -978,7 +1028,28 @@ void cudaDirectBeamTrackerCommand::invalidate_cuda_graphs() {
     }
 }
 
-void cudaDirectBeamTrackerCommand::upload_calibration_gains(const DirectBeamTrackerConfig& cfg) {
+void cudaDirectBeamTrackerCommand::upload_wavenumbers(cudaStream_t stream) {
+    _frequencies_hz.resize(static_cast<std::size_t>(_num_local_freq));
+    _h_wavenumbers.resize(static_cast<std::size_t>(_num_local_freq));
+    for (int f = 0; f < _num_local_freq; ++f) {
+        _frequencies_hz[f] = _freq_start_hz + f * _freq_step_hz;
+        _h_wavenumbers[f] = charts::constants::two_pi * _frequencies_hz[f]
+                            / charts::constants::speed_of_light_m_per_s;
+    }
+    if (stream != nullptr) {
+        CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_d_wavenumbers, _h_wavenumbers.data(),
+                                                _num_local_freq * sizeof(double),
+                                                cudaMemcpyHostToDevice, stream));
+    } else {
+        CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(_d_wavenumbers, _h_wavenumbers.data(),
+                                           _num_local_freq * sizeof(double),
+                                           cudaMemcpyHostToDevice));
+    }
+    _loaded_freq_start_hz = _freq_start_hz;
+}
+
+void cudaDirectBeamTrackerCommand::upload_calibration_gains(const DirectBeamTrackerConfig& cfg,
+                                                            cudaStream_t stream) {
     // The weight kernels multiply each weight by calibration_gains[freq][elem] and form
     // y = sum_e w_e v_e, so they need the corrector 1 / g_v of each element (v_obs = g_v v,
     // g_v = conj(g_file): load_gains_npy conjugates the charts-utils file); non-finite or
@@ -992,13 +1063,22 @@ void cudaDirectBeamTrackerCommand::upload_calibration_gains(const DirectBeamTrac
     int dropped = 0;
     const auto corr = charts_mvdr::calibration_correctors(gains, _num_local_freq, _num_antennas,
                                                           elem_to_ant, &dropped);
-    std::vector<float2> host(corr.size());
+    _h_calibration_gains.resize(corr.size());
     for (std::size_t i = 0; i < corr.size(); ++i)
-        host[i] = make_float2(corr[i].real(), corr[i].imag());
+        _h_calibration_gains[i] = make_float2(corr[i].real(), corr[i].imag());
     if (_d_calibration_gains == nullptr)
-        CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_calibration_gains, host.size() * sizeof(float2)));
-    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(_d_calibration_gains, host.data(),
-                                       host.size() * sizeof(float2), cudaMemcpyHostToDevice));
+        CHECK_CUDA_ERROR_NON_OO(
+            cudaMalloc(&_d_calibration_gains, _h_calibration_gains.size() * sizeof(float2)));
+    if (stream != nullptr) {
+        CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_d_calibration_gains, _h_calibration_gains.data(),
+                                                _h_calibration_gains.size() * sizeof(float2),
+                                                cudaMemcpyHostToDevice, stream));
+    } else {
+        CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(_d_calibration_gains, _h_calibration_gains.data(),
+                                           _h_calibration_gains.size() * sizeof(float2),
+                                           cudaMemcpyHostToDevice));
+    }
+    _loaded_gains_first_channel = _gains_first_channel;
 
     // Lock out any element that has zero calibration gain across all channels so a flickering
     // floating port can never dilute recompute_normalized_taper() (e.g. dividing by sqrt(5)
@@ -1010,7 +1090,7 @@ void cudaDirectBeamTrackerCommand::upload_calibration_gains(const DirectBeamTrac
     for (int r = 0; r < _num_elements && r < static_cast<int>(MAX_DIRECT_ANTENNAS); ++r) {
         bool any_nonzero = false;
         for (int f = 0; f < _num_local_freq; ++f) {
-            const float2 c = host[static_cast<std::size_t>(f) * _num_elements + r];
+            const float2 c = _h_calibration_gains[static_cast<std::size_t>(f) * _num_elements + r];
             if (c.x * c.x + c.y * c.y > 0.0f) {
                 any_nonzero = true;
                 break;
@@ -1050,9 +1130,15 @@ void cudaDirectBeamTrackerCommand::upload_calibration_gains(const DirectBeamTrac
             apply_cal_mask(it->second->config);
             it->second->config.mask_generation++;
             it->second->config.config_generation++;
-            CHECK_CUDA_ERROR_NON_OO(
-                cudaMemcpy(_d_norm_taper, it->second->config.normalized_taper_weights.data(),
-                           _num_elements * sizeof(float), cudaMemcpyHostToDevice));
+            if (stream != nullptr) {
+                CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(
+                    _d_norm_taper, it->second->config.normalized_taper_weights.data(),
+                    _num_elements * sizeof(float), cudaMemcpyHostToDevice, stream));
+            } else {
+                CHECK_CUDA_ERROR_NON_OO(
+                    cudaMemcpy(_d_norm_taper, it->second->config.normalized_taper_weights.data(),
+                               _num_elements * sizeof(float), cudaMemcpyHostToDevice));
+            }
         }
     }
 
@@ -1120,13 +1206,7 @@ void cudaDirectBeamTrackerCommand::allocate_device_buffers() {
     cudaStream_t stream = device.getStream(cuda_stream_id);
     set_l2_persisting_weights_policy(stream, _d_weights, 2 * weights_bytes);
 
-    std::vector<double> h_wavenumbers(_num_local_freq);
-    for (int f = 0; f < _num_local_freq; ++f) {
-        h_wavenumbers[f] = charts::constants::two_pi * _frequencies_hz[f]
-                           / charts::constants::speed_of_light_m_per_s;
-    }
-    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(_d_wavenumbers, h_wavenumbers.data(),
-                                       _num_local_freq * sizeof(double), cudaMemcpyHostToDevice));
+    upload_wavenumbers(nullptr);
 
     DirectBeamTrackerConfig cfg;
     {
@@ -1310,17 +1390,24 @@ void cudaDirectBeamTrackerCommand::update_weights_if_needed(const DirectBeamTrac
 
     const std::size_t active_beams =
         std::min(cfg.num_active_beams, static_cast<std::size_t>(_max_beams));
+    const std::uint64_t beam_cal_mask =
+        (_d_calibration_gains != nullptr) ? cfg.effective_beam_calibration_mask() : 0ULL;
+    const bool cal_changed = (_applied_beam_calibration_mask != beam_cal_mask);
+    _applied_beam_calibration_mask = beam_cal_mask;
 
     // Only copy antenna taper weights to device when the mask / taper generation actually changed
     if (mask_changed) {
         CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_d_norm_taper, cfg.normalized_taper_weights.data(),
                                                 _num_elements * sizeof(float),
                                                 cudaMemcpyHostToDevice, stream));
-        if (_grid_mode_enabled && _d_grid_weights != nullptr) {
-            launch_precompute_sky_grid_tapered(
-                _d_grid_weights, _d_grid_lms, _d_wavenumbers, _d_antenna_positions, _d_norm_taper,
-                _d_calibration_gains, _num_grid_points, _num_local_freq, _num_elements, stream);
-        }
+    }
+    if ((mask_changed || cal_changed) && _grid_mode_enabled && _d_grid_weights != nullptr) {
+        const float2* grid_cal_ptr =
+            (cfg.apply_calibration_gains && _d_calibration_gains != nullptr) ? _d_calibration_gains
+                                                                             : nullptr;
+        launch_precompute_sky_grid_tapered(
+            _d_grid_weights, _d_grid_lms, _d_wavenumbers, _d_antenna_positions, _d_norm_taper,
+            grid_cal_ptr, _num_grid_points, _num_local_freq, _num_elements, stream);
     }
 
     if (_grid_mode_enabled && !_h_grid_lms.empty()) {
@@ -1354,7 +1441,7 @@ void cudaDirectBeamTrackerCommand::update_weights_if_needed(const DirectBeamTrac
             _d_weights, _d_step_weights, _d_directions, _d_directions_end, _d_wavenumbers,
             _d_antenna_positions, _d_norm_taper, _d_calibration_gains, active_beams,
             _num_local_freq, _num_elements, static_cast<std::size_t>(_samples_per_data_set),
-            cfg.enable_weight_bislc, cfg.bislc_diagonal_loading, stream);
+            cfg.enable_weight_bislc, cfg.bislc_diagonal_loading, stream, beam_cal_mask);
     }
 }
 
@@ -1462,6 +1549,20 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
     record_start_event();
 
     cudaStream_t stream = device.getStream(cuda_stream_id);
+    bool subband_reloaded = false;
+    if (_loaded_freq_start_hz < 0.0 || std::abs(_freq_start_hz - _loaded_freq_start_hz) > 1.0) {
+        upload_wavenumbers(stream);
+        subband_reloaded = true;
+    }
+    if (!_gains_file.empty() && _loaded_gains_first_channel != _gains_first_channel) {
+        upload_calibration_gains(current_config, stream);
+        subband_reloaded = true;
+    }
+    if (subband_reloaded) {
+        _applied_config_generation = 0;
+        _applied_mask_generation = 0;
+        invalidate_cuda_graphs();
+    }
     update_weights_if_needed(current_config, stream, frame_timestamp_utc);
 
     DirectInputFormat input_format = DirectInputFormat::INT4X2;

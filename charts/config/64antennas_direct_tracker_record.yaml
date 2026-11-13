@@ -480,3 +480,9 @@ raw_file_write_alive_1:
     num_frames_per_file: 42
     prefix_hostname: false
     exit_after_n_files: 1
+
+run_metadata:
+    kotekan_stage: runMetadataWriter
+    base_dir: /data/tracker/tracker_64ant
+    num_antennas: num_elements
+    signal_antennas: [0, 4, 5, 6, 32]
