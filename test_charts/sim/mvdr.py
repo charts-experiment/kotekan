@@ -59,6 +59,7 @@ def create_mvdr_yaml(
     loading: float = 10.0,
     loading_ref: str = "noise",
     gains_file: Optional[Path] = None,
+    conjugate_gains: Optional[bool] = None,
     antenna_order: str = "descending",
     write_correlation: bool = True,
     buffer_depth: int = 2,
@@ -113,11 +114,11 @@ def create_mvdr_yaml(
     xs = json.dumps([float(v) for v in positions_x_m])
     ys = json.dumps([float(v) for v in positions_y_m])
     bs = json.dumps([[float(l), float(m)] for l, m in beams])
-    gains = (
-        f'\n  gains_file: "{Path(gains_file).as_posix()}"\n  antenna_order: {antenna_order}'
-        if gains_file
-        else ""
-    )
+    gains = ""
+    if gains_file:
+        gains = f'\n  gains_file: "{Path(gains_file).as_posix()}"\n  antenna_order: {antenna_order}'
+        if conjugate_gains is not None:
+            gains += f"\n  conjugate_gains: {'true' if conjugate_gains else 'false'}"
 
     corr_dump = ""
     if write_correlation:

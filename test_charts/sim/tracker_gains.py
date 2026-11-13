@@ -29,6 +29,7 @@ def create_tracker_gains_yaml(
     beams: Sequence[Tuple[float, float]],
     gains_file: Optional[Path] = None,
     gains_first_channel: Optional[int] = None,
+    conjugate_gains: Optional[bool] = None,
     num_elements: int = 64,
     num_local_freq: int = 336,
     samples_per_data_set: int = 15360,
@@ -61,6 +62,8 @@ def create_tracker_gains_yaml(
         cal = f'\n      gains_file: "{Path(gains_file).as_posix()}"'
         if gains_first_channel is not None:
             cal += f"\n      gains_first_channel: {int(gains_first_channel)}"
+        if conjugate_gains is not None:
+            cal += f"\n      conjugate_gains: {'true' if conjugate_gains else 'false'}"
 
     content = f"""######################################################################
 # CHARTS replay: Direct Beam Tracker ({max_beams} fixed beams){' with calibration' if cal else ''}

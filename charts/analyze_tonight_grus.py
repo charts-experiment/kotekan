@@ -101,7 +101,7 @@ def parse_multi_frame_bin(
                 dtype_val = struct.unpack_from("<i", meta_buf, 40)[0]
             if len(meta_buf) >= 3032:
                 # chartsMetadataFormat tail fields
-                lost_samples = struct.unpack_from("<i", meta_buf, 3000)[0]
+                lost_samples = struct.unpack_from("<i", meta_buf, 3004)[0]
                 tv_sec, tv_usec = struct.unpack_from("<qq", meta_buf, 3008)
                 if tv_sec > 0:
                     recv_sec = float(tv_sec) + float(tv_usec) * 1e-6

@@ -54,10 +54,12 @@ def test_options(tmp_path):
         tmp_path,
         cov_half_window=40,
         gains_file=tmp_path / "g.npy",
+        conjugate_gains=False,
         write_correlation=False,
     )
     assert cfg["host_correlation_buffer"]["num_frames"] == 84
     assert cfg["mvdr_beams"]["gains_file"].endswith("g.npy")
+    assert cfg["mvdr_beams"]["conjugate_gains"] is False
     assert cfg["mvdr_beams"]["antenna_order"] == "descending"
     assert "correlator_dump" not in cfg
 

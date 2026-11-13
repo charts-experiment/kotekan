@@ -113,6 +113,7 @@ struct DirectBeamTarget {
     DirectDirection3D direction_end{0.0f, 0.0f, 1.0f};
     DirectCelestialTarget celestial;
     int grid_index = -1;
+    bool calibrated = true;
 };
 
 struct DirectBeamTrackerConfig {
@@ -148,6 +149,20 @@ struct DirectBeamTrackerConfig {
     // When false, taper weights are unnormalized (ta), so the formed beam voltage is the raw sum
     // without dividing by sqrt(N_active) or N_active.
     bool normalize_weights = true;
+    // Global calibration toggle (when false, ignores calibration gains across all beams for A/B checks).
+    bool apply_calibration_gains = true;
+
+    std::uint64_t effective_beam_calibration_mask() const {
+        if (!apply_calibration_gains)
+            return 0ULL;
+        std::uint64_t mask = 0ULL;
+        const std::size_t n = std::min<std::size_t>(MAX_DIRECT_BEAMS, targets.size());
+        for (std::size_t b = 0; b < n; ++b) {
+            if (targets[b].calibrated)
+                mask |= (1ULL << b);
+        }
+        return mask;
+    }
 
     std::array<std::uint8_t, MAX_DIRECT_ANTENNAS> antenna_mask;
     std::array<std::uint8_t, MAX_DIRECT_ANTENNAS> calibration_valid_mask;
@@ -373,17 +388,19 @@ void launch_generate_steering_weights_tapered(
     const float3* d_antenna_positions, const float* d_norm_taper, const float2* d_calibration_gains,
     std::size_t num_beams, std::size_t n_freq, std::size_t n_elem, std::size_t n_time,
     bool enable_weight_bislc = false, float bislc_diag_loading = 1.0e-4f,
-    cudaStream_t stream = nullptr);
+    cudaStream_t stream = nullptr, std::uint64_t beam_calibration_mask = ~0ULL);
 
 inline void launch_generate_steering_weights_tapered(
     float2* d_weights, const DirectDirection3D* d_directions, const double* d_wavenumbers,
     const float3* d_antenna_positions, const float* d_norm_taper, const float2* d_calibration_gains,
     std::size_t num_beams, std::size_t n_freq, std::size_t n_elem, bool enable_weight_bislc = false,
-    float bislc_diag_loading = 1.0e-4f, cudaStream_t stream = nullptr) {
+    float bislc_diag_loading = 1.0e-4f, cudaStream_t stream = nullptr,
+    std::uint64_t beam_calibration_mask = ~0ULL) {
     launch_generate_steering_weights_tapered(d_weights, nullptr, d_directions, nullptr,
                                              d_wavenumbers, d_antenna_positions, d_norm_taper,
                                              d_calibration_gains, num_beams, n_freq, n_elem, 0,
-                                             enable_weight_bislc, bislc_diag_loading, stream);
+                                             enable_weight_bislc, bislc_diag_loading, stream,
+                                             beam_calibration_mask);
 }
 
 /**

@@ -1,0 +1,408 @@
+---
+# ==============================================================================
+# CHARTS 64-Antenna DPDK Direct Beam Tracker + Triggered Baseband Readout
+# ==============================================================================
+# Combines live dual-stream GPU direct beam tracking with a zero-overhead side
+# branch (chartsTriggeredBasebandReadout -> bufferMerge -> BasebandWriter) that
+# freezes and dumps synchronized raw int4x2 packets on REST POST /charts/baseband
+# without interrupting real-time beamforming.
+# Also demonstrates simultaneous A/B calibration comparison (Beam 0 calibrated,
+# Beam 1 uncalibrated via uncalibrated_beams: [1] pointing at the same target).
+# ==============================================================================
+
+type: config
+log_level: info
+cpu_affinity: [6, 7, 8, 9]
+
+# Array Dimensions & Sampling Parameters
+num_elements: 64
+element_order: charts_logical
+n_channels_per_packet: 168
+local_subbands_per_packet: 2
+num_local_freq: 336
+
+spectra_per_second: 300000.0
+sample_period_s: 3.333333333333e-6
+samples_per_data_set: 15360
+frame_arrival_period: samples_per_data_set * sample_period_s
+bytes_per_dataset: n_channels_per_packet * local_subbands_per_packet * samples_per_data_set
+capture_n_frames: 0
+
+output_dir: &output_dir /data/tracker/tracker_triggered_baseband
+
+# Memory & Buffer Management
+buffer_depth: 30
+gpu_buffer_depth: 3
+
+# Triggered Baseband Readout Parameters
+baseband_spectra_per_frame: 15360
+baseband_staging_frames: 100
+baseband_history_frames: buffer_depth - 10
+num_saved_antennas: 4
+max_capture_seconds: 5.0
+
+# Array Geometry & Beam Setup
+spacing_m: 0.6
+max_beams: 2
+initial_active_beams: 2
+sizeof_complex_float: 8
+
+custom_antenna_positions: &charts_custom_antenna_positions
+  - [0.0, 0.0, 0.0]  # Ant 0 (x=0.0m)
+  - [0.0, 0.0, 0.0]  # Ant 1
+  - [0.0, 0.0, 0.0]  # Ant 2
+  - [0.0, 0.0, 0.0]  # Ant 3
+  - [0.0, 0.0, 0.0]  # Ant 4
+  - [0.6, 0.0, 0.0]  # Ant 5 (x=0.6m)
+  - [0.0, 0.0, 0.0]  # Ant 6
+  - [0.0, 0.0, 0.0]  # Ant 7
+  - [0.0, 0.0, 0.0]  # Ant 8
+  - [0.0, 0.0, 0.0]  # Ant 9
+  - [0.0, 0.0, 0.0]  # Ant 10
+  - [0.0, 0.0, 0.0]  # Ant 11
+  - [0.0, 0.0, 0.0]  # Ant 12
+  - [0.0, 0.0, 0.0]  # Ant 13
+  - [0.0, 0.0, 0.0]  # Ant 14
+  - [0.0, 0.0, 0.0]  # Ant 15
+  - [0.0, 0.0, 0.0]  # Ant 16
+  - [0.0, 0.0, 0.0]  # Ant 17
+  - [0.0, 0.0, 0.0]  # Ant 18
+  - [0.0, 0.0, 0.0]  # Ant 19
+  - [0.0, 0.0, 0.0]  # Ant 20
+  - [0.0, 0.0, 0.0]  # Ant 21
+  - [0.0, 0.0, 0.0]  # Ant 22
+  - [0.0, 0.0, 0.0]  # Ant 23
+  - [0.0, 0.0, 0.0]  # Ant 24
+  - [0.0, 0.0, 0.0]  # Ant 25
+  - [0.0, 0.0, 0.0]  # Ant 26
+  - [0.0, 0.0, 0.0]  # Ant 27
+  - [0.0, 0.0, 0.0]  # Ant 28
+  - [0.0, 0.0, 0.0]  # Ant 29
+  - [0.0, 0.0, 0.0]  # Ant 30
+  - [0.0, 0.0, 0.0]  # Ant 31
+  - [3.6, 0.0, 0.0]  # Ant 32 (x=3.6m)
+  - [0.0, 0.0, 0.0]  # Ant 33
+  - [0.0, 0.0, 0.0]  # Ant 34
+  - [0.0, 0.0, 0.0]  # Ant 35
+  - [0.0, 0.0, 0.0]  # Ant 36
+  - [4.2, 0.0, 0.0]  # Ant 37 (x=4.2m)
+  - [0.0, 0.0, 0.0]  # Ant 38
+  - [0.0, 0.0, 0.0]  # Ant 39
+  - [0.0, 0.0, 0.0]  # Ant 40
+  - [0.0, 0.0, 0.0]  # Ant 41
+  - [0.0, 0.0, 0.0]  # Ant 42
+  - [0.0, 0.0, 0.0]  # Ant 43
+  - [0.0, 0.0, 0.0]  # Ant 44
+  - [0.0, 0.0, 0.0]  # Ant 45
+  - [0.0, 0.0, 0.0]  # Ant 46
+  - [0.0, 0.0, 0.0]  # Ant 47
+  - [0.0, 0.0, 0.0]  # Ant 48
+  - [0.0, 0.0, 0.0]  # Ant 49
+  - [0.0, 0.0, 0.0]  # Ant 50
+  - [0.0, 0.0, 0.0]  # Ant 51
+  - [0.0, 0.0, 0.0]  # Ant 52
+  - [0.0, 0.0, 0.0]  # Ant 53
+  - [0.0, 0.0, 0.0]  # Ant 54
+  - [0.0, 0.0, 0.0]  # Ant 55
+  - [0.0, 0.0, 0.0]  # Ant 56
+  - [0.0, 0.0, 0.0]  # Ant 57
+  - [0.0, 0.0, 0.0]  # Ant 58
+  - [0.0, 0.0, 0.0]  # Ant 59
+  - [0.0, 0.0, 0.0]  # Ant 60
+  - [0.0, 0.0, 0.0]  # Ant 61
+  - [0.0, 0.0, 0.0]  # Ant 62
+  - [0.0, 0.0, 0.0]  # Ant 63
+
+run_metadata:
+    kotekan_stage: runMetadataWriter
+    base_dir: *output_dir
+    num_antennas: num_elements
+    signal_antennas: [0, 4, 5, 6, 32]
+
+main_pool:
+    kotekan_metadata_pool: chartsMetadata
+    num_metadata_objects: buffer_depth * 15
+
+network_capture_buf_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: bytes_per_dataset * num_elements
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+mask_buffer_zeros_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set
+    numa_node: 0
+    metadata_pool: main_pool
+
+network_capture_buf_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: bytes_per_dataset * num_elements
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+mask_buffer_zeros_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set
+    numa_node: 0
+    metadata_pool: main_pool
+
+host_formed_beams_buffer_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+host_formed_beams_buffer_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: samples_per_data_set * num_local_freq * max_beams * sizeof_complex_float
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+baseband_pool:
+    kotekan_metadata_pool: BasebandMetadata
+    num_metadata_objects: baseband_staging_frames * 4 + 32
+
+baseband_output_buffer_0:
+    kotekan_buffer: standard
+    num_frames: baseband_staging_frames
+    frame_size: baseband_spectra_per_frame * num_local_freq * num_saved_antennas
+    metadata_pool: baseband_pool
+
+baseband_output_buffer_1:
+    kotekan_buffer: standard
+    num_frames: baseband_staging_frames
+    frame_size: baseband_spectra_per_frame * num_local_freq * num_saved_antennas
+    metadata_pool: baseband_pool
+
+baseband_output_buffer_merged:
+    kotekan_buffer: standard
+    num_frames: 8
+    frame_size: baseband_spectra_per_frame * num_local_freq * num_saved_antennas
+    metadata_pool: baseband_pool
+
+dpdk:
+    kotekan_stage: dpdkCore
+    lcore_cpu_map: [3, 5]
+    main_lcore_cpu: 4
+    lcore_port_map:
+        - [0]
+        - [1]
+    max_rx_pkt_len: 9000
+    rx_ring_size: 4096
+    num_mbufs: 65536
+    mbuf_data_size: 9216
+
+    handlers:
+        - dpdk_handler: rfsocHandlerShuffle
+          out_buffer: network_capture_buf_0
+          alignment: samples_per_data_set
+          mask_buf: mask_buffer_zeros_0
+          first_subband: 0
+          coarse_freq_start: 0
+          num_local_freq: 336
+
+        - dpdk_handler: rfsocHandlerShuffle
+          out_buffer: network_capture_buf_1
+          alignment: samples_per_data_set
+          mask_buf: mask_buffer_zeros_1
+          first_subband: 2
+          coarse_freq_start: 336
+          num_local_freq: 336
+
+zero_samples_0:
+    kotekan_stage: zeroSamples
+    out_buf: network_capture_buf_0
+    lost_samples_buf: mask_buffer_zeros_0
+    zero_value: 0
+    sample_size: num_local_freq * num_elements
+
+zero_samples_1:
+    kotekan_stage: zeroSamples
+    out_buf: network_capture_buf_1
+    lost_samples_buf: mask_buffer_zeros_1
+    zero_value: 0
+    sample_size: num_local_freq * num_elements
+
+gpu:
+    profiling: false
+
+    commands_0: &command_list_0
+        - name: cudaInputData
+          in_buf: host_voltage
+          gpu_mem: voltage_0
+        - name: cudaSyncInput
+        - name: cudaDirectBeamTrackerCommand
+          gpu_mem_voltage: voltage_0
+          gpu_mem_formed_beams: formed_beams_0
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          spacing_m: 0.6
+          antenna_order: "descending"
+          active_antennas: [0, 4, 5, 6, 32]
+          custom_antenna_positions: *charts_custom_antenna_positions
+          max_beams: 2
+          initial_active_beams: 2
+          uncalibrated_beams: [1]
+          buffer_depth: 3
+          time_chunk_size: 256
+          time_unroll: 4
+          beam_tile_size: 4
+          enable_cuda_graph: false
+          gains_file: charts/config/gains/gains_sun_transit_1027_interp.npy
+          gains_antennas: [0, 5, 32, 37]
+          site_lat_deg: -33.4211146
+          site_lon_deg: -70.8634710
+          site_alt_m: 458.0
+          freq_start_hz: 300000000.0
+          freq_step_hz: 300000.0
+          source_ra_deg: 266.4168
+          source_dec_deg: -29.0078
+          source_ra_deg_1: 266.4168
+          source_dec_deg_1: -29.0078
+        - name: cudaSyncOutput
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: formed_beams_0
+          out_buf: host_formed_beams
+
+    commands_1: &command_list_1
+        - name: cudaInputData
+          in_buf: host_voltage
+          gpu_mem: voltage_1
+        - name: cudaSyncInput
+        - name: cudaDirectBeamTrackerCommand
+          gpu_mem_voltage: voltage_1
+          gpu_mem_formed_beams: formed_beams_1
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          spacing_m: 0.6
+          antenna_order: "descending"
+          active_antennas: [0, 4, 5, 6, 32]
+          custom_antenna_positions: *charts_custom_antenna_positions
+          max_beams: 2
+          initial_active_beams: 2
+          uncalibrated_beams: [1]
+          buffer_depth: 3
+          time_chunk_size: 256
+          time_unroll: 4
+          beam_tile_size: 4
+          enable_cuda_graph: false
+          gains_file: charts/config/gains/gains_sun_transit_1027_interp.npy
+          gains_antennas: [0, 5, 32, 37]
+          site_lat_deg: -33.4211146
+          site_lon_deg: -70.8634710
+          site_alt_m: 458.0
+          freq_start_hz: 400800000.0
+          freq_step_hz: 300000.0
+          source_ra_deg: 266.4168
+          source_dec_deg: -29.0078
+          source_ra_deg_1: 266.4168
+          source_dec_deg_1: -29.0078
+        - name: cudaSyncOutput
+        - name: cudaOutputData
+          in_buf: host_voltage
+          gpu_mem: formed_beams_1
+          out_buf: host_formed_beams
+
+    gpu_0:
+        kotekan_stage: cudaProcess
+        gpu_id: 0
+        cuda_stream_base: 0
+        num_cuda_streams: 6
+        buffer_depth: 3
+        commands: *command_list_0
+        in_buffers:
+            host_voltage: network_capture_buf_0
+        out_buffers:
+            host_formed_beams: host_formed_beams_buffer_0
+
+    gpu_1:
+        kotekan_stage: cudaProcess
+        gpu_id: 0
+        cuda_stream_base: 1
+        num_cuda_streams: 6
+        buffer_depth: 3
+        commands: *command_list_1
+        in_buffers:
+            host_voltage: network_capture_buf_1
+        out_buffers:
+            host_formed_beams: host_formed_beams_buffer_1
+
+inspect_beams_0:
+    kotekan_stage: restInspectFrame
+    in_buf: host_formed_beams_buffer_0
+    len: 4194304
+
+inspect_beams_1:
+    kotekan_stage: restInspectFrame
+    in_buf: host_formed_beams_buffer_1
+    len: 4194304
+
+raw_file_write_beams_0:
+    kotekan_stage: rawFileWrite
+    in_buf: host_formed_beams_buffer_0
+    file_name: formed_beams_64ant_freq0
+    base_dir: *output_dir
+    file_ext: bin
+    num_frames_per_file: 42
+    prefix_hostname: false
+    drain_baseband_status: charts_triggered_capture
+    baseband_drain_timeout: 120
+
+raw_file_write_beams_1:
+    kotekan_stage: rawFileWrite
+    in_buf: host_formed_beams_buffer_1
+    file_name: formed_beams_64ant_freq1
+    base_dir: *output_dir
+    file_ext: bin
+    num_frames_per_file: 42
+    prefix_hostname: false
+    drain_baseband_status: charts_triggered_capture
+    baseband_drain_timeout: 120
+
+baseband_capture:
+    kotekan_stage: chartsTriggeredBasebandReadout
+    in_bufs: [network_capture_buf_0, network_capture_buf_1]
+    out_bufs: [baseband_output_buffer_0, baseband_output_buffer_1]
+    freq_ids: [0, 336]
+    selected_antennas: &saved_antennas [0, 5, 32, 37]
+    num_frames_buffer: baseband_history_frames
+    output_spectra_per_frame: baseband_spectra_per_frame
+    max_dump_samples: max_capture_seconds * spectra_per_second
+    capture_timeout: 30
+    endpoint: /charts/baseband
+    readout_status: charts_triggered_capture
+
+baseband_merge:
+    kotekan_stage: bufferMerge
+    timeout: 0.1
+    in_bufs: [baseband_output_buffer_0, baseband_output_buffer_1]
+    out_buf: baseband_output_buffer_merged
+
+baseband_save:
+    kotekan_stage: BasebandWriter
+    in_buf: baseband_output_buffer_merged
+    num_elements: num_saved_antennas
+    selected_antennas: *saved_antennas
+    antenna_index_convention: charts_logical
+    root_path: *output_dir
+    spectra_per_frame: baseband_spectra_per_frame
+    readout_status: charts_triggered_capture
+    dump_timeout: 60

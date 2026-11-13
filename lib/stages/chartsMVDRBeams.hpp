@@ -55,6 +55,8 @@
  * @conf gains_file          String. Optional complex gains .npy (n_freq_file, num_elements),
  *                                   charts-utils convention (conjugated on load).
  * @conf gains_first_channel Int.    Row of the gains file for channel 0 (default 0).
+ * @conf conjugate_gains     Bool.   Conjugate gains on load (default true for charts-utils
+ *                                   x = conj(v) convention; false for voltage-domain g).
  * @conf antenna_order       String. Logical antenna of correlator element e for the gains
  *                                   file: descending (n - 1 - e, default, as the baseband
  *                                   frames and cudaDirectBeamTracker) or ascending (e).

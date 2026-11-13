@@ -28,6 +28,7 @@ def test_beams_gains_and_shutdown(tmp_path):
         beams=[(0.4677, 0.4801), (-0.1, 0.25)],
         gains_file=tmp_path / "g.npy",
         gains_first_channel=0,
+        conjugate_gains=False,
     )
     cfg = yaml.safe_load(p.read_text())
     c = _cmd(cfg)
@@ -35,6 +36,7 @@ def test_beams_gains_and_shutdown(tmp_path):
     assert (c["source_l0_1"], c["source_m0_1"]) == (-0.1, 0.25)
     assert c["max_beams"] == 2 and c["initial_active_beams"] == 2
     assert c["gains_file"].endswith("g.npy") and c["gains_first_channel"] == 0
+    assert c["conjugate_gains"] is False
     assert c["antenna_order"] == "descending"
     assert cfg["baseband_reader"]["end_interrupt"] is False
     assert cfg["tracker_dump"]["exit_after_n_files"] == 20

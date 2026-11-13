@@ -160,7 +160,8 @@ __global__ void generate_steering_weights_tapered_kernel(
     const std::size_t num_beams,
     const std::size_t n_freq,
     const std::size_t n_elem,
-    const std::size_t n_time) {
+    const std::size_t n_time,
+    const std::uint64_t beam_calibration_mask) {
 
     const std::size_t idx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     const std::size_t total = num_beams * n_freq * n_elem;
@@ -195,7 +196,10 @@ __global__ void generate_steering_weights_tapered_kernel(
     float wr = c0 * amp;
     float wi = s0 * amp;
 
-    if (calibration_gains != nullptr) {
+    const bool apply_cal =
+        (calibration_gains != nullptr)
+        && (beam >= 64 || ((beam_calibration_mask >> beam) & 1ULL) != 0ULL);
+    if (apply_cal) {
         const float2 g = __ldg(&calibration_gains[freq * n_elem + elem]);
         const float cal_r = fmaf(-wi, g.y, wr * g.x);
         const float cal_i = fmaf(wr, g.y, wi * g.x);
@@ -1023,7 +1027,8 @@ void launch_generate_steering_weights_tapered(
     std::size_t n_time,
     bool enable_weight_bislc,
     float bislc_diag_loading,
-    cudaStream_t stream) {
+    cudaStream_t stream,
+    std::uint64_t beam_calibration_mask) {
 
     const std::size_t total_weights = num_beams * n_freq * n_elem;
     if (total_weights == 0) return;
@@ -1044,7 +1049,8 @@ void launch_generate_steering_weights_tapered(
         num_beams,
         n_freq,
         n_elem,
-        n_time);
+        n_time,
+        beam_calibration_mask);
 
     // Optional Fused Weight-Space BiSLC (zero-cost cross-beam sidelobe nulling)
     if (enable_weight_bislc && num_beams > 1 && num_beams <= 32) {

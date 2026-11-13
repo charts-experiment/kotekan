@@ -291,6 +291,76 @@ bool test_format_and_zero_blanking_invariance() {
         cudaFree(d_mask);
     }
 
+    // Sub-check 1A-cal: A/B beam_calibration_mask leaves unmasked beam 0 calibrated and beam 1 raw.
+    {
+        const std::size_t num_beams = 2;
+        const float amp = 1.0f / std::sqrt(static_cast<float>(n_ant));
+        const float2 gain{2.0f, 3.0f};
+        std::vector<kotekan::DirectDirection3D> h_dirs(num_beams, kotekan::DirectDirection3D{0.0f, 0.0f, 1.0f});
+        std::vector<double> h_wavenumbers(n_freq);
+        for (std::size_t f = 0; f < n_freq; ++f) {
+            h_wavenumbers[f] = 2.0 * M_PI * freqs[f] / kotekan::charts::constants::speed_of_light_m_per_s;
+        }
+        std::vector<float> h_norm_taper(n_ant, amp);
+        std::vector<float2> h_cal_gains(n_freq * n_ant, gain);
+
+        float2* d_ab_weights = nullptr;
+        kotekan::DirectDirection3D* d_ab_dirs = nullptr;
+        double* d_ab_wavenumbers = nullptr;
+        float3* d_ab_positions = nullptr;
+        float* d_ab_taper = nullptr;
+        float2* d_ab_gains = nullptr;
+
+        CHECK_CUDA(cudaMalloc(&d_ab_weights, num_beams * n_freq * n_ant * sizeof(float2)));
+        CHECK_CUDA(cudaMalloc(&d_ab_dirs, num_beams * sizeof(kotekan::DirectDirection3D)));
+        CHECK_CUDA(cudaMalloc(&d_ab_wavenumbers, n_freq * sizeof(double)));
+        CHECK_CUDA(cudaMalloc(&d_ab_positions, n_ant * sizeof(float3)));
+        CHECK_CUDA(cudaMalloc(&d_ab_taper, n_ant * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_ab_gains, n_freq * n_ant * sizeof(float2)));
+
+        CHECK_CUDA(cudaMemcpy(d_ab_dirs, h_dirs.data(), num_beams * sizeof(kotekan::DirectDirection3D), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_ab_wavenumbers, h_wavenumbers.data(), n_freq * sizeof(double), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_ab_positions, positions.data(), n_ant * sizeof(float3), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_ab_taper, h_norm_taper.data(), n_ant * sizeof(float), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_ab_gains, h_cal_gains.data(), n_freq * n_ant * sizeof(float2), cudaMemcpyHostToDevice));
+
+        kotekan::launch_generate_steering_weights_tapered(
+            d_ab_weights, nullptr, d_ab_dirs, nullptr, d_ab_wavenumbers, d_ab_positions,
+            d_ab_taper, d_ab_gains, num_beams, n_freq, n_ant, n_time,
+            false, 1.0e-4f, stream, 0x1ULL);
+        CHECK_CUDA(cudaStreamSynchronize(stream));
+
+        std::vector<float2> h_ab_weights(num_beams * n_freq * n_ant);
+        CHECK_CUDA(cudaMemcpy(h_ab_weights.data(), d_ab_weights,
+                              h_ab_weights.size() * sizeof(float2), cudaMemcpyDeviceToHost));
+
+        double max_err = 0.0;
+        for (std::size_t f = 0; f < n_freq; ++f) {
+            for (std::size_t e = 0; e < n_ant; ++e) {
+                const float2 w0 = h_ab_weights[(0 * n_freq + f) * n_ant + e];
+                const float2 w1 = h_ab_weights[(1 * n_freq + f) * n_ant + e];
+                const double mag1_err = std::abs(std::hypot(static_cast<double>(w1.x), static_cast<double>(w1.y)) - amp);
+                const float exp0_x = w1.x * gain.x - w1.y * gain.y;
+                const float exp0_y = w1.x * gain.y + w1.y * gain.x;
+                const double cal_err = std::max(std::abs(w0.x - exp0_x), std::abs(w0.y - exp0_y));
+                max_err = std::max(max_err, std::max(mag1_err, cal_err));
+            }
+        }
+        std::cout << "  Testing beam_calibration_mask A/B split: Max Error = "
+                  << std::scientific << max_err << "\n";
+        if (max_err > 1.0e-5) {
+            std::cerr << "  FAILED: beam_calibration_mask A/B split error exceeds 1.0e-5!\n";
+            all_passed = false;
+        }
+
+        cudaFree(d_ab_weights);
+        cudaFree(d_ab_dirs);
+        cudaFree(d_ab_wavenumbers);
+        cudaFree(d_ab_positions);
+        cudaFree(d_ab_taper);
+        cudaFree(d_ab_gains);
+    }
+
     // Edge Case 1B: Calibrated Sub-Array [0, 5, 32, 37] Asymmetric Faults & 25% Missing Packets
     {
         std::cout << "  Testing Edge Case 1B: Calibrated sub-array [0, 5, 32, 37] asymmetric faults & packet loss...\n";
