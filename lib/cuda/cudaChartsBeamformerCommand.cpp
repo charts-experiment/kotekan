@@ -37,6 +37,13 @@ public:
     std::size_t raw_n_time = 15360;
     std::size_t integration_spectra = 10;
     float pfb_quantize_clamp = 7.0F;
+    // Real fine-channel gain G(u), one value per fine index u (centred half-bin order),
+    // repeated for every local coarse channel. Unity by default.
+    std::vector<float> upchan_gain = std::vector<float>(upchannelization_factor, 1.0F);
+    bool upchan_gain_unity = true;
+    std::string upchan_gain_source = "unity";
+    std::string upchan_gain_reference;
+    std::string upchan_gain_sha256; // of the applied float32 [336*32] array
     Dimensions beamform_dims;
     Dimensions output_dims;
     std::size_t raw_voltage_bytes = 0;
@@ -52,6 +59,7 @@ public:
     std::size_t quant_param_bytes = 0;
 
     ComplexFloat* device_weights = nullptr;
+    float* device_upchan_gain = nullptr; // [336*32], fine mode only, immutable after init
     std::uint8_t* device_history_samples = nullptr;
     std::uint8_t* device_fine_packed = nullptr;
     float* device_fp32_scratch = nullptr;
@@ -105,6 +113,25 @@ public:
         }
 
         pfb_quantize_clamp = cfg.get_default<float>(name, "quantize_clamp", 7.0F);
+
+        upchan_gain = cfg.get_default<std::vector<float>>(name, "upchan_gain", upchan_gain);
+        require(upchan_gain.size() == upchannelization_factor,
+                "upchan_gain must have 32 values, one per fine index u");
+        for (const float g : upchan_gain)
+            require(std::isfinite(g) && g > 0.0F, "upchan_gain values must be finite and > 0");
+        upchan_gain_unity = true;
+        for (const float g : upchan_gain)
+            upchan_gain_unity = upchan_gain_unity && g == 1.0F;
+        require(mode == BeamformerInputMode::ChannelizedFine || upchan_gain_unity,
+                "upchan_gain applies only to input_mode: fine");
+        upchan_gain_source = cfg.get_default<std::string>(
+            name, "upchan_gain_source", upchan_gain_unity ? "unity" : "");
+        require(upchan_gain_source == "unity" || upchan_gain_source == "analytic"
+                    || upchan_gain_source == "measured",
+                "upchan_gain_source must be 'unity', 'analytic' or 'measured'");
+        require((upchan_gain_source == "unity") == upchan_gain_unity,
+                "upchan_gain_source 'unity' is required for, and only for, all-unity upchan_gain");
+        upchan_gain_reference = cfg.get_default<std::string>(name, "upchan_gain_reference", "");
 
         output_dims = {integrated_time_count(beamform_dims.n_time, integration_spectra),
                        beamform_dims.n_freq, n_ant, n_beams};
@@ -234,6 +261,20 @@ public:
                 beamform_dims.n_time * beamform_dims.n_freq * beamform_dims.n_ant;
             device_fine_packed = static_cast<std::uint8_t*>(
                 device.get_gpu_memory(name + "/fine_packed", fine_packed_bytes));
+
+            // Per-shard global memory (not __constant__, which every instance of the module
+            // shares). Written once here, before any frame, and only read afterwards.
+            std::vector<float> applied(fine_frequency_channels);
+            for (std::size_t f = 0; f < local_frequency_channels; ++f)
+                for (std::size_t u = 0; u < upchannelization_factor; ++u)
+                    applied[f * upchannelization_factor + u] = upchan_gain[u];
+            const std::size_t gain_bytes = applied.size() * sizeof(float);
+            upchan_gain_sha256 = detail::sha256_hex(reinterpret_cast<const char*>(applied.data()),
+                                                    gain_bytes);
+            device_upchan_gain =
+                static_cast<float*>(device.get_gpu_memory(name + "/upchan_gain", gain_bytes));
+            CHECK_CUDA_ERROR(cudaMemcpy(device_upchan_gain, applied.data(), gain_bytes,
+                                        cudaMemcpyHostToDevice));
         }
 
         if (quantize_int8) {
@@ -265,6 +306,11 @@ public:
         require(bool(state), "missing chartsBeamformerState");
         if (inst == 0 && !state->weights_summary.empty())
             INFO("CHARTS weights loaded from .npy: {:s}", state->weights_summary);
+        if (inst == 0 && !state->upchan_gain_unity)
+            INFO("CHARTS fine upchan_gain source={:s} reference='{:s}' G[0]={:g} G[15]={:g} "
+                 "sha256={:s}",
+                 state->upchan_gain_source, state->upchan_gain_reference, state->upchan_gain[0],
+                 state->upchan_gain[15], state->upchan_gain_sha256);
         if (inst == 0 && state->legacy_bin_weights)
             WARN("CHARTS weights loaded from a raw .bin: no descriptor, version or SHA-256 "
                  "check; prefer the .npy produced by build_beamformer_weights.py");
@@ -377,6 +423,11 @@ public:
                                                           state->freq_zero_hz,
                                                           state->freq_step_hz);
             product.quantize_clamp = state->pfb_quantize_clamp;
+            product.upchan_gain = state->upchan_gain;
+            product.upchan_gain_unity = state->upchan_gain_unity;
+            product.upchan_gain_source = state->upchan_gain_source;
+            product.upchan_gain_reference = state->upchan_gain_reference;
+            product.upchan_gain_sha256 = state->upchan_gain_sha256;
             product.weights = state->weights_identity;
             product.intensity_buffer = out_buf_name;
             product.exposure_buffer = state->packet_loss_enabled
@@ -493,7 +544,8 @@ public:
             launch_fused_upchannelizer(stream, d_voltage, state->device_history_samples,
                                        state->history_initialized, state->device_fine_packed,
                                        state->raw_n_time, local_frequency_channels,
-                                       state->beamform_dims.n_ant, state->pfb_quantize_clamp);
+                                       state->beamform_dims.n_ant, state->pfb_quantize_clamp,
+                                       state->device_upchan_gain);
             launch_pfb_history_update(stream, d_voltage, state->device_history_samples,
                                       state->raw_n_time, local_frequency_channels,
                                       state->beamform_dims.n_ant);

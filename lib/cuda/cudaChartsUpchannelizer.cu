@@ -194,6 +194,7 @@ __global__ void fused_upchannelizer_kernel(
     const std::size_t n_coarse,
     const std::size_t n_element,
     const float quantize_clamp,
+    const float* __restrict__ upchan_gain,
     const std::size_t total_transforms) {
     const std::size_t idx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx >= total_transforms) {
@@ -248,6 +249,17 @@ __global__ void fused_upchannelizer_kernel(
     }
 
     fft32_in_place(r_real, r_imag);
+
+    // Optional real fine-channel gain G[f*32 + u], applied before the clamp and rounding as in
+    // CHIME/CHORD upchan.jl step 7 (E5 = G * E4). nullptr means unity.
+    if (upchan_gain != nullptr) {
+        #pragma unroll
+        for (std::size_t u = 0; u < 32; ++u) {
+            const float g = __ldg(&upchan_gain[f * 32 + u]);
+            r_real[u] *= g;
+            r_imag[u] *= g;
+        }
+    }
 
     // Quantize and pack the results into 4-bit signed integers
     const std::size_t base_out_idx = (t_out * n_coarse + f) * 32;
@@ -342,7 +354,7 @@ void launch_fused_upchannelizer(const cudaStream_t stream, const std::uint8_t* r
                                 const std::uint8_t* history_samples, const bool history_initialized,
                                 std::uint8_t* channelized_packed, const std::size_t raw_n_time,
                                 const std::size_t n_coarse, const std::size_t n_element,
-                                const float quantize_clamp) {
+                                const float quantize_clamp, const float* upchan_gain) {
     if (!raw_payload || !channelized_packed) {
         throw std::invalid_argument("upchannelizer device pointers must not be null");
     }
@@ -359,7 +371,7 @@ void launch_fused_upchannelizer(const cudaStream_t stream, const std::uint8_t* r
     fused_upchannelizer_kernel<<<static_cast<unsigned int>(blocks),
                                  static_cast<unsigned int>(threads), 0, stream>>>(
         raw_payload, history_samples, history_initialized, channelized_packed, raw_n_time, n_coarse,
-        n_element, quantize_clamp, total_transforms);
+        n_element, quantize_clamp, upchan_gain, total_transforms);
     check_cuda(cudaGetLastError(), "fused_upchannelizer_kernel launch");
 }
 

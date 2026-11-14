@@ -85,11 +85,15 @@ inline double upchannelized_bin_fraction(const std::size_t fine_bin) {
 // -----------------------------------------------------------------------------
 // Device Stage Launchers (Caller-Owned Buffers & Stream, Non-Blocking)
 // -----------------------------------------------------------------------------
+// upchan_gain: optional device array [n_coarse * 32] of real gains G[f*32 + u] (centred
+// half-bin order) that multiply the fine voltages after the FFT and before the clamp and
+// int4 rounding. nullptr is unity.
 void launch_fused_upchannelizer(cudaStream_t stream, const std::uint8_t* raw_payload,
                                 const std::uint8_t* history_samples, bool history_initialized,
                                 std::uint8_t* channelized_packed, std::size_t raw_n_time,
                                 std::size_t n_coarse = local_frequency_channels,
-                                std::size_t n_element = 64, float quantize_clamp = 7.0F);
+                                std::size_t n_element = 64, float quantize_clamp = 7.0F,
+                                const float* upchan_gain = nullptr);
 
 void launch_pfb_history_update(cudaStream_t stream, const std::uint8_t* raw_payload,
                                std::uint8_t* history_samples, std::size_t raw_n_time,

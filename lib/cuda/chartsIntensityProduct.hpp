@@ -18,7 +18,8 @@ namespace beamformer {
 // to the frame files. The raw chartsMetadata forwarded with each frame stays immutable input
 // provenance; this sidecar describes what the payload means. Per-frame data (exposure counts,
 // int8 offset/scale) are separate products carrying the same raw metadata.
-inline constexpr const char* product_schema = "charts-intensity-product-v1";
+// v2 (2026-11-02): history.upchan_gain describes the fine-channel gain G(u).
+inline constexpr const char* product_schema = "charts-intensity-product-v2";
 
 struct ProductDescription {
     bool fine = true;
@@ -34,6 +35,11 @@ struct ProductDescription {
     double freq_step_hz = 0;
     std::vector<double> frequencies_hz;
     float quantize_clamp = 7.0F;
+    std::vector<float> upchan_gain;  // 32 values per fine index u; fine mode only
+    bool upchan_gain_unity = true;
+    std::string upchan_gain_source = "unity";
+    std::string upchan_gain_reference;
+    std::string upchan_gain_sha256;  // of the applied float32 [336*32] array
     nlohmann::json weights;
     std::string intensity_buffer;
     std::string exposure_buffer;   // empty when packet loss is not enabled
@@ -66,9 +72,13 @@ inline nlohmann::json product_descriptor(const ProductDescription& p) {
           {"axes", {"integration_window", "frequency", "beam"}},
           {"layout", "C-order, beam fastest"},
           {"power_convention",
-           "sum over the window of |sum_e W[b,f,e] x[f,e]|^2 for every supplied spectrum; "
-           "no averaging, exposure normalization or rejection; arbitrary units of "
-           "(weight * int4 code)^2"},
+           p.fine ? "sum over the window of |sum_e W[b,f,e] x[f,e]|^2 for every supplied "
+                    "spectrum, where x is the fine int4 code after the gain G(u) "
+                    "(history.upchan_gain); no averaging, exposure normalization or rejection; "
+                    "arbitrary units of (weight * int4 code)^2"
+                  : "sum over the window of |sum_e W[b,f,e] x[f,e]|^2 for every supplied "
+                    "spectrum; no averaging, exposure normalization or rejection; arbitrary "
+                    "units of (weight * int4 code)^2"},
           {"component_convention", "x = low nibble + i*high nibble"}}},
         {"frequency",
          {{"nu0_hz", p.freq_zero_hz},
@@ -89,6 +99,20 @@ inline nlohmann::json product_descriptor(const ProductDescription& p) {
         {"history",
          p.fine ? json{{"pfb", "4-tap sinc-Hanning, L=128, coefficients include 1/32, forward "
                                "FFT, centered half-bin order"},
+                       {"upchan_gain",
+                        {{"values", p.upchan_gain},
+                         {"unity", p.upchan_gain_unity},
+                         {"source", p.upchan_gain_source},
+                         {"reference", p.upchan_gain_reference},
+                         {"applied", "float32 [336*32], G[f*32 + u] = values[u] for every local "
+                                     "coarse channel f"},
+                         {"sha256", p.upchan_gain_sha256},
+                         {"placement", "multiplies the fine voltages after the FFT and before "
+                                       "the clamp and int4 rounding (CHIME/CHORD upchan.jl "
+                                       "step 7)"},
+                         {"power", "intensity scales as G(u)^2 where the int4 rounding is "
+                                   "negligible; divide by G(u)^2 to refer power to the "
+                                   "ungained upchannelizer"}}},
                        {"fine_quantization",
                         {{"clamp", p.quantize_clamp}, {"rounding", "half to even"}}},
                        {"incomplete_spectra_after_start_or_reset", {0, 1, 2}},

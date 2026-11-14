@@ -1,4 +1,4 @@
-"""Reader/decoder for the CHARTS integrated intensity product (charts-intensity-product-v1).
+"""Reader/decoder for the CHARTS integrated intensity product (charts-intensity-product-v2).
 
 The descriptor is the JSON sidecar written by cudaChartsBeamformerCommand when
 `product_descriptor_file` is configured. Frame records are native rawFileWrite records:
@@ -15,7 +15,9 @@ import numpy as np
 
 from .packet_loss import read_product
 
-SCHEMA = "charts-intensity-product-v1"
+SCHEMA = "charts-intensity-product-v2"
+# v1 descriptors (before 2026-11-02) have no history.upchan_gain; their fine gain is unity.
+SUPPORTED_SCHEMAS = ("charts-intensity-product-v1", SCHEMA)
 INVALID_CODE = -128
 
 
@@ -25,8 +27,9 @@ class ProductError(ValueError):
 
 def load_descriptor(path: Path) -> dict:
     d = json.loads(Path(path).read_text())
-    if d.get("schema") != SCHEMA:
-        raise ProductError(f"unsupported schema {d.get('schema')!r}, expected {SCHEMA}")
+    if d.get("schema") not in SUPPORTED_SCHEMAS:
+        raise ProductError(f"unsupported schema {d.get('schema')!r}, expected one of "
+                           f"{SUPPORTED_SCHEMAS}")
     for key in ("shard", "T_raw", "K", "U", "intensity", "frequency", "association"):
         if key not in d:
             raise ProductError(f"descriptor lacks {key!r}")
@@ -42,6 +45,23 @@ def frequencies_hz(d: dict) -> np.ndarray:
         u = np.arange(d["U"])
         offs = (local[:, None] + (u[None, :] - (d["U"] - 1) / 2) / d["U"]).reshape(-1)
     return f["nu0_hz"] + (336 * d["shard"] + offs) * f["dnu_hz"]
+
+
+def upchan_gain(d: dict) -> np.ndarray | None:
+    """Applied fine-channel gain G as float32 [336*32] (index f*32 + u), or None in coarse
+    mode. Intensity scales as G^2; divide by it to refer power to the ungained upchannelizer."""
+    if d["U"] == 1:
+        return None
+    g = d.get("history", {}).get("upchan_gain")
+    if g is None:
+        # Only v1 (before the gain existed) implies unity; v2 must state it.
+        if d.get("schema") != "charts-intensity-product-v1":
+            raise ProductError("fine-mode descriptor lacks history.upchan_gain")
+        return np.ones(336 * d["U"], np.float32)
+    values = np.asarray(g["values"], np.float32)
+    if values.shape != (d["U"],):
+        raise ProductError(f"history.upchan_gain.values has shape {values.shape}")
+    return np.tile(values, 336)
 
 
 def record_key(meta) -> tuple:
