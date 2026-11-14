@@ -30,6 +30,7 @@ public:
 
     cudaEvent_t execute(cudaPipelineState& pipestate,
                         const std::vector<cudaEvent_t>& pre_events) override;
+    void finalize_frame() override;
 
     double get_freq_start_hz() const {
         return _freq_start_hz;
@@ -82,6 +83,7 @@ private:
     bool _exempt_resolved = false;
     std::uint64_t _applied_mask_gen = 0;
     std::uint64_t _applied_rfi_cfg_gen = 0;
+    std::uint64_t _applied_ema_reset_gen = 1;
     std::uint64_t _frame_counter = 0;
 
     // Device buffers
@@ -93,10 +95,13 @@ private:
     float* _d_channel_gains = nullptr;
     std::uint8_t* _d_chunk_rfi_mask = nullptr;
     std::uint8_t* _d_exempt_channels = nullptr;
+    float* _d_ema_power = nullptr;
+    float* _d_ema_mad = nullptr;
     RfiChannelStats* _d_channel_stats = nullptr;
 
     // Pinned host telemetry buffer
     RfiChannelStats* _h_channel_stats = nullptr;
+    bool _last_frame_enabled = false;
 
     mutable std::mutex _stats_mutex;
     std::vector<RfiChannelStats> _last_channel_stats;
@@ -104,6 +109,7 @@ private:
     static std::mutex _global_mutex;
     static RfiMitigationConfig _shared_config;
     static std::uint64_t _config_generation;
+    static std::uint64_t _ema_reset_generation;
     static std::vector<cudaRfiMitigationCommand*> _instances;
     static bool _endpoints_registered;
 };

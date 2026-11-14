@@ -199,7 +199,9 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
     float sk_sigma_unit, bool enable_sk, float sk_sigma_thresh, bool enable_burst,
     float burst_sigma_thresh, bool enable_freq_mad, int freq_win_half, float mad_sigma_thresh,
     bool enable_saturation_check, float sat_fraction_thresh, bool enable_morphology_sir,
-    int edge_channels_to_ignore, const std::uint8_t* __restrict__ d_exempt_channels) {
+    int edge_channels_to_ignore, const std::uint8_t* __restrict__ d_exempt_channels,
+    bool enable_persistent_ema, float ema_alpha, float* __restrict__ d_ema_power,
+    float* __restrict__ d_ema_mad) {
 
     __shared__ float s_chan_med[MAX_SHARED_FREQ];
     __shared__ float s_chan_mad[MAX_SHARED_FREQ];
@@ -326,7 +328,7 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
                 const float local_mad = (inlier_count >= 3)
                                             ? (1.4826f * device_median_small(win_buf, inlier_count))
                                             : prelim_mad;
-                const float eff_sigma = fmaxf(local_mad, 0.015f * fmaxf(local_med, 1.0e-3f));
+                const float eff_sigma = fmaxf(local_mad, 0.05f * fmaxf(local_med, 1.0e-3f));
 
                 float p_target = chan_med_p;
                 if (d_channel_gains != nullptr) {
@@ -351,7 +353,16 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
         const float sk_hi = local_sk_center + sk_half_width;
         const float sk_lo = fmaxf(0.05f, local_sk_center - sk_half_width);
 
-        const float burst_eff_sigma = fmaxf(chan_mad_p, 0.025f * fmaxf(chan_med_p, 1.0e-3f));
+        // Bound temporal burst baseline by persistent cross-frame EMA when available so
+        // multi-second steady bursts cannot hide inside a single 51.2 ms frame median.
+        const float ema_p = (d_ema_power != nullptr) ? d_ema_power[f] : 0.0f;
+        const float ema_mad = (d_ema_mad != nullptr) ? d_ema_mad[f] : 0.0f;
+        const bool use_ema =
+            enable_persistent_ema && (d_ema_power != nullptr) && !is_exempt && (ema_p > 0.0f);
+        const float ref_med_p = use_ema ? fminf(chan_med_p, ema_p) : chan_med_p;
+        const float ref_mad_p =
+            (use_ema && ema_mad > 0.0f) ? fminf(chan_mad_p, ema_mad) : chan_mad_p;
+        const float burst_eff_sigma = fmaxf(ref_mad_p, 0.025f * fmaxf(ref_med_p, 1.0e-3f));
 
         float sum_p = 0.0f;
         float sum_sk = 0.0f;
@@ -384,7 +395,7 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
                 }
             }
             if (enable_burst && n_chunks >= 4) {
-                const float burst_z = (p - chan_med_p) / burst_eff_sigma;
+                const float burst_z = (p - ref_med_p) / burst_eff_sigma;
                 if (burst_z >= burst_sigma_thresh) {
                     mask_bits |= RFI_TIME_BURST;
                 }
@@ -412,7 +423,7 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
                         const std::size_t prev_idx = (c - 1) * n_freq + static_cast<std::size_t>(f);
                         if (d_chunk_rfi_mask[prev_idx] == RFI_CLEAN) {
                             const float prev_p = d_chunk_power[prev_idx];
-                            const float prev_z = (prev_p - chan_med_p) / burst_eff_sigma;
+                            const float prev_z = (prev_p - ref_med_p) / burst_eff_sigma;
                             if (prev_z >= 0.5f * burst_sigma_thresh) {
                                 d_chunk_rfi_mask[prev_idx] |= RFI_MORPHOLOGY_SIR;
                                 flagged_chunks++;
@@ -424,7 +435,7 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
                         const std::size_t next_idx = (c + 1) * n_freq + static_cast<std::size_t>(f);
                         if (d_chunk_rfi_mask[next_idx] == RFI_CLEAN) {
                             const float next_p = d_chunk_power[next_idx];
-                            const float next_z = (next_p - chan_med_p) / burst_eff_sigma;
+                            const float next_z = (next_p - ref_med_p) / burst_eff_sigma;
                             if (next_z >= 0.5f * burst_sigma_thresh) {
                                 d_chunk_rfi_mask[next_idx] |= RFI_MORPHOLOGY_SIR;
                                 flagged_chunks++;
@@ -432,6 +443,23 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
                             }
                         }
                     }
+                }
+            }
+        }
+
+        if (enable_persistent_ema && d_ema_power != nullptr && !is_exempt && chan_med_p > 0.0f) {
+            const float alpha = fminf(fmaxf(ema_alpha, 1.0e-4f), 1.0f);
+            if (ema_p <= 0.0f) {
+                if (flagged_chunks == 0U) {
+                    d_ema_power[f] = chan_med_p;
+                    if (d_ema_mad != nullptr) {
+                        d_ema_mad[f] = chan_mad_p;
+                    }
+                }
+            } else if (flagged_chunks == 0U || chan_med_p < ema_p) {
+                d_ema_power[f] = (1.0f - alpha) * ema_p + alpha * chan_med_p;
+                if (d_ema_mad != nullptr) {
+                    d_ema_mad[f] = (1.0f - alpha) * ema_mad + alpha * chan_mad_p;
                 }
             }
         }
@@ -531,7 +559,8 @@ void launch_evaluate_rfi_flags(const float* __restrict__ d_chunk_power,
                                std::size_t n_freq, int num_active_antennas,
                                std::size_t eff_samples_per_chunk, const RfiMitigationConfig& cfg,
                                cudaStream_t stream,
-                               const std::uint8_t* __restrict__ d_exempt_channels) {
+                               const std::uint8_t* __restrict__ d_exempt_channels,
+                               float* __restrict__ d_ema_power, float* __restrict__ d_ema_mad) {
     if (d_chunk_power == nullptr || d_chunk_sk == nullptr || d_chunk_rfi_mask == nullptr
         || n_chunks == 0 || n_freq == 0) {
         return;
@@ -548,7 +577,8 @@ void launch_evaluate_rfi_flags(const float* __restrict__ d_chunk_power,
         cfg.sk_sigma_threshold, cfg.enable_time_burst_check, cfg.burst_sigma_threshold,
         cfg.enable_freq_mad_check, cfg.freq_window_half_width, cfg.mad_sigma_threshold,
         cfg.enable_saturation_check, cfg.saturation_fraction_threshold, cfg.enable_morphology_sir,
-        cfg.edge_channels_to_ignore, d_exempt_channels);
+        cfg.edge_channels_to_ignore, d_exempt_channels, cfg.enable_persistent_ema, cfg.ema_alpha,
+        d_ema_power, d_ema_mad);
 }
 
 void launch_blank_rfi_chunks(int4x2_t* __restrict__ d_voltages,

@@ -30,6 +30,7 @@ namespace kotekan {
 std::mutex cudaRfiMitigationCommand::_global_mutex;
 RfiMitigationConfig cudaRfiMitigationCommand::_shared_config;
 std::uint64_t cudaRfiMitigationCommand::_config_generation = 1;
+std::uint64_t cudaRfiMitigationCommand::_ema_reset_generation = 1;
 std::vector<cudaRfiMitigationCommand*> cudaRfiMitigationCommand::_instances;
 bool cudaRfiMitigationCommand::_endpoints_registered = false;
 
@@ -119,8 +120,12 @@ cudaRfiMitigationCommand::cudaRfiMitigationCommand(Config& config, const std::st
         config.get_default<float>(unique_name, "saturation_fraction_threshold", 0.02f);
     init_cfg.enable_morphology_sir =
         config.get_default<bool>(unique_name, "enable_morphology_sir", true);
-    init_cfg.edge_channels_to_ignore =
-        config.get_default<int>(unique_name, "edge_channels_to_ignore", 16);
+    init_cfg.edge_channels_to_ignore = std::max<int>(
+        0, config.get_default<int>(unique_name, "edge_channels_to_ignore", 0));
+    init_cfg.enable_persistent_ema =
+        config.get_default<bool>(unique_name, "enable_persistent_ema", true);
+    init_cfg.ema_alpha = std::min<float>(
+        1.0f, std::max<float>(1.0e-4f, config.get_default<float>(unique_name, "ema_alpha", 0.02f)));
 
     auto notch_flat =
         config.get_default<std::vector<double>>(unique_name, "static_notch_bands_mhz", {});
@@ -177,6 +182,13 @@ cudaRfiMitigationCommand::cudaRfiMitigationCommand(Config& config, const std::st
                 reply["saturation_fraction_threshold"] = cfg.saturation_fraction_threshold;
                 reply["enable_morphology_sir"] = cfg.enable_morphology_sir;
                 reply["edge_channels_to_ignore"] = cfg.edge_channels_to_ignore;
+                reply["enable_persistent_ema"] = cfg.enable_persistent_ema;
+                reply["ema_alpha"] = cfg.ema_alpha;
+                nlohmann::json notch_arr = nlohmann::json::array();
+                for (const auto& [lo_mhz, hi_mhz] : cfg.static_notch_bands_mhz) {
+                    notch_arr.push_back({lo_mhz, hi_mhz});
+                }
+                reply["static_notch_bands_mhz"] = notch_arr;
 
                 int total_channels = 0;
                 int flagged_channels = 0;
@@ -272,6 +284,34 @@ cudaRfiMitigationCommand::cudaRfiMitigationCommand(Config& config, const std::st
                         if (j.contains("edge_channels_to_ignore"))
                             _shared_config.edge_channels_to_ignore =
                                 std::max<int>(0, j["edge_channels_to_ignore"].get<int>());
+                        if (j.contains("enable_persistent_ema"))
+                            _shared_config.enable_persistent_ema =
+                                j["enable_persistent_ema"].get<bool>();
+                        if (j.contains("ema_alpha"))
+                            _shared_config.ema_alpha = std::min<float>(
+                                1.0f, std::max<float>(1.0e-4f, j["ema_alpha"].get<float>()));
+                        if (j.contains("static_notch_bands_mhz")
+                            && j["static_notch_bands_mhz"].is_array()) {
+                            std::vector<std::pair<double, double>> new_notches;
+                            const auto& arr = j["static_notch_bands_mhz"];
+                            if (!arr.empty() && arr.front().is_array()) {
+                                for (const auto& pair_item : arr) {
+                                    if (pair_item.is_array() && pair_item.size() >= 2) {
+                                        new_notches.emplace_back(pair_item[0].get<double>(),
+                                                                 pair_item[1].get<double>());
+                                    }
+                                }
+                            } else {
+                                for (std::size_t k = 0; k + 1 < arr.size(); k += 2) {
+                                    new_notches.emplace_back(arr[k].get<double>(),
+                                                             arr[k + 1].get<double>());
+                                }
+                            }
+                            _shared_config.static_notch_bands_mhz = std::move(new_notches);
+                        }
+                        if (j.contains("reset_ema") && j["reset_ema"].get<bool>()) {
+                            _ema_reset_generation++;
+                        }
 
                         _config_generation++;
 
@@ -351,6 +391,8 @@ void cudaRfiMitigationCommand::allocate_device_buffers() {
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_chunk_rfi_mask, n_cells * sizeof(std::uint8_t)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_channel_stats, _num_local_freq * sizeof(RfiChannelStats)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_exempt_channels, _num_local_freq * sizeof(std::uint8_t)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_ema_power, _num_local_freq * sizeof(float)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_ema_mad, _num_local_freq * sizeof(float)));
     CHECK_CUDA_ERROR_NON_OO(
         cudaMallocHost(&_h_channel_stats, _num_local_freq * sizeof(RfiChannelStats)));
 
@@ -359,6 +401,8 @@ void cudaRfiMitigationCommand::allocate_device_buffers() {
     CHECK_CUDA_ERROR_NON_OO(cudaMemset(_d_chunk_sat_frac, 0, n_cells * sizeof(float)));
     CHECK_CUDA_ERROR_NON_OO(cudaMemset(_d_channel_gains, 0, _num_local_freq * sizeof(float)));
     CHECK_CUDA_ERROR_NON_OO(cudaMemset(_d_chunk_rfi_mask, 0, n_cells * sizeof(std::uint8_t)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemset(_d_ema_power, 0, _num_local_freq * sizeof(float)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemset(_d_ema_mad, 0, _num_local_freq * sizeof(float)));
     CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(_d_exempt_channels, _h_exempt_channels.data(),
                                        _num_local_freq * sizeof(std::uint8_t),
                                        cudaMemcpyHostToDevice));
@@ -409,6 +453,14 @@ void cudaRfiMitigationCommand::free_device_buffers() {
     if (_d_exempt_channels) {
         cudaFree(_d_exempt_channels);
         _d_exempt_channels = nullptr;
+    }
+    if (_d_ema_power) {
+        cudaFree(_d_ema_power);
+        _d_ema_power = nullptr;
+    }
+    if (_d_ema_mad) {
+        cudaFree(_d_ema_mad);
+        _d_ema_mad = nullptr;
     }
     if (_d_channel_stats) {
         cudaFree(_d_channel_stats);
@@ -471,6 +523,7 @@ void cudaRfiMitigationCommand::update_config(const RfiMitigationConfig& cfg) {
 cudaEvent_t cudaRfiMitigationCommand::execute(cudaPipelineState& /*pipestate*/,
                                               const std::vector<cudaEvent_t>&) {
     pre_execute();
+    _last_frame_enabled = false;
 
     const std::size_t frame_bytes = static_cast<std::size_t>(_samples_per_data_set)
                                     * static_cast<std::size_t>(_num_local_freq)
@@ -520,10 +573,12 @@ cudaEvent_t cudaRfiMitigationCommand::execute(cudaPipelineState& /*pipestate*/,
 
     RfiMitigationConfig cfg;
     std::uint64_t cfg_gen = 0;
+    std::uint64_t ema_reset_gen = 0;
     {
         std::lock_guard<std::mutex> lk(_global_mutex);
         cfg = _shared_config;
         cfg_gen = _config_generation;
+        ema_reset_gen = _ema_reset_generation;
     }
 
     if (_applied_rfi_cfg_gen != cfg_gen) {
@@ -535,6 +590,7 @@ cudaEvent_t cudaRfiMitigationCommand::execute(cudaPipelineState& /*pipestate*/,
     const auto mask_cfg = cudaAntennaMaskCommand::get_config();
     const auto tracker_cfg = cudaDirectBeamTrackerCommand::get_shared_config();
     const std::uint64_t combined_gen = mask_cfg.mask_generation ^ (tracker_cfg.mask_generation << 16);
+    bool reset_ema_now = (_applied_ema_reset_gen != ema_reset_gen);
     if (_applied_mask_gen != combined_gen) {
         const auto ant_mask = cudaAntennaMaskCommand::get_current_mask();
         const auto tracker_mask = cudaDirectBeamTrackerCommand::get_shared_antenna_mask();
@@ -551,11 +607,25 @@ cudaEvent_t cudaRfiMitigationCommand::execute(cudaPipelineState& /*pipestate*/,
         if (alive.empty()) {
             alive = _configured_active_raw;
         }
+        if (alive.size() != _current_active_raw.size()) {
+            reset_ema_now = true;
+        }
         _current_active_raw = alive;
         CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_d_active_antennas, _current_active_raw.data(),
                                                 _current_active_raw.size() * sizeof(int),
                                                 cudaMemcpyHostToDevice, stream));
         _applied_mask_gen = combined_gen;
+    }
+    if (reset_ema_now) {
+        if (_d_ema_power) {
+            CHECK_CUDA_ERROR_NON_OO(
+                cudaMemsetAsync(_d_ema_power, 0, _num_local_freq * sizeof(float), stream));
+        }
+        if (_d_ema_mad) {
+            CHECK_CUDA_ERROR_NON_OO(
+                cudaMemsetAsync(_d_ema_mad, 0, _num_local_freq * sizeof(float), stream));
+        }
+        _applied_ema_reset_gen = ema_reset_gen;
     }
 
     if (cfg.enabled && !_current_active_raw.empty()) {
@@ -575,7 +645,7 @@ cudaEvent_t cudaRfiMitigationCommand::execute(cudaPipelineState& /*pipestate*/,
         launch_evaluate_rfi_flags(_d_chunk_power, _d_chunk_sk, _d_chunk_sat_frac, _d_static_notch,
                                   _d_channel_gains, _d_chunk_rfi_mask, _d_channel_stats, _num_chunks,
                                   static_cast<std::size_t>(_num_local_freq), num_active, eff_m, cfg,
-                                  stream, _d_exempt_channels);
+                                  stream, _d_exempt_channels, _d_ema_power, _d_ema_mad);
 
         // Pass 3: Optional in-place voltage blanking of flagged (chunk, freq) cells
         if (cfg.blank_voltages_enabled) {
@@ -600,20 +670,27 @@ cudaEvent_t cudaRfiMitigationCommand::execute(cudaPipelineState& /*pipestate*/,
             }
         }
 
-        // Copy lightweight per-channel summary (336 * 24B = 8 KB) to pinned host for REST telemetry
+        // Copy lightweight per-channel summary (336 * 24B = 8 KB) to pinned host for REST telemetry;
+        // consume _h_channel_stats only in finalize_frame() after the stream completes.
         CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_h_channel_stats, _d_channel_stats,
                                                 _num_local_freq * sizeof(RfiChannelStats),
                                                 cudaMemcpyDeviceToHost, stream));
-        {
-            std::lock_guard<std::mutex> lk(_stats_mutex);
-            for (int f = 0; f < _num_local_freq; ++f) {
-                _last_channel_stats[static_cast<std::size_t>(f)] = _h_channel_stats[f];
-            }
-        }
+        _last_frame_enabled = true;
     }
 
     _frame_counter++;
     return record_end_event();
+}
+
+void cudaRfiMitigationCommand::finalize_frame() {
+    gpuCommand::finalize_frame();
+    if (!_last_frame_enabled || !_h_channel_stats) {
+        return;
+    }
+    std::lock_guard<std::mutex> lk(_stats_mutex);
+    for (int f = 0; f < _num_local_freq; ++f) {
+        _last_channel_stats[static_cast<std::size_t>(f)] = _h_channel_stats[f];
+    }
 }
 
 } // namespace kotekan

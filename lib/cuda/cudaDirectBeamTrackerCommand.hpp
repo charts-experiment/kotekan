@@ -29,6 +29,8 @@ struct TrackerGroup {
     DirectBeamTrackerConfig config;
     std::vector<cudaDirectBeamTrackerCommand*> instances;
     bool endpoints_registered = false;
+    std::string gains_file;
+    std::uint64_t gains_generation = 1;
 };
 
 class cudaDirectBeamTrackerCommand : public cudaCommand {
@@ -75,6 +77,18 @@ public:
     }
     double get_last_timestamp_utc() const {
         return _last_timestamp_utc.load(std::memory_order_relaxed);
+    }
+    int32_t get_gains_first_channel() const {
+        return _gains_first_channel;
+    }
+    int32_t get_num_antennas() const {
+        return _num_antennas;
+    }
+    const std::vector<int>& get_gains_antennas() const {
+        return _gains_antennas;
+    }
+    bool get_conjugate_gains() const {
+        return _conjugate_gains;
     }
 
 private:
@@ -123,6 +137,7 @@ private:
     // Per-instance generation trackers for multi-stream synchronization
     std::uint64_t _applied_config_generation = 0;
     std::uint64_t _applied_mask_generation = 0;
+    std::uint64_t _applied_gains_generation = 0;
     std::uint64_t _applied_beam_calibration_mask = ~0ULL;
 
     // CUDA Graph state
