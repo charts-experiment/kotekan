@@ -3,7 +3,7 @@
 Run with /usr/bin/python3 -m test_charts.tests.test_stage_d_product_gpu [--results-dir PATH].
 
 Acceptance:
-* cudaChartsBeamformerCommand writes charts-intensity-product-v1 (product_descriptor_file);
+* cudaChartsBeamformerCommand writes charts-intensity-product-v2 (product_descriptor_file);
   its shape/dtype/U/K/frequency map/timing/weights identity/exposure/int8 sections match the
   configuration and the frame files, and test_charts.sim.intensity_product round-trips them.
 * int8 offset/scale per 1x16x16 chunk is exported per frame (gpu_mem_quant_params ->

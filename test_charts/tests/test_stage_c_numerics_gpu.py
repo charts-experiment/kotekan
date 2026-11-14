@@ -93,9 +93,10 @@ def analysis_matrix(alternating_sign: bool = True) -> np.ndarray:
 
 
 def fine_quantized(raw_frame: np.ndarray, history: np.ndarray | None, *,
-                   alternating_sign: bool = True, shift: int = 0):
-    """Section-2 equation then clamp/round. Returns q [M][F*32][E] complex64, amb uint8.
-    shift (negative control) moves the 128-sample support later by that many samples."""
+                   alternating_sign: bool = True, shift: int = 0, gain=None):
+    """Section-2 equation, optional fine gain, then clamp/round. Returns q [M][F*32][E]
+    complex64, amb uint8. shift (negative control) moves the 128-sample support later by that
+    many samples. gain: 32 real values G[u] (upchan_gain), applied before the clamp."""
     t_raw = raw_frame.shape[0]
     m_count = t_raw // 32
     x = decode(raw_frame)
@@ -107,6 +108,8 @@ def fine_quantized(raw_frame: np.ndarray, history: np.ndarray | None, *,
     for f0 in range(0, F, 16):
         win = np.lib.stride_tricks.sliding_window_view(ext[:, f0:f0 + 16], 128, axis=0)[::32][:m_count]
         y = (win @ km).transpose(0, 1, 3, 2)                                   # [M][16][U][E]
+        if gain is not None:
+            y = y * np.asarray(gain, np.float64)[None, None, :, None]
         parts = []
         a = np.zeros(y.shape, np.uint8)
         for comp in (y.real, y.imag):
