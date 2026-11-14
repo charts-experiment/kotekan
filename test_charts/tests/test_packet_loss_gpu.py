@@ -29,31 +29,30 @@ from test_charts.sim.packet_loss import (
 ROOT = Path(__file__).resolve().parents[2]
 RESULTS = None
 BINARY = ROOT / "build/kotekan/kotekan"
+B = 128                  # fixed beam count
+COHERENT_BEAM = B // 2   # generated default geometry: beam B/2 is l = 0 (zenith)
 
 
 def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def exposure_expectation(missing, previous_missing, *, mode, k, reset):
+def exposure_expectation(missing, previous_missing, *, k=10, reset):
     """Analytical bad-sample interval union on the fine grid.
 
     A missing raw tick x affects m from ceil((x−31)/32) through floor((x+96)/32).
     This deliberately uses interval endpoints, independently of the GPU's tap loop.
     """
-    if mode == "coarse":
-        complete = missing == 0
-    else:
-        complete = np.ones(len(missing) // 32, dtype=bool)
-        if reset:
-            complete[:3] = False
-            previous_missing = np.zeros(96, dtype=np.uint8)
-        losses = np.concatenate((np.flatnonzero(previous_missing) - 96,
-                                 np.flatnonzero(missing)))
-        for x in losses:
-            lo = -(-(int(x) - 31) // 32)
-            hi = (int(x) + 96) // 32
-            complete[max(0, lo):min(len(complete), hi + 1)] = False
+    complete = np.ones(len(missing) // 32, dtype=bool)
+    if reset:
+        complete[:3] = False
+        previous_missing = np.zeros(96, dtype=np.uint8)
+    losses = np.concatenate((np.flatnonzero(previous_missing) - 96,
+                             np.flatnonzero(missing)))
+    for x in losses:
+        lo = -(-(int(x) - 31) // 32)
+        hi = (int(x) + 96) // 32
+        complete[max(0, lo):min(len(complete), hi + 1)] = False
     counts = np.array([np.count_nonzero(complete[t:t + k])
                        for t in range(0, len(complete), k)])
     return np.repeat(counts[:, None], 336, axis=1)
@@ -64,7 +63,7 @@ def constant_fine_power(raw_n_time, *, reset, amplitude=7, previous_amplitude=7)
 
     Evaluate the documented 128-tap Fourier sum once per case. No arbitrary input
     processing, CPU FFT, packed-voltage decoder or CPU beamformer is used.
-    All elements are identical; coherent beam 32 has power 64²·|packed Y|².
+    All elements are identical; coherent beam B/2 = 64 (l = 0) has power 64²·|packed Y|².
     """
     s = np.arange(128)
     q = (2 * s - 127) / 258
@@ -101,7 +100,7 @@ class ReplayHelpers(unittest.TestCase):
             cfg = yaml.safe_load((p / "run.yaml").read_text())
             descriptor = json.loads((p / "out/exposure.v1.json").read_text())
             self.assertEqual(descriptor["shape"], [3, 336])
-            self.assertEqual(descriptor["intensity_shape"], [3, 10752, 64])
+            self.assertEqual(descriptor["intensity_shape"], [3, 10752, B])
             self.assertEqual(descriptor["tail_supplied_spectra"], 1)
             for shard in (0, 1):
                 self.assertNotIn(f"zero_{shard}", cfg)
@@ -113,7 +112,8 @@ class ReplayHelpers(unittest.TestCase):
                 self.assertTrue(all(c["cuda_stream"] == 1 for c in copies))
                 self.assertEqual(cfg[f"voltage_{shard}"]["num_frames"], 4)
                 self.assertEqual(cfg[f"missing_{shard}"]["num_frames"], 5)
-            for kwargs in ({"mask_depth": 2}, {"raw_n_time": 64}, {"k": 320}):
+            for kwargs in ({"mask_depth": 2}, {"raw_n_time": 64}, {"k": 320},
+                           {"mode": "coarse"}, {"num_beams": 64}):
                 with self.assertRaises(ValueError):
                     create_packet_loss_yaml(p / "bad.yaml", p, p, 1, **kwargs)
 
@@ -134,15 +134,14 @@ class ReplayHelpers(unittest.TestCase):
     def test_support_endpoints_and_count_width(self):
         missing = np.zeros(672, np.uint8)
         missing[0] = 1
-        counts = exposure_expectation(missing, np.zeros(96), mode="fine", k=10, reset=False)
+        counts = exposure_expectation(missing, np.zeros(96), reset=False)
         np.testing.assert_array_equal(counts[:, 0], [6, 10, 1])
         missing[:] = 0
         previous = np.zeros(96)
         previous[-1] = 1
-        counts = exposure_expectation(missing, previous, mode="fine", k=10, reset=False)
+        counts = exposure_expectation(missing, previous, reset=False)
         np.testing.assert_array_equal(counts[:, 0], [7, 10, 1])
-        counts = exposure_expectation(missing, previous, mode="coarse", k=320, reset=False)
-        np.testing.assert_array_equal(counts[:, 0], [320, 320, 32])
+        self.assertLessEqual(int(counts.max()), np.iinfo(np.uint8).max)   # uint8 counts suffice
 
 
 class PacketLossGPU(unittest.TestCase):
@@ -154,13 +153,12 @@ class PacketLossGPU(unittest.TestCase):
         if probe.returncode:
             raise unittest.SkipTest("GPU unavailable in this execution environment: " + probe.stderr)
 
-    def _run_replay(self, *, mode="fine", k=10, constant=False, rejection=None,
-                    lifecycle=None):
+    def _run_replay(self, *, constant=False, rejection=None, lifecycle=None):
         case = self._testMethodName
         artifact = RESULTS / case if RESULTS else None
         if artifact:
             artifact.mkdir(parents=True, exist_ok=True)
-        report = {"case": case, "mode": mode, "K": k, "T_raw": 672, "E": 64, "B": 64,
+        report = {"case": case, "mode": "fine", "K": 10, "T_raw": 672, "E": 64, "B": B,
                   "status": "running", "frames": [], "input_sha256": {}}
         try:
             with tempfile.TemporaryDirectory(prefix="charts-stage-a-") as tmp:
@@ -170,7 +168,7 @@ class PacketLossGPU(unittest.TestCase):
                 frames = lifecycle["frames"] if lifecycle else (1 if rejection else (9 if constant else 12))
                 depths = lifecycle["depths"] if lifecycle else (3, 4, 5, 4)
                 cfg_path = create_packet_loss_yaml(p / "run.yaml", inp, out, frames,
-                                                   mode=mode, k=k, raw_n_time=nt,
+                                                   raw_n_time=nt,
                                                    gpu_depth=depths[0], raw_depth=depths[1],
                                                    mask_depth=depths[2], output_depth=depths[3])
                 cfg = yaml.safe_load(cfg_path.read_text())
@@ -211,8 +209,7 @@ class PacketLossGPU(unittest.TestCase):
                         seq = 10000 + nt * (frame + jumps)
                         amplitude = ((2, 4, 7)[(frame + shard) % 3] if lifecycle and constant
                                      else (7 if constant else (1 + (frame + 3 * shard) % 7)))
-                        raw = np.full((nt, 336, 64), amplitude if mode == "coarse" or constant
-                                      else 0, np.uint8)
+                        raw = np.full((nt, 336, 64), amplitude if constant else 0, np.uint8)
                         # File replay starts at the post-zeroSamples boundary. Independent
                         # readers cannot supply the live handler's paired close ordering.
                         raw[flags == 1] = 0
@@ -291,31 +288,25 @@ class PacketLossGPU(unittest.TestCase):
                     report["status"] = "passed"
                     return
                 self.assertEqual(result.returncode, 0, log_path.read_text()[-5000:])
-                n_time = nt // 32 if mode == "fine" else nt
-                n_integrated = (n_time + k - 1) // k
-                n_freq = 10752 if mode == "fine" else 336
-                dtype = "uint8" if mode == "fine" else "uint16"
+                n_integrated = (nt // 32 + 9) // 10
                 for shard in (0, 1):
                     for frame in range(frames):
                         reset = frame == 0 or sequences[shard, frame] != sequences[shard, frame - 1] + nt
                         previous = np.zeros(96) if reset else masks[shard, frame - 1][-96:]
                         expected = exposure_expectation(masks[shard, frame], previous,
-                                                        mode=mode, k=k, reset=reset)
+                                                        reset=reset)
                         em, exposure = read_product(product_path("exposure", shard, frame),
-                                                    dtype, (n_integrated, 336))
+                                                    "uint8", (n_integrated, 336))
                         im, power = read_product(product_path("intensity", shard, frame),
-                                                "float32", (n_integrated, n_freq, 64))
+                                                "float32", (n_integrated, 10752, B))
                         if constant:
                             expected_power, margin = constant_fine_power(
                                 nt, reset=reset,
                                 amplitude=0 if np.all(masks[shard, frame]) else amplitudes[shard, frame],
                                 previous_amplitude=0 if reset or np.all(masks[shard, frame - 1])
                                 else amplitudes[shard, frame - 1])
-                            actual = power[:, :, 32]
+                            actual = power[:, :, COHERENT_BEAM]
                             report["packing_half_integer_margin"] = margin
-                        elif mode == "coarse":
-                            expected_power = expected * 4096.0 * amplitudes[shard, frame] ** 2
-                            actual = power[:, :, 32]
                         else:
                             expected_power = np.zeros_like(power)
                             actual = power
@@ -351,12 +342,6 @@ class PacketLossGPU(unittest.TestCase):
                 report["status"] = "failed"
             if artifact:
                 (artifact / "metrics.json").write_text(json.dumps(report, indent=2) + "\n")
-
-    def test_coarse_k320_constant_power_and_loss(self):
-        self._run_replay(mode="coarse", k=320)
-
-    def test_coarse_k10_constant_power_and_loss(self):
-        self._run_replay(mode="coarse", k=10)
 
     def test_fine_zero_power_loss_support_and_resets(self):
         self._run_replay()

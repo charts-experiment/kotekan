@@ -22,7 +22,6 @@ namespace beamformer {
 inline constexpr const char* product_schema = "charts-intensity-product-v2";
 
 struct ProductDescription {
-    bool fine = true;
     bool int8 = true;
     std::size_t shard_id = 0;
     std::size_t raw_n_time = 0;
@@ -35,7 +34,7 @@ struct ProductDescription {
     double freq_step_hz = 0;
     std::vector<double> frequencies_hz;
     float quantize_clamp = 7.0F;
-    std::vector<float> upchan_gain;  // 32 values per fine index u; fine mode only
+    std::vector<float> upchan_gain;  // 32 values per fine index u
     bool upchan_gain_unity = true;
     std::string upchan_gain_source = "unity";
     std::string upchan_gain_reference;
@@ -50,16 +49,16 @@ struct ProductDescription {
 
 inline nlohmann::json product_descriptor(const ProductDescription& p) {
     using nlohmann::json;
-    const std::size_t spectra = p.fine ? p.raw_n_time / upchannelization_factor : p.raw_n_time;
+    const std::size_t spectra = p.raw_n_time / upchannelization_factor;
     const std::size_t k = p.integration_spectra;
     json d = {
         {"schema", product_schema},
         {"generator", "cudaChartsBeamformerCommand"},
         {"kotekan_git_commit", get_git_commit_hash()},
         {"shard", p.shard_id},
-        {"input_mode", p.fine ? "fine" : "coarse"},
+        {"input_mode", "fine"},
         {"T_raw", p.raw_n_time},
-        {"U", p.fine ? upchannelization_factor : 1},
+        {"U", upchannelization_factor},
         {"K", k},
         {"spectra_per_frame", spectra},
         {"tail_supplied_spectra", spectra - (p.n_time - 1) * k},
@@ -72,19 +71,15 @@ inline nlohmann::json product_descriptor(const ProductDescription& p) {
           {"axes", {"integration_window", "frequency", "beam"}},
           {"layout", "C-order, beam fastest"},
           {"power_convention",
-           p.fine ? "sum over the window of |sum_e W[b,f,e] x[f,e]|^2 for every supplied "
-                    "spectrum, where x is the fine int4 code after the gain G(u) "
-                    "(history.upchan_gain); no averaging, exposure normalization or rejection; "
-                    "arbitrary units of (weight * int4 code)^2"
-                  : "sum over the window of |sum_e W[b,f,e] x[f,e]|^2 for every supplied "
-                    "spectrum; no averaging, exposure normalization or rejection; arbitrary "
-                    "units of (weight * int4 code)^2"},
+           "sum over the window of |sum_e W[b,f,e] x[f,e]|^2 for every supplied spectrum, "
+           "where x is the fine int4 code after the gain G(u) (history.upchan_gain); no "
+           "averaging, exposure normalization or rejection; arbitrary units of "
+           "(weight * int4 code)^2"},
           {"component_convention", "x = low nibble + i*high nibble"}}},
         {"frequency",
          {{"nu0_hz", p.freq_zero_hz},
           {"dnu_hz", p.freq_step_hz},
-          {"rule", p.fine ? "nu0 + (336*shard + f + (u - 15.5)/32) * dnu, index f*32 + u"
-                          : "nu0 + (336*shard + f) * dnu"},
+          {"rule", "nu0 + (336*shard + f + (u - 15.5)/32) * dnu, index f*32 + u"},
           {"first_hz", p.frequencies_hz.front()},
           {"last_hz", p.frequencies_hz.back()},
           {"rf_mapping_confirmed", false}}},
@@ -93,11 +88,10 @@ inline nlohmann::json product_descriptor(const ProductDescription& p) {
           {"frame_start", "FPGA_SEQ_NUM in the forwarded raw chartsMetadata = raw tick of "
                           "sample 0; time0_fpga is provenance, not calibrated UTC"},
           {"window_rule",
-           p.fine ? "window w sums fine spectra [w*K, min((w+1)*K, M)); spectrum m uses raw "
-                    "ticks [seq + 32m - 96, seq + 32m + 31]"
-                  : "window w sums raw spectra [seq + w*K, seq + min((w+1)*K, T_raw))"}}},
+           "window w sums fine spectra [w*K, min((w+1)*K, M)); spectrum m uses raw ticks "
+           "[seq + 32m - 96, seq + 32m + 31]"}}},
         {"history",
-         p.fine ? json{{"pfb", "4-tap sinc-Hanning, L=128, coefficients include 1/32, forward "
+         json{{"pfb", "4-tap sinc-Hanning, L=128, coefficients include 1/32, forward "
                                "FFT, centered half-bin order"},
                        {"upchan_gain",
                         {{"values", p.upchan_gain},
@@ -117,8 +111,7 @@ inline nlohmann::json product_descriptor(const ProductDescription& p) {
                         {{"clamp", p.quantize_clamp}, {"rounding", "half to even"}}},
                        {"incomplete_spectra_after_start_or_reset", {0, 1, 2}},
                        {"reset", "a sequence jump on this shard zeroes sample and validity "
-                                 "history"}}
-                : json{{"pfb", nullptr}}},
+                                 "history"}}},
         {"association",
          {{"key", {"shard", "FPGA_SEQ_NUM", "T_raw"}},
           {"rule", "intensity, exposure and int8 parameter records of one frame carry the "
@@ -129,12 +122,12 @@ inline nlohmann::json product_descriptor(const ProductDescription& p) {
     };
     if (!p.exposure_buffer.empty()) {
         d["exposure"] = {{"buffer", p.exposure_buffer},
-                         {"dtype", p.fine ? "uint8" : "uint16"},
+                         {"dtype", "uint8"},
                          {"shape", {p.n_time, local_frequency_channels}},
                          {"axes", {"integration_window", "coarse_channel"}},
                          {"meaning", "valid supplied spectra per window; annotates, never "
                                      "rescales, sum-power"},
-                         {"fine_bins_per_count", p.fine ? upchannelization_factor : 1}};
+                         {"fine_bins_per_count", upchannelization_factor}};
     }
     if (p.int8) {
         d["int8"] = {

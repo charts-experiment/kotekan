@@ -1,4 +1,4 @@
-"""GPU replay of the beamformer with offline combined weights (coarse, K=320, float32).
+"""GPU replay of the beamformer with offline combined weights (fine U=32, K=10, float32).
 
 Run with /usr/bin/python3 -m test_charts.tests.test_weights_replay_gpu
 [--results-dir PATH] [--kotekan-bin PATH].
@@ -8,10 +8,13 @@ x′ = A·g·exp(+2πiν n̂_s·p/c) for a source in the direction of one catalo
 converted to the beamformer's x = i·conj(x′), reordered to kotekan_raw and packed to
 int4 (low nibble real). Gains g are synthetic charts-utils-shaped fake gains with a
 flagged antenna and a flagged channel. The weights come from
-charts/scripts/build_beamformer_weights.py through the legacy raw `weights_file` reader.
+charts/scripts/build_beamformer_weights.py through the legacy raw `weights_file` reader:
+the 64 catalogue directions, zero-padded to the fixed 128 beams (padded beams must output
+exactly zero). Each coarse channel f carries a tone at the centre of fine bin u = f % 32.
 
 Acceptance uses the analytical array factor, not a CPU beamformer: with W = e^{+iφ_b}/conj(g)
-the coherent sum is i·A·Σ_a e^{i(φ_b−φ_s)}, so P_b = K·A²·|Σ_good e^{i2πν(n̂_b−n̂_s)·p/c}|².
+the coherent sum is i·H0·A·Σ_a e^{i(φ_b−φ_s)} in the tone bin (H0 = sum of the PFB
+coefficients), so P_b = K·|H0·A|²·|Σ_good e^{i2πν(n̂_b−n̂_s)·p/c}|² in steady state.
 Negative controls (no conjugate, opposite sign, no element reversal) must fail it.
 Synthetic verification only; it says nothing about the sky.
 """
@@ -40,7 +43,8 @@ bw = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(bw)
 
 C = 299792458.0
-T_RAW, K, N_OUT = 640, 320, 2
+B = bw.N_BEAMS                       # fixed beam count (128)
+FINE_T_RAW, FINE_K, FINE_N_OUT = 640, 10, 2
 FLAG_ANT, FLAG_CHAN = 9, 5
 
 
@@ -49,146 +53,6 @@ def make_gains():
     cube = bw.synthetic_gains(3, flag_antennas=(FLAG_ANT,), flag_channels=(FLAG_CHAN,))[:, :, 0]
     amp = np.clip(np.abs(cube), 0.8, 1.25)
     return np.where(np.isnan(cube), np.nan, amp * np.exp(1j * np.angle(cube)))
-
-
-def pack_voltage(gains, shard, n_source, positions):
-    """Return packed [T][336][64] bytes and the per-channel amplitude A_f."""
-    nu = bw.shard_frequencies_hz("coarse", shard)
-    g = gains[336 * shard:336 * (shard + 1)]
-    g = np.where(np.isnan(g), 0.0, g)
-    if shard == 0:
-        g[FLAG_CHAN, :] = 1.0  # flagged channel: voltage present, weights must null it
-    amp = 7.0 / np.max(np.abs(g), axis=1)
-    phase = 2 * np.pi * nu[:, None] * (positions @ n_source)[None, :] / C
-    x_corr = amp[:, None] * g * np.exp(1j * phase)          # x′ (correlator convention)
-    x = 1j * np.conj(x_corr)                                   # beamformer convention
-    x = bw.charts_logical_to_kotekan_raw(x, axis=-1)
-    re = np.clip(np.rint(x.real), -7, 7).astype(np.int64)
-    im = np.clip(np.rint(x.imag), -7, 7).astype(np.int64)
-    byts = (((im & 0xF) << 4) | (re & 0xF)).astype(np.uint8)
-    return np.broadcast_to(byts, (T_RAW, 336, 64)).copy(), amp
-
-
-def expected_power(shard, directions, n_source, positions, amp, good):
-    nu = bw.shard_frequencies_hz("coarse", shard)
-    delta = directions - n_source[None, :]                      # [B][3]
-    phase = 2 * np.pi * nu[None, :, None] * (delta @ positions.T)[:, None, :] / C
-    af = np.abs(np.sum(np.exp(1j * phase) * good[None, None, :], axis=-1)) ** 2  # [B][F]
-    return (K * amp[None, :] ** 2 * af).T                       # [F][B]
-
-
-class WeightsReplayGpu(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        if not BINARY.is_file():
-            raise unittest.SkipTest(f"no kotekan binary at {BINARY}")
-        cls.tmp = tempfile.TemporaryDirectory() if RESULTS is None else None
-        cls.root = Path(cls.tmp.name) if cls.tmp else RESULTS / "weights_replay"
-        cls.root.mkdir(parents=True, exist_ok=True)
-        cls.directions = bw.load_directions(ROOT / "charts/config/charts_hex64_beam_directions.json")
-        cls.positions = bw.default_positions_charts_logical()
-        cls.gains = make_gains()
-        cls.correction, flagged = bw.gain_correction(cls.gains)
-        cls.good_ant = ~flagged.all(axis=0)                     # antennas flagged in every channel are off
-        transverse = np.hypot(cls.directions[:, 0], cls.directions[:, 1])
-        cls.b_src = int(np.argmin(np.abs(transverse - 0.45)))
-        cls.n_src = cls.directions[cls.b_src]
-        cls.cache = {}
-
-    @classmethod
-    def tearDownClass(cls):
-        if cls.tmp:
-            cls.tmp.cleanup()
-
-    def run_replay(self, name, shard, weights):
-        if name in self.cache:
-            return self.cache[name]
-        work = self.root / name
-        inp, out = work / "in", work / "out"
-        inp.mkdir(parents=True, exist_ok=True)
-        out.mkdir(parents=True, exist_ok=True)
-        wfile = work / "weights.bin"
-        np.ascontiguousarray(weights, dtype=np.complex64).tofile(wfile)
-        volt, amp = pack_voltage(self.gains, shard, self.n_src, self.positions)
-        write_frame(inp / f"voltage.shard{shard}_0000000.bin", volt, 0, shard)
-        yaml_path = create_beamformer_yaml(
-            work / "run.yaml", inp, f"voltage.shard{shard}", out, f"intensity.shard{shard}", 1,
-            samples_per_data_set=T_RAW, integration_spectra=K, input_mode="coarse",
-            output_format="float32", shard_id=shard, weights_file=wfile)
-        rc = execute_kotekan(yaml_path, BINARY, work / "kotekan.log", timeout_s=300)
-        files = sorted(out.glob("intensity.shard*_*.bin"))
-        if len(files) != 1:
-            raise RuntimeError(f"rc={rc}; found {files}; see {work / 'kotekan.log'}")
-        _, power = read_product(files[0], "float32", (N_OUT, 336, 64))
-        self.cache[name] = (power.astype(np.float64), amp)
-        return self.cache[name]
-
-    def nominal_weights(self, shard):
-        return bw.build_weights("coarse", shard, self.correction, self.positions, self.directions)
-
-    def metrics(self, shard, power, amp):
-        want = expected_power(shard, self.directions, self.n_src, self.positions, amp,
-                              self.good_ant.astype(float))
-        ok = np.ones(336, bool)
-        if shard == 0:
-            ok[FLAG_CHAN] = False
-        got = power.mean(axis=0)                                # [F][B]; both outputs equal
-        peak = want[:, self.b_src]
-        return {
-            "src_ratio_median": float(np.median(got[ok, self.b_src] / peak[ok])),
-            "src_ratio_min": float(np.min(got[ok, self.b_src] / peak[ok])),
-            "src_is_argmax_fraction": float(np.mean(np.argmax(got[ok], axis=1) == self.b_src)),
-            "off_peak_max_err_over_peak": float(np.max(np.abs(got[ok] - want[ok]) / peak[ok, None])),
-            "flagged_channel_power": float(got[FLAG_CHAN].max()) if shard == 0 else None,
-            "temporal_consistency": float(np.max(np.abs(power[0] - power[1])) / power.max()),
-        }
-
-    def check_nominal(self, shard):
-        power, amp = self.run_replay(f"nominal_shard{shard}", shard, self.nominal_weights(shard))
-        m = self.metrics(shard, power, amp)
-        self.record(f"nominal_shard{shard}", m)
-        # Deterministic int4 rounding of the input moves the peak by up to ~4% (measured
-        # 3.6%; the GPU matches Σ W·x_quantized to 5e-6 of the peak, a diagnostic only).
-        self.assertGreater(m["src_ratio_min"], 0.95)
-        self.assertLess(m["src_ratio_min"], 1.05)
-        self.assertLess(m["src_ratio_median"], 1.05)
-        self.assertEqual(m["src_is_argmax_fraction"], 1.0)
-        self.assertLess(m["off_peak_max_err_over_peak"], 0.05)
-        self.assertLess(m["temporal_consistency"], 1e-6)
-        if shard == 0:
-            self.assertEqual(m["flagged_channel_power"], 0.0)
-
-    def record(self, name, metrics):
-        if RESULTS:
-            (RESULTS / f"{name}_metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
-
-    def test_shard0_matches_array_factor(self):
-        self.check_nominal(0)
-
-    def test_shard1_matches_array_factor(self):
-        self.check_nominal(1)
-
-    def check_control(self, name, weights):
-        power, amp = self.run_replay(name, 0, weights)
-        m = self.metrics(0, power, amp)
-        self.record(name, m)
-        self.assertLess(m["src_ratio_median"], 0.5, m)
-        self.assertLess(m["src_is_argmax_fraction"], 0.5, m)
-
-    def test_negative_control_missing_conjugate(self):
-        self.check_control("control_no_conjugate", np.conj(self.nominal_weights(0)))
-
-    def test_negative_control_opposite_sign(self):
-        w = bw.build_weights("coarse", 0, self.correction, -self.positions, self.directions)
-        self.check_control("control_opposite_sign", w)
-
-    def test_negative_control_no_element_reversal(self):
-        self.check_control("control_no_reversal", self.nominal_weights(0)[:, :, ::-1])
-
-
-# --------------------------------------------------------------------------- fine mode
-
-FINE_T_RAW, FINE_K, FINE_N_OUT = 640, 10, 2
 
 
 def fine_gain():
@@ -209,10 +73,10 @@ def pack_fine_voltage(gains, shard, n_source, positions, h0):
     g = gains[336 * shard:336 * (shard + 1)]
     g = np.where(np.isnan(g), 0.0, g)
     if shard == 0:
-        g[FLAG_CHAN, :] = 1.0
+        g[FLAG_CHAN, :] = 1.0  # flagged channel: voltage present, weights must null it
     amp = 7.0 / (np.max(np.abs(g), axis=1) * max(1.0, abs(h0)))
     phase = 2 * np.pi * nu[:, None] * (positions @ n_source)[None, :] / C
-    x_corr = amp[:, None] * g * np.exp(1j * phase)
+    x_corr = amp[:, None] * g * np.exp(1j * phase)                           # x′ (correlator)
     x = bw.charts_logical_to_kotekan_raw(1j * np.conj(x_corr), axis=-1)       # [F][64]
     n = np.arange(FINE_T_RAW)[:, None]
     # e^{2πi (u−15.5) n/32} with integer phase indexing: exact for any n.
@@ -231,15 +95,35 @@ def fine_expected_power(shard, directions, n_source, positions, amp, u, good, h0
     return (FINE_K * (abs(h0) * amp[None, :]) ** 2 * af).T                        # [F][B]
 
 
-class FineWeightsReplayGpu(WeightsReplayGpu):
-    """Same fixtures through the U=32 upchannelizer, steady-state output (spectra 10-19)."""
+class FineWeightsReplayGpu(unittest.TestCase):
+    """Builder weights through the U=32 upchannelizer, steady-state output (spectra 10-19)."""
 
-    # inherit setUpClass only; the coarse test methods are replaced below
-    test_shard0_matches_array_factor = None
-    test_shard1_matches_array_factor = None
-    test_negative_control_missing_conjugate = None
-    test_negative_control_opposite_sign = None
-    test_negative_control_no_element_reversal = None
+    @classmethod
+    def setUpClass(cls):
+        if not BINARY.is_file():
+            raise unittest.SkipTest(f"no kotekan binary at {BINARY}")
+        cls.tmp = tempfile.TemporaryDirectory() if RESULTS is None else None
+        cls.root = Path(cls.tmp.name) if cls.tmp else RESULTS / "weights_replay"
+        cls.root.mkdir(parents=True, exist_ok=True)
+        cls.directions = bw.load_directions(ROOT / "charts/config/charts_hex64_beam_directions.json")
+        cls.n_dir = cls.directions.shape[0]                     # defined beams; the rest are zero
+        cls.positions = bw.default_positions_charts_logical()
+        cls.gains = make_gains()
+        cls.correction, flagged = bw.gain_correction(cls.gains)
+        cls.good_ant = ~flagged.all(axis=0)                     # antennas flagged in every channel are off
+        transverse = np.hypot(cls.directions[:, 0], cls.directions[:, 1])
+        cls.b_src = int(np.argmin(np.abs(transverse - 0.45)))
+        cls.n_src = cls.directions[cls.b_src]
+        cls.cache = {}
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.tmp:
+            cls.tmp.cleanup()
+
+    def record(self, name, metrics):
+        if RESULTS:
+            (RESULTS / f"{name}_metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
 
     def run_fine(self, name, shard, weights):
         if name in self.cache:
@@ -258,25 +142,29 @@ class FineWeightsReplayGpu(WeightsReplayGpu):
             samples_per_data_set=FINE_T_RAW, integration_spectra=FINE_K, input_mode="fine",
             output_format="float32", shard_id=shard, weights_file=wfile)
         rc = execute_kotekan(yaml_path, BINARY, work / "kotekan.log", timeout_s=600)
+        wfile.unlink()                                          # 704 MB
         files = sorted(out.glob("intensity.shard*_*.bin"))
         if len(files) != 1:
             raise RuntimeError(f"rc={rc}; found {files}; see {work / 'kotekan.log'}")
-        _, power = read_product(files[0], "float32", (FINE_N_OUT, 10752, 64))
+        _, power = read_product(files[0], "float32", (FINE_N_OUT, 10752, B))
         self.cache[name] = (power[1].astype(np.float64), amp, u, h0)   # steady-state output
         return self.cache[name]
 
-    def fine_weights(self, shard):
-        return bw.build_weights("fine", shard, self.correction, self.positions, self.directions)
+    def fine_weights(self, shard, positions=None):
+        """Builder weights for the 64 catalogue directions, zero-padded to 128 beams."""
+        positions = self.positions if positions is None else positions
+        return bw.pad_to_beam_count(
+            bw.build_weights("fine", shard, self.correction, positions, self.directions))
 
     def fine_metrics(self, shard, power, amp, u, h0):
         want = fine_expected_power(shard, self.directions, self.n_src, self.positions, amp, u,
-                                   self.good_ant.astype(float), h0)               # [F][B]
-        grid = power.reshape(336, 32, 64)
+                                   self.good_ant.astype(float), h0)               # [F][n_dir]
+        grid = power.reshape(336, 32, B)
         ok = np.ones(336, bool)
         if shard == 0:
             ok[FLAG_CHAN] = False
         f = np.arange(336)
-        got_tone = grid[f, u, :]                                                  # tone bin
+        got_tone = grid[f, u, :self.n_dir]                                        # tone bin
         peak = want[:, self.b_src]
         src_bin_argmax = np.argmax(grid[:, :, self.b_src], axis=1)
         return {
@@ -288,6 +176,7 @@ class FineWeightsReplayGpu(WeightsReplayGpu):
             "tone_in_expected_fine_bin_fraction": float(np.mean(src_bin_argmax[ok] == u[ok])),
             "off_peak_max_err_over_peak": float(np.max(np.abs(got_tone[ok] - want[ok]) / peak[ok, None])),
             "flagged_channel_power_max": float(grid[FLAG_CHAN].max()) if shard == 0 else None,
+            "zero_padded_beams_power_max": float(grid[:, :, self.n_dir:].max()),
         }
 
     def check_fine_nominal(self, shard):
@@ -299,6 +188,7 @@ class FineWeightsReplayGpu(WeightsReplayGpu):
         self.assertEqual(m["src_is_beam_argmax_fraction"], 1.0, m)
         self.assertEqual(m["tone_in_expected_fine_bin_fraction"], 1.0, m)
         self.assertLess(m["off_peak_max_err_over_peak"], 0.10, m)
+        self.assertEqual(m["zero_padded_beams_power_max"], 0.0, m)
         if shard == 0:
             self.assertEqual(m["flagged_channel_power_max"], 0.0, m)
 
@@ -319,8 +209,12 @@ class FineWeightsReplayGpu(WeightsReplayGpu):
         self.check_fine_control("fine_control_no_conjugate", np.conj(self.fine_weights(0)))
 
     def test_fine_negative_control_opposite_sign(self):
-        w = bw.build_weights("fine", 0, self.correction, -self.positions, self.directions)
-        self.check_fine_control("fine_control_opposite_sign", w)
+        self.check_fine_control("fine_control_opposite_sign",
+                                self.fine_weights(0, positions=-self.positions))
+
+    def test_fine_negative_control_no_element_reversal(self):
+        self.check_fine_control("fine_control_no_reversal", self.fine_weights(0)[:, :, ::-1])
+
 
 
 if __name__ == "__main__":

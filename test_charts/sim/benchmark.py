@@ -235,7 +235,7 @@ def calculate_direct_tracker_vram(
 
 def calculate_beamformer_vram(
     n_ant: int = 64,
-    n_beams: int = 64,
+    n_beams: int = 128,
     n_time: int = 15360,
     input_mode: str = "fine",
     output_format: str = "int8",
@@ -244,22 +244,20 @@ def calculate_beamformer_vram(
     num_shards: int = 2,
     cuda_overhead_mb: float = 350.0,
 ) -> Dict[str, Any]:
-    """Computes exact byte-accurate VRAM layout for `cudaChartsBeamformerCommand` across shards."""
+    """Computes exact byte-accurate VRAM layout for `cudaChartsBeamformerCommand` across shards.
+
+    The beamformer always upchannelizes (U=32, K=10) and forms 128 beams."""
+    if input_mode != "fine" or integration_spectra != 10:
+        raise ValueError("the beamformer is always fine (U=32) with K=10; coarse was removed")
     local_freq = 336
     input_frame_bytes = n_time * local_freq * n_ant
 
     beam_tiles = (n_beams + 31) // 32
-    if input_mode == "fine":
-        n_time_bf = n_time // 32
-        n_freq_bf = local_freq * 32
-        integration_spectra = 10
-        fine_packed_bytes = n_time_bf * n_freq_bf * n_ant
-        pfb_history_bytes = local_freq * n_ant * 96
-    else:
-        n_time_bf = n_time
-        n_freq_bf = local_freq
-        fine_packed_bytes = 0
-        pfb_history_bytes = 0
+    n_time_bf = n_time // 32
+    n_freq_bf = local_freq * 32
+    fine_packed_bytes = n_time_bf * n_freq_bf * n_ant
+    pfb_history_bytes = local_freq * n_ant * 96
+    upchan_gain_bytes = n_freq_bf * 4
 
     n_time_out = (n_time_bf + integration_spectra - 1) // integration_spectra
     fp32_intensity_bytes = n_time_out * n_freq_bf * n_beams * 4
@@ -282,6 +280,7 @@ def calculate_beamformer_vram(
         + weights_bytes
         + fine_packed_bytes
         + pfb_history_bytes
+        + upchan_gain_bytes
         + fp32_scratch_bytes
         + quant_params_bytes
     )
@@ -297,7 +296,8 @@ def calculate_beamformer_vram(
         "output_frame_mb": round(output_frame_bytes / (1024.0 * 1024.0), 3),
         "weights_mb": round(weights_bytes / (1024.0 * 1024.0), 3),
         "fine_workspace_mb": round(
-            (fine_packed_bytes + pfb_history_bytes + fp32_scratch_bytes + quant_params_bytes)
+            (fine_packed_bytes + pfb_history_bytes + upchan_gain_bytes + fp32_scratch_bytes
+             + quant_params_bytes)
             / (1024.0 * 1024.0),
             3,
         ),

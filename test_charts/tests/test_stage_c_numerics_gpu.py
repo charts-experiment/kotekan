@@ -14,7 +14,8 @@ Expectations are analytical, per fixture, never a port of the kernels:
 * Float32 accumulation allowance: 1e-3 + 4 * 2^-24 * (E + K) * sum_m (sum_e |W_e||x_e|)^2.
 
 Probe weights expose single elements without diagnostic dumps: beams 0..47 are one-hot on
-elements 0..47 (W = 1), beams 48..63 are seeded non-unit complex combinations of all 64.
+elements 0..47 (W = 1), beams 48..127 are seeded non-unit complex combinations of all 64.
+The beamformer always upchannelizes (U = 32, K = 10) and forms B = 128 beams.
 Synthetic verification only; nothing here is validated against the sky.
 """
 
@@ -41,7 +42,8 @@ ROOT = Path(__file__).resolve().parents[2]
 BINARY = ROOT / "build/kotekan/kotekan"
 RESULTS = None
 
-E = B = 64
+E = 64
+B = 128
 F = 336
 U = 32
 FF = F * U
@@ -154,7 +156,7 @@ def expected_power(x: np.ndarray, amb: np.ndarray | None, w_bfe: np.ndarray, k: 
 
 
 def probe_weights(seed: int) -> np.ndarray:
-    """[B][E]: one-hot beams 0..47, seeded non-unit complex combinations 48..63."""
+    """[B][E]: one-hot beams 0..47, seeded non-unit complex combinations 48..127."""
     rng = np.random.default_rng(seed)
     w = np.zeros((B, E), np.complex64)
     w[np.arange(N_ONEHOT), np.arange(N_ONEHOT)] = 1
@@ -183,8 +185,10 @@ def compare(got: np.ndarray, want: np.ndarray, bound: np.ndarray, ambiguous=None
 
 # --------------------------------------------------------------------------- Kotekan
 
-def run_kotekan(work: Path, frames, *, mode: str, t_raw: int, k: int, shard: int,
+def run_kotekan(work: Path, frames, *, mode: str = "fine", t_raw: int, k: int = 10, shard: int,
                 weights_file: Path, depth: int = 3, sequences=None) -> list[np.ndarray]:
+    if mode != "fine" or k != 10:
+        raise ValueError("the beamformer is always fine (U=32) with K=10")
     inp, out = work / "in", work / "out"
     shutil.rmtree(work, ignore_errors=True)
     inp.mkdir(parents=True)
@@ -204,8 +208,9 @@ def read_outputs(out, shard, n_frames, rc, work, mode, t_raw, k):
     files = sorted(out.glob(f"intensity.shard{shard}_*.bin"))
     if len(files) != n_frames:
         raise RuntimeError(f"rc={rc}; {len(files)} of {n_frames} outputs; see {work}/kotekan.log")
-    n_spec, nf = (t_raw // U, FF) if mode == "fine" else (t_raw, F)
-    shape = (-(-n_spec // k), nf, B)
+    if mode != "fine" or k != 10:
+        raise ValueError("the beamformer is always fine (U=32) with K=10")
+    shape = (-(-(t_raw // U) // k), FF, B)
     powers = []
     for i, path in enumerate(files):
         meta, power = read_product(path, "float32", shape)
@@ -274,7 +279,7 @@ class GpuCase(unittest.TestCase):
 
 # =========================================================================== 1. codec/layout
 
-def coarse_fixture(t_raw: int, seed: int) -> np.ndarray:
+def codec_fixture(t_raw: int, seed: int) -> np.ndarray:
     rng = np.random.default_rng(seed)
     t = np.arange(t_raw)[:, None, None]
     f = np.arange(F)[None, :, None]
@@ -290,7 +295,9 @@ def coarse_fixture(t_raw: int, seed: int) -> np.ndarray:
     return raw
 
 
-def coarse_weights(seed: int) -> np.ndarray:
+def codec_weights(seed: int) -> np.ndarray:
+    """[B][FF][E]: random complex per coarse channel (copied to its 32 fine bins), element 9
+    disabled, one-hot beams 0..7 at element boundaries, non-unit last beam."""
     rng = np.random.default_rng(seed)
     w = (rng.normal(size=(B, F, E)) + 1j * rng.normal(size=(B, F, E))).astype(np.complex64)
     w[:, :, 9] = 0                                                 # disabled element
@@ -298,43 +305,45 @@ def coarse_weights(seed: int) -> np.ndarray:
     for b, el in enumerate((0, 1, 17, 31, 32, 62, 63, 40)):        # one-hot beams at boundaries
         w[b, :, el] = 1
     w[B - 1] *= 3.0                                                # non-unit last beam
-    return w
+    return np.repeat(w, U, axis=1)
 
 
 class CodecLayoutGpu(GpuCase):
-    """all 256 byte patterns, zero/constant/one-hot/extremes, K and tails."""
+    """all 256 byte patterns, zero/constant/one-hot/extremes through the fine path (U = 32,
+    K = 10), partial tails and fewer spectra than K."""
 
-    def check(self, name, t_raw, k, shard):
-        raw = coarse_fixture(t_raw, seed=t_raw + shard)
+    def check(self, name, t_raw, shard):
+        raw = codec_fixture(t_raw, seed=t_raw + shard)
         self.assertEqual(len(np.unique(raw)), 256)
-        w = coarse_weights(seed=7 + shard)
+        w = codec_weights(seed=7 + shard)
         wfile = write_weights(self.root / f"{name}_w.bin", w)
-        got = run_kotekan(self.root / name, [raw], mode="coarse", t_raw=t_raw, k=k,
-                          shard=shard, weights_file=wfile)[0]
-        want, bound, _ = expected_power(decode(raw), None, w, k)
-        m = compare(got, want, bound)
-        m.update({"t_raw": t_raw, "K": k, "shard": shard, "windows": int(got.shape[0]),
-                  "tail_spectra": int(t_raw - (got.shape[0] - 1) * k),
-                  "zero_channel_max": float(got[:, 0].max()),
+        got = run_kotekan(self.root / name, [raw], t_raw=t_raw, shard=shard,
+                          weights_file=wfile)[0]
+        q, amb = fine_quantized(raw, None)
+        want, bound, ambig = expected_power(q, amb, w, 10)
+        m = compare(got, want, bound, ambig)
+        n_spec = t_raw // U
+        m.update({"t_raw": t_raw, "K": 10, "shard": shard, "windows": int(got.shape[0]),
+                  "tail_spectra": int(n_spec - (got.shape[0] - 1) * 10),
+                  "zero_channel_max": float(got[:, :U].max()),
                   "byte_patterns": int(len(np.unique(raw)))})
         record(f"c1_{name}", m)
         self.assertEqual(m["violations"], 0, m)
-        self.assertEqual(m["zero_channel_max"], 0.0)
+        self.assertEqual(m["zero_channel_max"], 0.0)              # coarse channel 0 -> bins 0..31
         self.assertEqual(m["plan_tolerance_violations"], 0, m)
-        # One-hot beams on integer inputs are exact integers in float32.
-        self.assertTrue(np.array_equal(got[:, :, :8], want[:, :, :8].astype(np.float32)))
-
-    def test_k320_partial_tail(self):
-        self.check("k320_t650", 650, 320, 0)
+        # One-hot beams on integer fine codes are exact integers in float32 wherever no
+        # rounding is ambiguous.
+        exact = ~ambig[..., :8]
+        self.assertTrue(np.array_equal(got[..., :8][exact], want[..., :8][exact].astype(np.float32)))
 
     def test_k10_partial_tail(self):
-        self.check("k10_t25", 25, 10, 0)
+        self.check("k10_t800", 800, 0)            # 25 spectra: tail of 5
 
     def test_t_less_than_k(self):
-        self.check("k320_t200", 200, 320, 1)
+        self.check("k10_t288_s1", 288, 1)         # 9 spectra < K
 
     def test_k10_shard1(self):
-        self.check("k10_t333_s1", 333, 10, 1)
+        self.check("k10_t1056_s1", 1056, 1)       # 33 spectra: tail of 3
 
 
 # =========================================================================== 2/3/6. PFB

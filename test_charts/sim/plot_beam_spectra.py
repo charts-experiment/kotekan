@@ -8,7 +8,8 @@
     ~/charts-utils/.venv/bin/python -m test_charts.sim.plot_beam_spectra plot --out DIR
 
 Integration: the mean window power over all decoded windows of all frames, NaN-aware.
-Invalid int8 chunks are skipped. The result is [10752 fine channels][64 beams] per shard,
+Invalid int8 chunks are skipped. The result is [10752 fine channels][B beams] per shard (B
+from the descriptor: 64 for runs before 2026-11-14, 128 since),
 with the frequencies from the descriptor and G(u) from history.upchan_gain.
 
 Plots:
@@ -19,7 +20,7 @@ Plots:
 * `beam_spectra_fine_zoom.png`. Fine resolution in a 1.5 MHz window, the output power as
   written (including G²), normalized to its median. It shows the scalloping with G = 1
   and its removal with G = g0/H.
-* `beam_frequency_map_<run>.png`. All 64 beams × coarse channel, in dB re each beam's
+* `beam_frequency_map_<run>.png`. All B beams × coarse channel, in dB re each beam's
   median, on a diverging scale centred at 0.
 """
 
@@ -57,8 +58,9 @@ def integrate_shard(run_dir: Path, shard: int, every: int = 1):
             "frames": len(files)}
 
 
-def beam_labels(run_dir: Path, n_beams: int) -> list[str]:
+def beam_labels(run_dir: Path) -> list[str]:
     d = ip.load_descriptor(run_dir / "intensity.shard0.product.json")
+    n_beams = int(d["intensity"]["shape"][2])
     wfile = str(d.get("weights", {}).get("file", ""))
     for base in (wfile, wfile.replace("/data/beamform/", "/mnt/A02/beamform/")):
         try:
@@ -82,7 +84,7 @@ def cmd_integrate(args):
             r = integrate_shard(path, shard, args.every)
             np.savez_compressed(cache, **r)
             print(f"wrote {cache} ({r['frames']} frames)")
-        runs[label] = {"dir": str(path), "labels": beam_labels(path, 64)}
+        runs[label] = {"dir": str(path), "labels": beam_labels(path)}
     meta = args.out / "runs.json"
     old = json.loads(meta.read_text()) if meta.exists() else {}
     old.update(runs)

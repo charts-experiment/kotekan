@@ -46,7 +46,7 @@ from test_charts.sim.pipeline import create_beamformer_yaml, execute_kotekan
 from test_charts.tests import test_stage_c_numerics_gpu as sc
 
 RESULTS = None
-B, E, F, U, FF = 64, 64, 336, 32, 336 * 32
+B, E, F, U, FF = 128, 64, 336, 32, 336 * 32
 N1 = sc.N_ONEHOT
 
 # Firmware PFB amplitude response per fine bin, normalized to u = 15, 16

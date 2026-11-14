@@ -57,8 +57,10 @@ class LifecycleGPU(unittest.TestCase):
 
     _run_replay = replay.PacketLossGPU._run_replay
 
-    def test_coarse_single_gpu_slot_intensity_backpressure(self):
-        self._run_replay(mode="coarse", k=320, lifecycle={
+    def test_fine_single_gpu_slot_intensity_backpressure(self):
+        # Formerly coarse K=320; the single GPU slot with a held intensity consumer is still
+        # the property under test, now through the fine path (history across one slot).
+        self._run_replay(constant=True, lifecycle={
             "frames": 48, "depths": [1, 2, 3, 1], "compute_stream": 2,
             "hold": ["intensity", 0]})
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build combined CHARTS beamformer weights offline: gain correction x geometric steering.
 
-The output is one canonical array per shard and mode,
+The output is one canonical array per shard (always upchannelized, U = 32; B = 128 beams),
 
     W[b, nu, e] = conj(C[nu, e] * exp(-2*pi*i * nu * (n_b . p_e) / c))
                 = exp(+2*pi*i * nu * (n_b . p_e) / c) / conj(g[nu, e]),
@@ -64,7 +64,10 @@ ANTENNAS_PER_ROW = 8
 CHARTS_LOGICAL = "charts_logical"
 KOTEKAN_RAW = "kotekan_raw"
 
-MODES = ("coarse", "fine")
+# The beamformer always upchannelizes (U = 32) and forms exactly 128 beams. "mode" is kept
+# in signatures and descriptors so that stale coarse requests fail loudly.
+MODES = ("fine",)
+N_BEAMS = 128
 DEFAULT_DIRECTIONS = (Path(__file__).resolve().parents[1] / "config"
                       / "charts_hex64_beam_directions.json")
 
@@ -97,13 +100,10 @@ def shard_frequencies_hz(mode: str, shard: int,
                          coarse_width_hz: float = COARSE_WIDTH_HZ) -> np.ndarray:
     """Centre frequencies of a shard, in Kotekan's local channel order.
 
-    coarse: nu = nu0 + (336*s + f) * dnu,                f = 0..335
-    fine:   nu = nu0 + (336*s + f + (u - 15.5)/32) * dnu, index f*32 + u
+    fine: nu = nu0 + (336*s + f + (u - 15.5)/32) * dnu, index f*32 + u
     """
     _check_mode_shard(mode, shard)
     coarse = SHARD_COARSE * shard + np.arange(SHARD_COARSE, dtype=np.float64)
-    if mode == "coarse":
-        return first_coarse_center_hz + coarse * coarse_width_hz
     offsets = (np.arange(UPCHAN, dtype=np.float64) - (UPCHAN - 1) / 2.0) / UPCHAN
     return first_coarse_center_hz + (coarse[:, None] + offsets[None, :]).reshape(-1) * coarse_width_hz
 
@@ -204,10 +204,10 @@ def gain_correction(gains: np.ndarray, convention: str = "response") -> tuple[np
 
 
 def shard_gain_correction(correction: np.ndarray, mode: str, shard: int) -> np.ndarray:
-    """Slice the shard's 336 coarse channels; fine mode copies each to its 32 bins."""
+    """Slice the shard's 336 coarse channels and copy each to its 32 fine bins."""
     _check_mode_shard(mode, shard)
     local = correction[SHARD_COARSE * shard:SHARD_COARSE * (shard + 1)]
-    return np.repeat(local, UPCHAN, axis=0) if mode == "fine" else local
+    return np.repeat(local, UPCHAN, axis=0)
 
 
 def synthetic_gains(seed: int, n_time: int = 1, flag_antennas: tuple[int, ...] = (),
@@ -284,10 +284,9 @@ def descriptor(mode: str, shard: int, weights_path: Path, n_beams: int, flagged:
         "shape": [n_beams, int(freqs.size), N_ELEMENTS],
         "element_order": KOTEKAN_RAW,
         "element_order_note": "raw element r holds charts_logical antenna a = 63 - r",
-        "upchannelization_factor": UPCHAN if mode == "fine" else 1,
+        "upchannelization_factor": UPCHAN,
         "frequency_hz": {"first": float(freqs[0]), "last": float(freqs[-1]),
-                         "rule": ("nu0 + (336*shard + f) * dnu" if mode == "coarse" else
-                                  "nu0 + (336*shard + f + (u - 15.5)/32) * dnu, index f*32 + u"),
+                         "rule": "nu0 + (336*shard + f + (u - 15.5)/32) * dnu, index f*32 + u",
                          "nu0_hz": FIRST_COARSE_CENTER_HZ, "dnu_hz": COARSE_WIDTH_HZ},
         "application": ("V[b,nu] = sum_e W[b,nu,e] * x[nu,e], x = low nibble + i*high nibble; "
                         "apply once, no extra steering"),
@@ -301,7 +300,7 @@ def descriptor(mode: str, shard: int, weights_path: Path, n_beams: int, flagged:
                  "applied": ("conj(C), C = 1/g" if inputs["gain_convention"] == "response"
                              else "conj(C), C = g"),
                  "calibrated": inputs["gains"] is not None,
-                 "fine_mapping": "coarse gain copied to all 32 fine bins" if mode == "fine" else None,
+                 "fine_mapping": "coarse gain copied to all 32 fine bins",
                  "flagged_logical_channel_antenna_count": int(local_flags.sum())},
         "normalization": "none",
         "inputs": inputs,
@@ -311,8 +310,21 @@ def descriptor(mode: str, shard: int, weights_path: Path, n_beams: int, flagged:
 
 # ----------------------------------------------------------------------------- CLI
 
+def pad_to_beam_count(weights: np.ndarray, n_beams: int = N_BEAMS) -> np.ndarray:
+    """Append all-zero beams up to n_beams; a zero-weight beam outputs exactly zero power."""
+    if weights.shape[0] > n_beams:
+        raise ValueError(f"{weights.shape[0]} beams exceed the fixed count {n_beams}")
+    pad = np.zeros((n_beams - weights.shape[0],) + weights.shape[1:], dtype=weights.dtype)
+    return np.concatenate([weights, pad], axis=0)
+
+
 def _build(args: argparse.Namespace) -> int:
     directions = load_directions(args.directions)
+    n_defined = directions.shape[0]
+    if n_defined != N_BEAMS and not args.pad_zero_beams:
+        raise SystemExit(f"{args.directions} defines {n_defined} beams; the beamformer needs "
+                         f"exactly {N_BEAMS}. Provide {N_BEAMS} directions or pass "
+                         f"--pad-zero-beams to append zero-weight beams.")
     positions = (load_positions_charts_logical(args.positions) if args.positions
                  else default_positions_charts_logical())
     if args.gains:
@@ -339,14 +351,16 @@ def _build(args: argparse.Namespace) -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     shards = range(N_SHARDS) if args.shard is None else [args.shard]
     for shard in shards:
-        weights = build_weights(args.mode, shard, correction, positions, directions)
+        weights = pad_to_beam_count(
+            build_weights(args.mode, shard, correction, positions, directions))
         stem = args.output_dir / f"weights_{args.mode}_shard{shard}"
         np.save(stem.with_suffix(".npy"), weights)
         if args.emit_legacy_bin:
             # Raw canonical complex float32 [B][F][E]: the current weights_file reader input.
             weights.tofile(stem.with_suffix(".bin"))
-        desc = descriptor(args.mode, shard, stem.with_suffix(".npy"), directions.shape[0],
-                          flagged, inputs)
+        desc = descriptor(args.mode, shard, stem.with_suffix(".npy"), N_BEAMS, flagged, inputs)
+        desc["beams"] = {"defined": int(n_defined), "zero_padded": int(N_BEAMS - n_defined),
+                         "rule": "beams [defined, 128) have all-zero weights"}
         if args.emit_legacy_bin:
             desc["legacy_bin_sha256"] = sha256_file(stem.with_suffix(".bin"))
         with open(stem.with_suffix(".json"), "w") as f:
@@ -376,7 +390,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     b = sub.add_parser("build", help="combine gains and geometry into per-shard weights")
-    b.add_argument("--mode", choices=MODES, required=True)
+    b.add_argument("--mode", choices=MODES, default="fine",
+                   help="kept for compatibility; only 'fine' (U = 32) exists")
     b.add_argument("--shard", type=int, choices=range(N_SHARDS), default=None,
                    help="one shard (default: both)")
     b.add_argument("--gains", type=Path, default=None,
@@ -389,6 +404,8 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--positions", type=Path, default=None,
                    help=".npy (64, 3) ENU metres, charts_logical order (default 8x8 grid)")
     b.add_argument("--output-dir", type=Path, required=True)
+    b.add_argument("--pad-zero-beams", action="store_true",
+                   help=f"append zero-weight beams when the directions define fewer than {N_BEAMS}")
     b.add_argument("--emit-legacy-bin", action="store_true",
                    help="also write raw .bin for the current weights_file reader")
     b.set_defaults(func=_build)

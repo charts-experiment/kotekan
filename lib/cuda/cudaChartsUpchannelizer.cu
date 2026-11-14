@@ -426,22 +426,16 @@ void launch_pfb_validity(cudaStream_t stream, const std::uint8_t* raw_validity,
 }
 
 void launch_integrated_exposure(cudaStream_t stream, const std::uint8_t* validity,
-                                void* exposure, std::size_t n_time,
-                                std::size_t integration_spectra, bool fine_mode) {
-    if (!validity || !exposure || n_time == 0
-        || (fine_mode ? integration_spectra != 10
-                      : (integration_spectra != 10 && integration_spectra != 320)))
+                                std::uint8_t* exposure, std::size_t n_time,
+                                std::size_t integration_spectra) {
+    if (!validity || !exposure || n_time == 0 || integration_spectra != 10)
         throw std::invalid_argument("invalid CHARTS exposure dimensions or buffers");
     const auto entries = ((n_time + integration_spectra - 1) / integration_spectra)
                          * local_frequency_channels;
     constexpr unsigned int threads = 256;
     const auto blocks = static_cast<unsigned int>((entries + threads - 1) / threads);
-    if (fine_mode)
-        integrated_exposure_kernel<<<blocks, threads, 0, stream>>>(
-            validity, static_cast<std::uint8_t*>(exposure), n_time, integration_spectra, entries);
-    else
-        integrated_exposure_kernel<<<blocks, threads, 0, stream>>>(
-            validity, static_cast<std::uint16_t*>(exposure), n_time, integration_spectra, entries);
+    integrated_exposure_kernel<<<blocks, threads, 0, stream>>>(validity, exposure, n_time,
+                                                               integration_spectra, entries);
     check_cuda(cudaGetLastError(), "integrated_exposure_kernel launch");
 }
 

@@ -5,7 +5,7 @@ type: config
 log_level: info
 cpu_affinity: []
 num_elements: 64
-num_beams: 64
+num_beams: 128 # fixed beam count
 samples_per_data_set: 15360
 integration_spectra: 10
 buffer_depth: 3

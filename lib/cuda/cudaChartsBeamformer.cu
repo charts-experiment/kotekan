@@ -319,7 +319,7 @@ std::vector<Vec3> default_positions(const std::size_t n_ant, const float spacing
 }
 
 std::vector<Vec3> default_beam_grid(const std::size_t n_beams, const float l_step, const float m) {
-    if (n_beams == 0 || n_beams > maximum_beams) {
+    if (n_beams == 0 || n_beams > beam_count) {
         throw std::invalid_argument("beam count must be between 1 and 128");
     }
     if (!std::isfinite(l_step) || l_step <= 0.0F) {
@@ -339,15 +339,12 @@ std::vector<Vec3> default_beam_grid(const std::size_t n_beams, const float l_ste
     return directions;
 }
 
-std::vector<double> shard_frequencies_hz(const BeamformerInputMode mode,
-                                         const std::size_t shard_id,
+std::vector<double> shard_frequencies_hz(const std::size_t shard_id,
                                          const double first_coarse_center_hz,
                                          const double coarse_channel_width_hz) {
-    const std::size_t n_freq =
-        (mode == BeamformerInputMode::RawCoarse) ? local_frequency_channels : fine_frequency_channels;
-    std::vector<double> freqs(n_freq);
-    for (std::size_t f = 0; f < n_freq; ++f) {
-        freqs[f] = channel_frequency_hz(mode, shard_id, f, first_coarse_center_hz,
+    std::vector<double> freqs(fine_frequency_channels);
+    for (std::size_t f = 0; f < fine_frequency_channels; ++f) {
+        freqs[f] = channel_frequency_hz(shard_id, f, first_coarse_center_hz,
                                         coarse_channel_width_hz);
     }
     return freqs;

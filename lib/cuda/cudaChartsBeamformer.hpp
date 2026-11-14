@@ -19,7 +19,8 @@ inline constexpr std::size_t frequency_shard_count = 2;
 inline constexpr std::size_t full_band_frequency_channels =
     local_frequency_channels * frequency_shard_count;
 
-inline constexpr std::size_t maximum_beams = 128;
+// Fixed beam count: every product, weight file and kernel uses B = 128.
+inline constexpr std::size_t beam_count = 128;
 inline constexpr std::size_t tiled_weight_beam_tile = 32;
 
 inline constexpr double speed_of_light_m_per_s = 299792458.0;
@@ -49,12 +50,7 @@ struct Dimensions {
     std::size_t n_time = 15360;
     std::size_t n_freq = local_frequency_channels;
     std::size_t n_ant = 64;
-    std::size_t n_beams = 64;
-};
-
-enum class BeamformerInputMode {
-    RawCoarse,
-    ChannelizedFine,
+    std::size_t n_beams = beam_count;
 };
 
 struct Int8QuantizationParameters {
@@ -100,15 +96,11 @@ constexpr std::size_t quantization_parameter_count(const Dimensions& integrated_
     return t_tiles * f_tiles * b_tiles;
 }
 
-inline double channel_frequency_hz(const BeamformerInputMode mode, const std::size_t shard_id,
-                                   const std::size_t local_channel,
+// Centre of local fine channel f*32 + u (U = 32 always).
+inline double channel_frequency_hz(const std::size_t shard_id, const std::size_t local_channel,
                                    const double first_coarse_center_hz = 300e6,
                                    const double coarse_channel_width_hz = 300e3) {
     const std::size_t coarse_origin = shard_id * local_frequency_channels;
-    if (mode == BeamformerInputMode::RawCoarse) {
-        return first_coarse_center_hz
-               + static_cast<double>(coarse_origin + local_channel) * coarse_channel_width_hz;
-    }
     const std::size_t coarse_idx = local_channel / upchannelization_factor;
     const std::size_t fine_bin = local_channel % upchannelization_factor;
     return first_coarse_center_hz
@@ -120,8 +112,8 @@ inline double channel_frequency_hz(const BeamformerInputMode mode, const std::si
 // Host Geometry & Tiled Steering Weight Generation
 // -----------------------------------------------------------------------------
 std::vector<Vec3> default_positions(std::size_t n_ant = 64, float spacing_m = 0.6F);
-std::vector<Vec3> default_beam_grid(std::size_t n_beams = 64, float l_step = 0.01F, float m = 0.0F);
-std::vector<double> shard_frequencies_hz(BeamformerInputMode mode, std::size_t shard_id,
+std::vector<Vec3> default_beam_grid(std::size_t n_beams = beam_count, float l_step = 0.01F, float m = 0.0F);
+std::vector<double> shard_frequencies_hz(std::size_t shard_id,
                                          double first_coarse_center_hz = 300e6,
                                          double coarse_channel_width_hz = 300e3);
 

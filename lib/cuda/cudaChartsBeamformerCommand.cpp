@@ -31,7 +31,6 @@ void require(bool ok, const char* message) {
 
 class chartsBeamformerState : public cudaCommandState {
 public:
-    BeamformerInputMode mode = BeamformerInputMode::ChannelizedFine;
     bool quantize_int8 = true;
     std::size_t shard_id = 0;
     std::size_t raw_n_time = 15360;
@@ -59,7 +58,7 @@ public:
     std::size_t quant_param_bytes = 0;
 
     ComplexFloat* device_weights = nullptr;
-    float* device_upchan_gain = nullptr; // [336*32], fine mode only, immutable after init
+    float* device_upchan_gain = nullptr; // [336*32], immutable after init
     std::uint8_t* device_history_samples = nullptr;
     std::uint8_t* device_fine_packed = nullptr;
     float* device_fp32_scratch = nullptr;
@@ -76,11 +75,10 @@ public:
     chartsBeamformerState(Config& cfg, const std::string& name, bufferContainer& buffers,
                           cudaDeviceInterface& device) :
         cudaCommandState(cfg, name, buffers, device) {
-        const auto mode_str = cfg.get_default<std::string>(name, "input_mode", "fine");
-        require(mode_str == "coarse" || mode_str == "fine",
-                "input_mode must be 'coarse' or 'fine'");
-        mode = (mode_str == "fine") ? BeamformerInputMode::ChannelizedFine
-                                    : BeamformerInputMode::RawCoarse;
+        // Always upchannelized U = 32, K = 10, B = 128. The keys are still accepted with
+        // their only valid value so that a stale configuration fails loudly.
+        require(cfg.get_default<std::string>(name, "input_mode", "fine") == "fine",
+                "input_mode: coarse was removed; the beamformer always upchannelizes (U=32)");
 
         const auto fmt_str = cfg.get_default<std::string>(name, "output_format", "int8");
         require(fmt_str == "float32" || fmt_str == "int8",
@@ -92,25 +90,18 @@ public:
 
         raw_n_time = cfg.get<std::size_t>(name, "samples_per_data_set");
         const std::size_t n_ant = cfg.get_default<std::size_t>(name, "num_elements", 64);
-        const std::size_t n_beams = cfg.get_default<std::size_t>(name, "num_beams",
-                                    cfg.get_default<std::size_t>(name, "max_beams", 64));
+        const std::size_t n_beams = cfg.get_default<std::size_t>(name, "num_beams", beam_count);
+        require(cfg.get_default<std::size_t>(name, "max_beams", beam_count) == beam_count,
+                "max_beams was removed; the beam count is fixed at 128");
         require(n_ant == 32 || n_ant == 64, "num_elements must be 32 or 64");
-        require(n_beams >= 1 && n_beams <= maximum_beams, "num_beams must be between 1 and 128");
+        require(n_beams == beam_count, "num_beams must be 128 (fixed beam count)");
 
-        if (mode == BeamformerInputMode::ChannelizedFine) {
-            require(raw_n_time >= pfb_history_samples && raw_n_time % upchannelization_factor == 0,
-                    "fine mode requires samples_per_data_set >= 96 divisible by 32");
-            integration_spectra = cfg.get_default<std::size_t>(name, "integration_spectra", 10);
-            require(integration_spectra == 10, "fine mode requires integration_spectra=10");
-            beamform_dims = {raw_n_time / upchannelization_factor, fine_frequency_channels, n_ant,
-                             n_beams};
-        } else {
-            require(raw_n_time > 0, "samples_per_data_set must be positive");
-            integration_spectra = cfg.get_default<std::size_t>(name, "integration_spectra", 320);
-            require(integration_spectra == 10 || integration_spectra == 320,
-                    "coarse mode supports integration_spectra of 10 or 320");
-            beamform_dims = {raw_n_time, local_frequency_channels, n_ant, n_beams};
-        }
+        require(raw_n_time >= pfb_history_samples && raw_n_time % upchannelization_factor == 0,
+                "samples_per_data_set must be >= 96 and divisible by 32");
+        integration_spectra = cfg.get_default<std::size_t>(name, "integration_spectra", 10);
+        require(integration_spectra == 10, "integration_spectra must be 10");
+        beamform_dims = {raw_n_time / upchannelization_factor, fine_frequency_channels, n_ant,
+                         n_beams};
 
         pfb_quantize_clamp = cfg.get_default<float>(name, "quantize_clamp", 7.0F);
 
@@ -122,8 +113,6 @@ public:
         upchan_gain_unity = true;
         for (const float g : upchan_gain)
             upchan_gain_unity = upchan_gain_unity && g == 1.0F;
-        require(mode == BeamformerInputMode::ChannelizedFine || upchan_gain_unity,
-                "upchan_gain applies only to input_mode: fine");
         upchan_gain_source = cfg.get_default<std::string>(
             name, "upchan_gain_source", upchan_gain_unity ? "unity" : "");
         require(upchan_gain_source == "unity" || upchan_gain_source == "analytic"
@@ -144,18 +133,14 @@ public:
         packet_loss_enabled = !cfg.get_default<std::string>(name, "gpu_mem_missing", "").empty();
         if (packet_loss_enabled) {
             require(n_ant == 64, "handler masks require 64 CHARTS elements");
-            const bool fine = mode == BeamformerInputMode::ChannelizedFine;
-            exposure_bytes = output_dims.n_time * local_frequency_channels
-                             * (fine ? sizeof(std::uint8_t) : sizeof(std::uint16_t));
+            exposure_bytes = output_dims.n_time * local_frequency_channels * sizeof(std::uint8_t);
             device_raw_validity = static_cast<std::uint8_t*>(
                 device.get_gpu_memory(name + "/raw_validity", raw_n_time));
-            if (fine) {
-                device_fine_validity = static_cast<std::uint8_t*>(
-                    device.get_gpu_memory(name + "/fine_validity", beamform_dims.n_time));
-                device_history_validity = static_cast<std::uint8_t*>(
-                    device.get_gpu_memory(name + "/history_validity", pfb_history_samples));
-                CHECK_CUDA_ERROR(cudaMemset(device_history_validity, 0, pfb_history_samples));
-            }
+            device_fine_validity = static_cast<std::uint8_t*>(
+                device.get_gpu_memory(name + "/fine_validity", beamform_dims.n_time));
+            device_history_validity = static_cast<std::uint8_t*>(
+                device.get_gpu_memory(name + "/history_validity", pfb_history_samples));
+            CHECK_CUDA_ERROR(cudaMemset(device_history_validity, 0, pfb_history_samples));
         }
         CHECK_CUDA_ERROR(cudaEventCreateWithFlags(&workspace_ready, cudaEventDisableTiming));
 
@@ -174,9 +159,8 @@ public:
             if (is_npy) {
                 // Combined gain-correction and steering coefficients from
                 // charts/scripts/build_beamformer_weights.py. A descriptor is required.
-                const NpyWeightsExpectation expect{
-                    mode == BeamformerInputMode::ChannelizedFine ? "fine" : "coarse", shard_id,
-                    beamform_dims.n_beams, beamform_dims.n_freq, beamform_dims.n_ant};
+                const NpyWeightsExpectation expect{"fine", shard_id, beamform_dims.n_beams,
+                                                   beamform_dims.n_freq, beamform_dims.n_ant};
                 const std::string descriptor_file = cfg.get_default<std::string>(
                     name, "weights_descriptor",
                     weights_file.substr(0, weights_file.size() - 4) + ".json");
@@ -188,7 +172,7 @@ public:
                     const NpyWeightsInfo info = validate_weights_descriptor(descriptor, expect);
                     check_descriptor_frequency(
                         descriptor,
-                        shard_frequencies_hz(mode, shard_id, freq_zero_hz, freq_step_hz),
+                        shard_frequencies_hz(shard_id, freq_zero_hz, freq_step_hz),
                         freq_zero_hz, freq_step_hz);
                     const auto bytes = read_whole_file(weights_file);
                     host_weights = parse_npy_complex64(bytes, expect);
@@ -234,7 +218,7 @@ public:
         } else {
             const auto positions = default_positions(n_ant, spacing_m);
             const auto directions = default_beam_grid(n_beams, beam_l_step, 0.0F);
-            const auto freqs = shard_frequencies_hz(mode, shard_id, freq_zero_hz, freq_step_hz);
+            const auto freqs = shard_frequencies_hz(shard_id, freq_zero_hz, freq_step_hz);
             weights_identity = {{"source", "generated_default_geometry"},
                                 {"calibrated", false},
                                 {"spacing_m", spacing_m},
@@ -250,7 +234,7 @@ public:
         CHECK_CUDA_ERROR(cudaMemcpy(device_weights, host_weights.data(), weight_bytes,
                                     cudaMemcpyHostToDevice));
 
-        if (mode == BeamformerInputMode::ChannelizedFine) {
+        {
             const std::size_t history_bytes =
                 local_frequency_channels * n_ant * pfb_history_samples;
             device_history_samples = static_cast<std::uint8_t*>(
@@ -408,7 +392,6 @@ public:
             cfg.get_default<std::string>(name, "product_descriptor_file", "");
         if (inst == 0 && !descriptor_file.empty()) {
             ProductDescription product;
-            product.fine = state->mode == BeamformerInputMode::ChannelizedFine;
             product.int8 = state->quantize_int8;
             product.shard_id = state->shard_id;
             product.raw_n_time = state->raw_n_time;
@@ -419,9 +402,8 @@ public:
             product.n_elements = state->beamform_dims.n_ant;
             product.freq_zero_hz = state->freq_zero_hz;
             product.freq_step_hz = state->freq_step_hz;
-            product.frequencies_hz = shard_frequencies_hz(state->mode, state->shard_id,
-                                                          state->freq_zero_hz,
-                                                          state->freq_step_hz);
+            product.frequencies_hz =
+                shard_frequencies_hz(state->shard_id, state->freq_zero_hz, state->freq_step_hz);
             product.quantize_clamp = state->pfb_quantize_clamp;
             product.upchan_gain = state->upchan_gain;
             product.upchan_gain_unity = state->upchan_gain_unity;
@@ -504,8 +486,7 @@ public:
         }
         if (meta && meta->has_fpga_seq_num()) {
             const std::int64_t seq = meta->get_fpga_seq_num();
-            if (state->mode == BeamformerInputMode::ChannelizedFine && state->expected_next_seq
-                && seq != *state->expected_next_seq) {
+            if (state->expected_next_seq && seq != *state->expected_next_seq) {
                 const std::size_t history_bytes =
                     local_frequency_channels * state->beamform_dims.n_ant * pfb_history_samples;
                 CHECK_CUDA_ERROR(
@@ -522,40 +503,32 @@ public:
             // n_coarse=1 explicitly inverts missing flags into compact [T_raw] validity.
             launch_expand_missing_to_validity(stream, d_missing, state->device_raw_validity,
                                                state->raw_n_time, 1);
-            const bool fine = state->mode == BeamformerInputMode::ChannelizedFine;
-            const std::uint8_t* validity = state->device_raw_validity;
-            if (fine) {
-                launch_pfb_validity(stream, validity, state->device_history_validity,
-                                    state->history_initialized, state->device_fine_validity,
-                                    state->raw_n_time);
-                validity = state->device_fine_validity;
-            }
-            launch_integrated_exposure(stream, validity, d_exposure, state->beamform_dims.n_time,
-                                        state->integration_spectra, fine);
-            if (fine)
-                CHECK_CUDA_ERROR(cudaMemcpyAsync(
-                    state->device_history_validity,
-                    state->device_raw_validity + state->raw_n_time - pfb_history_samples,
-                    pfb_history_samples, cudaMemcpyDeviceToDevice, stream));
+            launch_pfb_validity(stream, state->device_raw_validity, state->device_history_validity,
+                                state->history_initialized, state->device_fine_validity,
+                                state->raw_n_time);
+            launch_integrated_exposure(stream, state->device_fine_validity,
+                                       static_cast<std::uint8_t*>(d_exposure),
+                                       state->beamform_dims.n_time, state->integration_spectra);
+            CHECK_CUDA_ERROR(cudaMemcpyAsync(
+                state->device_history_validity,
+                state->device_raw_validity + state->raw_n_time - pfb_history_samples,
+                pfb_history_samples, cudaMemcpyDeviceToDevice, stream));
         }
 
-        const std::uint8_t* beamform_input = d_voltage;
-        if (state->mode == BeamformerInputMode::ChannelizedFine) {
-            launch_fused_upchannelizer(stream, d_voltage, state->device_history_samples,
-                                       state->history_initialized, state->device_fine_packed,
-                                       state->raw_n_time, local_frequency_channels,
-                                       state->beamform_dims.n_ant, state->pfb_quantize_clamp,
-                                       state->device_upchan_gain);
-            launch_pfb_history_update(stream, d_voltage, state->device_history_samples,
-                                      state->raw_n_time, local_frequency_channels,
-                                      state->beamform_dims.n_ant);
-            state->history_initialized = true;
-            beamform_input = state->device_fine_packed;
-        }
+        launch_fused_upchannelizer(stream, d_voltage, state->device_history_samples,
+                                   state->history_initialized, state->device_fine_packed,
+                                   state->raw_n_time, local_frequency_channels,
+                                   state->beamform_dims.n_ant, state->pfb_quantize_clamp,
+                                   state->device_upchan_gain);
+        launch_pfb_history_update(stream, d_voltage, state->device_history_samples,
+                                  state->raw_n_time, local_frequency_channels,
+                                  state->beamform_dims.n_ant);
+        state->history_initialized = true;
 
         float* fp32_target =
             state->quantize_int8 ? state->device_fp32_scratch : static_cast<float*>(d_output);
-        launch_tiled_packed_integrated_beamformer(stream, beamform_input, state->device_weights,
+        launch_tiled_packed_integrated_beamformer(stream, state->device_fine_packed,
+                                                  state->device_weights,
                                                   fp32_target, state->beamform_dims,
                                                   state->integration_spectra);
 

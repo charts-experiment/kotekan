@@ -5,8 +5,8 @@
 #
 #
 # Per shard and frame the run writes (native rawFileWrite records, raw chartsMetadata first):
-#   intensity.shard<s>  int8 [48][10752][64]        33 030 144 B
-#   qparams.shard<s>    float32 (offset, scale) x 129024   1 032 192 B
+#   intensity.shard<s>  int8 [48][10752][128]       66 060 288 B
+#   qparams.shard<s>    float32 (offset, scale) x 258048   2 064 384 B
 #   exposure.shard<s>   uint8 [48][336] valid spectra       16 128 B
 # plus intensity.shard<s>.product.json (charts-intensity-product-v2, written at start).
 # Decode with test_charts/sim/intensity_product.py.
@@ -23,7 +23,7 @@ element_order: charts_logical
 n_channels_per_packet: 168
 local_subbands_per_packet: 2
 num_local_freq: 336
-num_beams: 64
+num_beams: 128 # fixed beam count
 
 spectra_per_second: 300000.0
 samples_per_data_set: 15360          # T_raw: 51.2 ms per frame

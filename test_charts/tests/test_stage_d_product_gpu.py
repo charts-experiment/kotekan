@@ -13,7 +13,7 @@ Acceptance:
   endpoints; constant chunks have scale 0 and reconstruct exactly; a chunk containing a
   non-finite value is all invalid (-128 marks it); the parameter order and frame pairing are
   checked with negative controls; records are paired by FPGA_SEQ_NUM through ring wrap.
-Synthetic verification only.
+Always upchannelized (U = 32, K = 10) with B = 128 beams. Synthetic verification only.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from test_charts.tests import test_weights_replay_gpu as rp
 
 BINARY = sc.ROOT / "build/kotekan/kotekan"
 RESULTS = None
-B, E, F, FF = 64, 64, 336, 336 * 32
+B, E, F, FF = 128, 64, 336, 336 * 32
 EPS32 = 2.0 ** -24
 
 
@@ -46,7 +46,7 @@ def record(name, payload):
         (RESULTS / f"{name}.json").write_text(json.dumps(payload, indent=2, default=str) + "\n")
 
 
-def run_product(work: Path, frames, *, mode, t_raw, k, shard, weights_file, fmt,
+def run_product(work: Path, frames, *, mode="fine", t_raw, k=10, shard, weights_file, fmt,
                 depth=3, export_params=True, extra=None):
     """rawFileRead -> cudaChartsBeamformerCommand -> intensity (+ int8 params) files."""
     shutil.rmtree(work, ignore_errors=True)
@@ -66,10 +66,8 @@ def run_product(work: Path, frames, *, mode, t_raw, k, shard, weights_file, fmt,
     command["product_descriptor_file"] = descriptor.as_posix()
     command.update(extra or {})
     if fmt == "int8" and export_params:
-        n_spec = t_raw // 32 if mode == "fine" else t_raw
-        n_out = -(-n_spec // k)
-        n_freq = FF if mode == "fine" else F
-        count = n_out * (n_freq // 16) * (B // 16)
+        n_out = -(-(t_raw // 32) // k)
+        count = n_out * (FF // 16) * (B // 16)
         cfg["qparams_buf"] = dict(cfg["intensity_buf"], frame_size=count * 8)
         gpu["out_buffers"]["qparams"] = "qparams_buf"
         command.update(gpu_mem_quant_params=f"charts.qparams.shard{shard}",
@@ -212,8 +210,8 @@ class ProductGpu(unittest.TestCase):
         self.assertGreater(report["swapped_beam_tile_violations"], 1000)
         self.assertGreater(report["frame_i_plus_1_params_violations"], 1000)
 
-    def check_descriptor(self, d, *, mode, t_raw, k, shard, fmt):
-        u = 32 if mode == "fine" else 1
+    def check_descriptor(self, d, *, mode="fine", t_raw, k=10, shard, fmt):
+        u = 32
         n_spec = t_raw // u
         n_freq = F * u
         self.assertEqual((d["input_mode"], d["T_raw"], d["K"], d["U"], d["shard"]),
@@ -231,38 +229,59 @@ class ProductGpu(unittest.TestCase):
         if fmt == "float32":
             self.assertIsNone(d["int8"])
 
-    # ------------------------------------------------------------------ coarse cases
-    def coarse_weights(self):
+    # ------------------------------------------------------------------ fixtures
+    # The constant-chunk fixture needs a nonzero chunk whose 16 fine bins x 16 beams are equal
+    # power. A very large upchannelizer gain saturates every fine component of coarse channels
+    # 0..15 to +-7 (|q|^2 = 98), so fine tile 0 of the identical one-hot beams 0..15 is
+    # constant. The gain is a test vehicle only; the fixture checks the saturation first.
+    SATURATING_GAIN = {"upchan_gain": [1e5] * 32, "upchan_gain_source": "analytic",
+                       "upchan_gain_reference": "stage D saturation fixture"}
+
+    def fine_weights(self):
+        """[B][FF][E]: beams 0..15 identical one-hot on element 0, the rest random per coarse
+        channel (copied to its 32 fine bins)."""
         w = np.zeros((B, F, E), np.complex64)
         w[:16, :, 0] = 1                                   # beams 0..15 identical
         rng = np.random.default_rng(41)
         w[16:] = rng.normal(size=(B - 16, F, E)) + 1j * rng.normal(size=(B - 16, F, E))
-        return w
+        return np.repeat(w, 32, axis=1)
 
-    def coarse_input(self, t_raw):
+    def fine_input(self, t_raw):
         rng = np.random.default_rng(42)
         raw = rng.integers(0, 256, (t_raw, F, E), dtype=np.uint8)
-        raw[:, :16, :] = 0x23                              # (3, 2) in channels 0..15
+        comp = rng.choice(np.r_[-7:0, 1:8], (2, t_raw, 16, E))
+        raw[:, :16, :] = sc.encode(comp[0], comp[1])       # nonzero components, channels 0..15
         return raw
 
-    def test_coarse_constant_chunk_and_nonfinite_chunk(self):
-        t_raw, k = 650, 320
-        w = self.coarse_weights()
+    def weights_file(self, label="base"):
+        path = self.root / f"fine_{label}_w.bin"
+        if not path.exists():
+            sc.write_weights(path, self.fine_weights())
+        return path
+
+    def test_constant_chunk_and_nonfinite_chunk(self):
+        t_raw = 800                                        # 25 spectra: windows 10, 10, 5
+        w = self.fine_weights()
         w_inf = w.copy()
-        w_inf[20, 40, :] = 1e20                            # |V|^2 overflows to inf
-        raw = self.coarse_input(t_raw)
+        w_inf[20, 40 * 32:41 * 32, :] = 1e20               # |V|^2 overflows to inf
+        raw = self.fine_input(t_raw)
+        # Fixture precondition: every fine component of element 0 in fine tile 0 saturates.
+        q_ref, _ = sc.fine_quantized(raw, None, gain=self.SATURATING_GAIN["upchan_gain"])
+        tile = q_ref[:, :16, 0]
+        self.assertTrue(np.all((np.abs(tile.real) == 7) & (np.abs(tile.imag) == 7)))
         out = {}
         for label, weights in (("finite", w), ("inf", w_inf)):
-            wfile = sc.write_weights(self.root / f"coarse_{label}.bin", weights)
+            wfile = sc.write_weights(self.root / f"const_{label}.bin", weights)
             for fmt in ("float32", "int8"):
-                run = run_product(self.root / f"coarse_{label}_{fmt}", [raw], mode="coarse",
-                                  t_raw=t_raw, k=k, shard=0, weights_file=wfile, fmt=fmt)
+                run = run_product(self.root / f"const_{label}_{fmt}", [raw], t_raw=t_raw,
+                                  shard=0, weights_file=wfile, fmt=fmt,
+                                  extra=self.SATURATING_GAIN)
                 self.assert_ok(run, 1)
                 out[label, fmt] = run
         d = ip.load_descriptor(out["finite", "int8"]["descriptor"])
         d_f32 = ip.load_descriptor(out["finite", "float32"]["descriptor"])
-        self.check_descriptor(d, mode="coarse", t_raw=t_raw, k=k, shard=0, fmt="int8")
-        self.check_descriptor(d_f32, mode="coarse", t_raw=t_raw, k=k, shard=0, fmt="float32")
+        self.check_descriptor(d, t_raw=t_raw, shard=0, fmt="int8")
+        self.check_descriptor(d_f32, t_raw=t_raw, shard=0, fmt="float32")
         report = {}
         for label in ("finite", "inf"):
             _, i_float = ip.read_intensity(d_f32, out[label, "float32"]["intensity"][0])
@@ -270,11 +289,12 @@ class ProductGpu(unittest.TestCase):
             params = ip.read_quant_params(d, out[label, "int8"]["qparams"][0])
             i_hat = ip.decode_int8(d, codes, params)
             idx = ip.chunk_index(d)
-            const_chunk = idx[:, 0, 0]                     # f-tile 0 (channels 0..15), beams 0..15
+            const_chunk = idx[:, 0, 0]                     # fine tile 0 (bins 0..15), beams 0..15
             m = {"constant_chunk_scale": [float(params[1][c, 1]) for c in const_chunk],
                  "constant_chunk_exact": bool(np.array_equal(i_hat[:, :16, :16],
                                                               i_float[:, :16, :16].astype(np.float64))),
-                 "constant_chunk_value": float(i_float[0, 0, 0])}
+                 "constant_chunk_value": float(i_float[0, 0, 0]),
+                 "constant_chunk_expected": [98.0 * 10, 98.0 * 10, 98.0 * 5]}
             if label == "inf":
                 bad = np.unique(idx[~np.isfinite(i_float)])
                 m.update({
@@ -293,12 +313,15 @@ class ProductGpu(unittest.TestCase):
                 m["valid_chunk_violations"] = rm["violations"]
             else:
                 m.update(reconstruction_metrics(d, i_float, codes[1], params[1]))
+                m["constant_chunk_values"] = [float(v) for v in i_float[:, 0, 0]]
             report[label] = m
-        record("d_coarse_constant_and_nonfinite", report)
+        record("d_constant_and_nonfinite", report)
         for label in ("finite", "inf"):
             self.assertTrue(all(s == 0 for s in report[label]["constant_chunk_scale"]), report)
             self.assertTrue(report[label]["constant_chunk_exact"], report)
             self.assertGreater(report[label]["constant_chunk_value"], 0)
+        self.assertEqual(report["finite"]["constant_chunk_values"],
+                         report["finite"]["constant_chunk_expected"], report)
         self.assertEqual(report["finite"]["violations"], 0, report)
         r = report["inf"]
         self.assertGreater(r["nonfinite_outputs_float32"], 0, r)
@@ -310,17 +333,17 @@ class ProductGpu(unittest.TestCase):
     def test_npy_weights_identity_in_descriptor(self):
         directions = rp.bw.load_directions(rp.ROOT / "charts/config/charts_hex64_beam_directions.json")
         correction, flagged = rp.bw.gain_correction(rp.make_gains())
-        weights = rp.bw.build_weights("coarse", 0, correction, rp.bw.default_positions_charts_logical(),
-                                      directions)
+        weights = rp.bw.pad_to_beam_count(rp.bw.build_weights(
+            "fine", 0, correction, rp.bw.default_positions_charts_logical(), directions))
         npy = self.root / "w.npy"
         np.save(npy, weights)
-        desc = rp.bw.descriptor("coarse", 0, npy, directions.shape[0], flagged,
+        desc = rp.bw.descriptor("fine", 0, npy, rp.bw.N_BEAMS, flagged,
                                 {"gain_convention": "response", "gains": "synthetic",
                                  "calibration_note": "stage D identity"})
         (self.root / "w.json").write_text(json.dumps(desc))
-        raw = self.coarse_input(320)
-        run = run_product(self.root / "npy_identity", [raw], mode="coarse", t_raw=320, k=320,
-                          shard=0, weights_file=npy, fmt="float32")
+        raw = self.fine_input(320)
+        run = run_product(self.root / "npy_identity", [raw], t_raw=320, shard=0,
+                          weights_file=npy, fmt="float32")
         self.assert_ok(run, 1)
         d = ip.load_descriptor(run["descriptor"])
         record("d_npy_identity_descriptor", d)
@@ -332,10 +355,9 @@ class ProductGpu(unittest.TestCase):
         self.assertIsNone(d["exposure"])
 
     def test_int8_without_exported_parameters(self):
-        raw = self.coarse_input(320)
-        wfile = sc.write_weights(self.root / "noexp.bin", self.coarse_weights())
-        run = run_product(self.root / "noexp", [raw], mode="coarse", t_raw=320, k=320, shard=0,
-                          weights_file=wfile, fmt="int8", export_params=False)
+        raw = self.fine_input(320)
+        run = run_product(self.root / "noexp", [raw], t_raw=320, shard=0,
+                          weights_file=self.weights_file(), fmt="int8", export_params=False)
         self.assert_ok(run, 1)
         d = ip.load_descriptor(run["descriptor"])
         self.assertIn("without exported offset/scale", run["log"])
@@ -344,8 +366,8 @@ class ProductGpu(unittest.TestCase):
             ip.read_quant_params(d, run["intensity"][0])
 
     def test_rejected_configurations(self):
-        raw = self.coarse_input(320)
-        wfile = sc.write_weights(self.root / "rej.bin", self.coarse_weights())
+        raw = self.fine_input(320)
+        wfile = self.weights_file()
         cases = {
             "params_in_float32": (dict(fmt="float32", extra={
                 "gpu_mem_quant_params": "charts.q", "out_buf_quant_params": "intensity"}),
@@ -363,11 +385,20 @@ class ProductGpu(unittest.TestCase):
                 "gpu_mem_quant_params": "charts.intensity.shard0",
                 "out_buf_quant_params": "intensity"}, export_params=False),
                 "gpu_mem_quant_params must be distinct"),
+            # Removed modes and beam counts must fail loudly, not run with defaults.
+            "coarse_mode": (dict(fmt="float32", extra={"input_mode": "coarse"}),
+                            "input_mode: coarse was removed"),
+            "num_beams_64": (dict(fmt="float32", extra={"num_beams": 64}),
+                             "num_beams must be 128"),
+            "max_beams_64": (dict(fmt="float32", extra={"max_beams": 64}),
+                             "max_beams was removed"),
+            "k_320": (dict(fmt="float32", extra={"integration_spectra": 320}),
+                      "integration_spectra must be 10"),
         }
         report = {}
         for label, (kwargs, message) in cases.items():
-            run = run_product(self.root / f"rej_{label}", [raw], mode="coarse", t_raw=320,
-                              k=320, shard=0, weights_file=wfile, **kwargs)
+            run = run_product(self.root / f"rej_{label}", [raw], t_raw=320, shard=0,
+                              weights_file=wfile, **kwargs)
             report[label] = {"rejected": len(run["intensity"]) == 0, "message_found": message in run["log"]}
         record("d_rejected_configurations", report)
         for label, r in report.items():

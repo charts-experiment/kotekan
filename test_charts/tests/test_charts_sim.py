@@ -46,6 +46,7 @@ from sim.generator import (
 )
 from sim.inspector import (
     compute_reference_beamformer_intensity,
+    default_geometry_weights,
     inspect_beamformer_dump,
 )
 from sim.noise_model import AnalogChainParams, ChartsNoiseModel
@@ -344,7 +345,7 @@ class TestChartsSimulationSuite(unittest.TestCase):
         n_time = 640  # divisible by 32 (fine U=32 -> 20 fine spectra -> 2 windows of K=10)
         n_freq = 336
         n_ant = 64
-        n_beams = 64
+        n_beams = 128
 
         v_real = rng.integers(-7, 8, size=(n_time, n_freq, n_ant), dtype=np.int8)
         v_imag = rng.integers(-7, 8, size=(n_time, n_freq, n_ant), dtype=np.int8)
@@ -386,53 +387,56 @@ class TestChartsSimulationSuite(unittest.TestCase):
         )
         self.assertEqual(info_default["input_mode"], "fine")
         self.assertEqual(info_default["output_format"], "int8")
-        self.assertEqual(info_default["shape"], (2, 10752, 64))
+        self.assertEqual(info_default["shape"], (2, 10752, 128))
         self.assertGreater(info_default["max_intensity"], 0.0)
         self.assertLessEqual(info_default["max_intensity"], 127.0)
         self.assertGreaterEqual(info_default["min_intensity"], -128.0)
 
-        # 2. Analytical float32 reference parity check on Tiled integrated beamformer
-        out_coarse_dir = self.temp_dir / "bf_out_coarse"
-        coarse_yaml = self.temp_dir / "run_coarse.yaml"
+        # 2. Analytical float32 parity of the fine path with the command's generated default
+        # weights (no weights_file): reference fine transform (stage C) then the analytical
+        # default geometry; components within TIE of a half-integer are bounded, not exact.
+        from test_charts.tests import test_stage_c_numerics_gpu as sc
+
+        out_f32_dir = self.temp_dir / "bf_out_f32"
+        f32_yaml = self.temp_dir / "run_f32.yaml"
         create_beamformer_yaml(
-            yaml_path=coarse_yaml,
+            yaml_path=f32_yaml,
             baseband_dir=in_dir,
             baseband_name="voltage",
-            output_dir=out_coarse_dir,
+            output_dir=out_f32_dir,
             output_name="intensity",
             num_frames=1,
             num_elements=n_ant,
             num_beams=n_beams,
             samples_per_data_set=n_time,
-            integration_spectra=10,
-            input_mode="coarse",
             output_format="float32",
             shard_id=0,
             buffer_depth=1,
         )
-        rc = execute_kotekan(coarse_yaml, kotekan_bin=kotekan_bin, timeout_s=60.0)
+        rc = execute_kotekan(f32_yaml, kotekan_bin=kotekan_bin, timeout_s=60.0)
         self.assertEqual(rc, 0)
 
-        coarse_dump = out_coarse_dir / "intensity_0000000.bin"
-        self.assertTrue(coarse_dump.is_file())
-        info_coarse = inspect_beamformer_dump(
-            coarse_dump,
+        f32_dump = out_f32_dir / "intensity_0000000.bin"
+        self.assertTrue(f32_dump.is_file())
+        info_f32 = inspect_beamformer_dump(
+            f32_dump,
             num_freq=n_freq,
             num_beams=n_beams,
             samples_per_data_set=n_time,
-            integration_spectra=10,
-            input_mode="coarse",
             output_format="float32",
         )
-        self.assertTrue(info_coarse["all_finite"])
-        self.assertEqual(info_coarse["shape"], (64, 336, 64))
+        self.assertTrue(info_f32["all_finite"])
+        self.assertEqual(info_f32["shape"], (2, 10752, 128))
 
-        ref_coarse = compute_reference_beamformer_intensity(
-            packed, shard_id=0, num_beams=n_beams, integration_spectra=10
-        )
-        np.testing.assert_allclose(
-            info_coarse["intensities"], ref_coarse, rtol=1e-5, atol=1e-3
-        )
+        q, amb = sc.fine_quantized(packed, None)
+        want, bound, ambiguous = sc.expected_power(
+            q, amb, default_geometry_weights(shard_id=0, num_beams=n_beams), 10)
+        metrics = sc.compare(info_f32["intensities"], want, bound, ambiguous)
+        self.assertEqual(metrics["violations"], 0, metrics)
+        self.assertEqual(metrics["plan_tolerance_violations"], 0, metrics)
+        # The plain reference agrees with the bounded one wherever no rounding is ambiguous.
+        ref = compute_reference_beamformer_intensity(q, shard_id=0, num_beams=n_beams)
+        np.testing.assert_allclose(ref[~ambiguous], want[~ambiguous], rtol=1e-5, atol=1e-3)
 
 
 if __name__ == "__main__":

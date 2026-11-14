@@ -96,20 +96,25 @@ class ElementOrder(unittest.TestCase):
             self.assertEqual(raw[r], 100 + 63 - r)
 
 
+def coarse_centers_hz(shard):
+    """Coarse channel centres nu0 + (336*s + f) * dnu (AGENTS.md section 7)."""
+    return 300.0e6 + (336 * shard + np.arange(336)) * 300.0e3
+
+
 class Frequencies(unittest.TestCase):
-    def test_coarse_shard_edges(self):
-        f0 = bw.shard_frequencies_hz("coarse", 0)
-        f1 = bw.shard_frequencies_hz("coarse", 1)
-        self.assertEqual(f0.size, 336)
-        self.assertAlmostEqual(f0[0], 300.0e6)
-        self.assertAlmostEqual(f0[-1], 400.5e6)
-        self.assertAlmostEqual(f1[0], 400.8e6)
-        self.assertAlmostEqual(f1[-1], 501.3e6)
+    def test_shard_edges(self):
+        f0 = bw.shard_frequencies_hz("fine", 0)
+        f1 = bw.shard_frequencies_hz("fine", 1)
+        self.assertEqual(f0.size, 10752)
+        self.assertAlmostEqual(coarse_centers_hz(0)[-1], 400.5e6)
+        self.assertAlmostEqual(coarse_centers_hz(1)[0], 400.8e6)
+        self.assertAlmostEqual(f0[0], 300.0e6 - 15.5 * 9375.0)
+        self.assertAlmostEqual(f1[-1], 501.3e6 + 15.5 * 9375.0)
 
     def test_fine_bins_centered_on_coarse_and_index_order(self):
         for shard in (0, 1):
             fine = bw.shard_frequencies_hz("fine", shard).reshape(336, 32)
-            coarse = bw.shard_frequencies_hz("coarse", shard)
+            coarse = coarse_centers_hz(shard)
             np.testing.assert_allclose(fine.mean(axis=1), coarse, rtol=0, atol=1e-6)
             np.testing.assert_allclose(np.diff(fine, axis=1), 9375.0, rtol=0, atol=1e-6)
             # u = 19 is +3.5 fine widths above the coarse centre
@@ -119,7 +124,9 @@ class Frequencies(unittest.TestCase):
         with self.assertRaises(ValueError):
             bw.shard_frequencies_hz("medium", 0)
         with self.assertRaises(ValueError):
-            bw.shard_frequencies_hz("coarse", 2)
+            bw.shard_frequencies_hz("fine", 2)
+        with self.assertRaises(ValueError):  # coarse mode was removed
+            bw.shard_frequencies_hz("coarse", 0)
 
 
 class Geometry(unittest.TestCase):
@@ -199,12 +206,13 @@ class CombinedWeights(unittest.TestCase):
     def test_unit_gains_carry_arriving_correlator_phase_in_raw_order(self):
         # W = conj(exp(-i*phi)) = exp(+i*phi), phi the arriving x' phase.
         unit = np.ones((672, 64), complex)
+        beams = [0, 1, 37, 63]
         for shard in (0, 1):
-            w = bw.build_weights("coarse", shard, unit, self.positions, self.directions)
-            freqs = bw.shard_frequencies_hz("coarse", shard)
+            w = bw.build_weights("fine", shard, unit, self.positions, self.directions[beams])
+            freqs = bw.shard_frequencies_hz("fine", shard)
             np.testing.assert_allclose(np.abs(w), 1.0, atol=1e-6)
-            for b in (0, 1, 37, 63):
-                nx, ny = self.directions[b, :2]
+            for b, d in enumerate(beams):
+                nx, ny = self.directions[d, :2]
                 for r in (0, 31, 32, 63):
                     a = 63 - r
                     phi = charts_utils_voltage_phase(freqs, self.positions[a], nx, ny)
@@ -213,8 +221,9 @@ class CombinedWeights(unittest.TestCase):
     def test_zenith_beam_is_conjugated_gain_correction(self):
         g = bw.synthetic_gains(4)[..., 0]
         corr, _ = bw.gain_correction(g)
-        w = bw.build_weights("coarse", 0, corr, self.positions, self.directions[:1])
-        np.testing.assert_allclose(w[0], (1 / np.conj(g[:336]))[:, ::-1], rtol=1e-6)
+        w = bw.build_weights("fine", 0, corr, self.positions, self.directions[:1])
+        expect = np.repeat((1 / np.conj(g[:336]))[:, ::-1], 32, axis=0)
+        np.testing.assert_allclose(w[0], expect, rtol=1e-6)
 
     def _source_response(self, mode, shard, beams, wrong_order=False, weights_hook=None):
         """Inject a unit source from beams[0] through the instrument and beamform."""
@@ -226,9 +235,7 @@ class CombinedWeights(unittest.TestCase):
         if weights_hook is not None:
             w = weights_hook(w)
         freqs = bw.shard_frequencies_hz(mode, shard)
-        g_local = g[336 * shard:336 * (shard + 1)]
-        if mode == "fine":
-            g_local = np.repeat(g_local, 32, axis=0)
+        g_local = np.repeat(g[336 * shard:336 * (shard + 1)], 32, axis=0)
         src = directions[0]
         # charts-utils model for correlator voltages, charts_logical:
         # x'_a = g_a * exp(+i*phi_a), phi_a = 2*pi*nu*(s.p_a)/c.
@@ -244,7 +251,7 @@ class CombinedWeights(unittest.TestCase):
         beams = [12, 0, 3, 50]
         good = np.ones(64, bool)
         good[[9, 40]] = False
-        for mode, shard in (("coarse", 0), ("coarse", 1), ("fine", 0), ("fine", 1)):
+        for mode, shard in (("fine", 0), ("fine", 1)):
             v, n_good, phi, directions, freqs = self._source_response(mode, shard, beams)
             np.testing.assert_allclose(np.abs(v[0]), n_good, rtol=1e-5)
             for k in range(1, len(beams)):
@@ -256,11 +263,11 @@ class CombinedWeights(unittest.TestCase):
                 self.assertTrue(np.all(np.abs(v[k]) < n_good))
 
     def test_missing_component_conjugate_is_detected(self):
-        v, n_good, *_ = self._source_response("coarse", 0, [12, 0], weights_hook=np.conj)
+        v, n_good, *_ = self._source_response("fine", 0, [12, 0], weights_hook=np.conj)
         self.assertLess(np.median(np.abs(v[0])), 0.5 * n_good)
 
     def test_missing_element_reversal_is_detected(self):
-        v, n_good, *_ = self._source_response("coarse", 0, [12, 0], wrong_order=True)
+        v, n_good, *_ = self._source_response("fine", 0, [12, 0], wrong_order=True)
         self.assertLess(np.median(np.abs(v[0])), 0.5 * n_good)
 
     def test_opposite_steering_sign_is_detected(self):
@@ -268,7 +275,7 @@ class CombinedWeights(unittest.TestCase):
         def flip_geometry(w):
             zenith = w[1:2]  # beams[1] is direction 0 (zenith): pure gain correction C
             return zenith * np.conj(w / np.where(zenith == 0, 1, zenith))
-        v, n_good, *_ = self._source_response("coarse", 0, [12, 0], weights_hook=flip_geometry)
+        v, n_good, *_ = self._source_response("fine", 0, [12, 0], weights_hook=flip_geometry)
         self.assertLess(np.median(np.abs(v[0])), 0.5 * n_good)
 
 
@@ -281,24 +288,36 @@ class CommandLine(unittest.TestCase):
                                       "--n-time", "3", "--flag-antennas", "2"]), 0)
             self.assertEqual(np.load(gains).shape, (672, 64, 3))
             out = tmp / "w"
-            self.assertEqual(bw.main(["build", "--mode", "coarse", "--gains", str(gains),
+            # The default directions define 64 beams: without --pad-zero-beams it must refuse.
+            with self.assertRaises(SystemExit):
+                bw.main(["build", "--gains", str(gains), "--output-dir", str(out), "--shard", "0"])
+            with self.assertRaises(SystemExit):  # coarse mode was removed
+                bw.main(["build", "--mode", "coarse", "--gains", str(gains),
+                         "--output-dir", str(out), "--pad-zero-beams"])
+            self.assertEqual(bw.main(["build", "--gains", str(gains), "--pad-zero-beams",
                                       "--output-dir", str(out), "--emit-legacy-bin",
                                       "--calibration-note", "synthetic seed 7"]), 0)
             for shard in (0, 1):
-                npy = out / f"weights_coarse_shard{shard}.npy"
+                npy = out / f"weights_fine_shard{shard}.npy"
                 w = np.load(npy, allow_pickle=False)
-                self.assertEqual((w.dtype, w.shape), (np.complex64, (64, 336, 64)))
+                self.assertEqual((w.dtype, w.shape), (np.complex64, (128, 10752, 64)))
                 self.assertTrue(w.flags.c_contiguous)
-                legacy = np.fromfile(out / f"weights_coarse_shard{shard}.bin", dtype=np.complex64)
+                self.assertTrue(np.all(w[64:] == 0))      # zero-padded beams
+                self.assertTrue(np.any(w[:64] != 0))
+                legacy = np.fromfile(out / f"weights_fine_shard{shard}.bin", dtype=np.complex64)
                 np.testing.assert_array_equal(legacy, w.reshape(-1))
-                self.assertEqual(legacy.nbytes, 64 * 336 * 64 * 8)
+                self.assertEqual(legacy.nbytes, 128 * 10752 * 64 * 8)
                 # flagged logical antenna 2 is raw element 61
                 self.assertTrue(np.all(w[:, :, 61] == 0))
-                desc = json.loads((out / f"weights_coarse_shard{shard}.json").read_text())
+                desc = json.loads((out / f"weights_fine_shard{shard}.json").read_text())
                 self.assertEqual(desc["element_order"], "kotekan_raw")
                 self.assertEqual(desc["inputs"]["gains_element_order"], "charts_logical")
                 self.assertEqual(desc["shard"], shard)
-                self.assertEqual(desc["shape"], [64, 336, 64])
+                self.assertEqual(desc["mode"], "fine")
+                self.assertEqual(desc["shape"], [128, 10752, 64])
+                self.assertEqual(desc["beams"], {"defined": 64, "zero_padded": 64,
+                                                 "rule": "beams [defined, 128) have all-zero "
+                                                         "weights"})
                 self.assertEqual(desc["sha256"], bw.sha256_file(npy))
                 self.assertTrue(desc["gain"]["calibrated"])
 

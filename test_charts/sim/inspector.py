@@ -159,13 +159,17 @@ def inspect_tracker_dump(
 def inspect_beamformer_dump(
     bin_path: Path,
     num_freq: int = 336,
-    num_beams: int = 64,
+    num_beams: int = 128,
     samples_per_data_set: int = 15360,
     integration_spectra: int = 10,
     input_mode: str = "fine",
     output_format: str = "int8",
 ) -> Dict[str, Any]:
-    """Inspects float32 or int8 integrated beam intensity dump [T_integrated][freq][beam] from cudaChartsBeamformerCommand."""
+    """Inspects float32 or int8 integrated beam intensity dump [T_integrated][10752][128] from
+    cudaChartsBeamformerCommand (always upchannelized, U=32, K=10, B=128). num_freq,
+    integration_spectra and input_mode are kept for callers; only 336/10/fine are valid."""
+    if input_mode != "fine" or num_freq != 336 or integration_spectra != 10:
+        raise ValueError("the beamformer is always fine (U=32) over 336 coarse channels, K=10")
     raw = np.fromfile(str(bin_path), dtype=np.uint8)
     if raw.size < 4:
         raise ValueError(f"File {bin_path} is smaller than 4-byte metadata header.")
@@ -173,14 +177,8 @@ def inspect_beamformer_dump(
     metadata_size = int(np.frombuffer(raw[:4].tobytes(), dtype="<u4", count=1)[0])
     payload_offset = 4 + metadata_size
 
-    if input_mode == "fine":
-        n_time_bf = samples_per_data_set // 32
-        n_freq_out = 336 * 32
-        integration_spectra = 10
-    else:
-        n_time_bf = samples_per_data_set
-        n_freq_out = num_freq
-
+    n_time_bf = samples_per_data_set // 32
+    n_freq_out = 336 * 32
     n_time_out = (n_time_bf + integration_spectra - 1) // integration_spectra
     expected_samples = n_time_out * n_freq_out * num_beams
     bytes_per_sample = 1 if output_format == "int8" else 4
@@ -212,46 +210,60 @@ def inspect_beamformer_dump(
     }
 
 
-def compute_reference_beamformer_intensity(
-    packed_voltage: np.ndarray,
+def fine_frequencies_hz(shard_id: int = 0, freq_zero_hz: float = 300e6,
+                        freq_step_hz: float = 300e3) -> np.ndarray:
+    """Fine channel centres nu0 + (336*shard + f + (u - 15.5)/32) * dnu, index f*32 + u."""
+    coarse = shard_id * 336 + np.arange(336, dtype=np.float64)
+    offsets = (np.arange(32, dtype=np.float64) - 15.5) / 32
+    return freq_zero_hz + (coarse[:, None] + offsets[None, :]).reshape(-1) * freq_step_hz
+
+
+def default_geometry_weights(
     shard_id: int = 0,
-    num_beams: int = 64,
-    integration_spectra: int = 320,
+    num_beams: int = 128,
+    n_ant: int = 64,
     spacing_m: float = 0.6,
     beam_l_step: float = 0.01,
     freq_zero_hz: float = 300e6,
     freq_step_hz: float = 300e3,
 ) -> np.ndarray:
-    """Computes analytical/CPU reference coarse integrated beam intensity [T_int][336][B] in float32."""
-    from .writer import unpack_int4x2
-
-    n_time, n_freq, n_ant = packed_voltage.shape
-    voltages = unpack_int4x2(packed_voltage)  # complex64 [T, F, E]
-
+    """Analytical counterpart of the command's diagnostic generated weights (no weights_file):
+    W[b, f, a] = exp(+i 2 pi nu_f / c * x_a * l_b), x_a = (a % 8) * spacing,
+    l_b = (b - B/2) * beam_l_step, m = 0. Returns complex64 [B][10752][E]."""
     rows = 4 if n_ant == 32 else 8
     cols = 8
     pos_x = np.array([float(c) * spacing_m for _ in range(rows) for c in range(cols)], dtype=np.float64)
-
     center = num_beams // 2
     l_vals = np.array([(b - center) * beam_l_step for b in range(num_beams)], dtype=np.float64)
-
-    coarse_origin = shard_id * 336
-    freqs_hz = freq_zero_hz + (coarse_origin + np.arange(n_freq, dtype=np.float64)) * freq_step_hz
-    wave_numbers = (2.0 * math.pi * freqs_hz) / 299792458.0
-
-    # phase[b, f, a] = wave_number[f] * (pos_x[a] * l_vals[b])
+    wave_numbers = (2.0 * math.pi * fine_frequencies_hz(shard_id, freq_zero_hz, freq_step_hz)) / 299792458.0
     phases = wave_numbers[None, :, None] * (l_vals[:, None, None] * pos_x[None, None, :])
-    weights = np.cos(phases).astype(np.float32) + 1j * np.sin(phases).astype(np.float32)  # [B, F, E]
+    return (np.cos(phases).astype(np.float32) + 1j * np.sin(phases).astype(np.float32)).astype(np.complex64)
 
-    # Sum over antennas: sum_real = w_r * v_r - w_i * v_i, sum_imag = w_r * v_i + w_i * v_r
-    # Notice this is standard complex multiplication: weights[b, f, e] * voltages[t, f, e]
-    formed = np.einsum("tfe,bfe->tfb", voltages, weights, optimize=True)
-    power = (formed.real ** 2 + formed.imag ** 2).astype(np.float32)
 
+def compute_reference_beamformer_intensity(
+    fine_voltages: np.ndarray,
+    shard_id: int = 0,
+    num_beams: int = 128,
+    integration_spectra: int = 10,
+    spacing_m: float = 0.6,
+    beam_l_step: float = 0.01,
+    freq_zero_hz: float = 300e6,
+    freq_step_hz: float = 300e3,
+) -> np.ndarray:
+    """Reference integrated intensity [T_int][10752][B] float32 from fine voltages
+    [M][10752][E] (the int4 codes after the upchannelizer) and the generated default
+    geometry weights: P = sum over the window of |sum_e W[b,f,e] x[m,f,e]|^2."""
+    n_time, n_freq, n_ant = fine_voltages.shape
+    if n_freq != 10752:
+        raise ValueError("fine voltages must have 10752 channels (336 x 32)")
+    weights = default_geometry_weights(shard_id, num_beams, n_ant, spacing_m, beam_l_step,
+                                       freq_zero_hz, freq_step_hz)
     n_windows = (n_time + integration_spectra - 1) // integration_spectra
-    integrated = np.zeros((n_windows, n_freq, num_beams), dtype=np.float32)
+    integrated = np.zeros((n_windows, n_freq, num_beams), dtype=np.float64)
     for w in range(n_windows):
         t0 = w * integration_spectra
         t1 = min(n_time, t0 + integration_spectra)
-        integrated[w] = np.sum(power[t0:t1], axis=0, dtype=np.float32)
-    return integrated
+        formed = np.einsum("tfe,bfe->tfb", fine_voltages[t0:t1].astype(np.complex128),
+                           weights, optimize=True)
+        integrated[w] = np.sum(formed.real ** 2 + formed.imag ** 2, axis=0)
+    return integrated.astype(np.float32)

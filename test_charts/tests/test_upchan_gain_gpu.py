@@ -12,8 +12,8 @@ Acceptance (FINE_PATH_SCALLOPING_QUANTIZATION.md §3, §4 step 3):
   local coarse channel and on both shards. A second u0 checks the order.
 * Descriptor v2: history.upchan_gain carries the values, unity flag, source, reference and
   the SHA-256 of the applied float32 [336*32] array; ip.upchan_gain() returns that array.
-* Invalid configurations are rejected with their message: wrong length, <= 0, non-unity in
-  coarse mode, source inconsistent with the values, unknown source. NaN is rejected by the
+* Invalid configurations are rejected with their message: wrong length, <= 0, source
+  inconsistent with the values, unknown source. NaN is rejected by the
   kotekan config parser (JSON has no NaN) before the command's own finite check.
 Synthetic verification of the plumbing only; the numerical effect of G (scaling before the
 rounding, shaped-noise flattening) is stage 2.
@@ -37,7 +37,7 @@ from test_charts.tests import test_stage_d_product_gpu as sd
 
 RESULTS = None
 REFERENCE_BIN = None
-B, E, F, U, FF = 64, 64, 336, 32, 336 * 32
+B, E, F, U, FF = 128, 64, 336, 32, 336 * 32
 T_RAW = 640
 
 
@@ -206,8 +206,6 @@ class UpchanGainGpu(unittest.TestCase):
                      "upchan_gain values must be finite and > 0"),
             "negative": ({"upchan_gain": neg, "upchan_gain_source": "measured"}, "fine",
                          "upchan_gain values must be finite and > 0"),
-            "coarse_non_unity": ({"upchan_gain": two, "upchan_gain_source": "measured"},
-                                 "coarse", "upchan_gain applies only to input_mode: fine"),
             "non_unity_without_source": ({"upchan_gain": two}, "fine",
                                          "upchan_gain_source must be"),
             "non_unity_labelled_unity": ({"upchan_gain": two, "upchan_gain_source": "unity"},
@@ -217,19 +215,11 @@ class UpchanGainGpu(unittest.TestCase):
             "unknown_source": ({"upchan_gain": two, "upchan_gain_source": "guess"}, "fine",
                                "upchan_gain_source must be"),
         }
-        coarse_raw = np.zeros((320, F, E), np.uint8)
-        coarse_w = sc.write_weights(self.root / "coarse_w.bin",
-                                    np.ones((B, F, E), np.complex64))
         report = {}
         for label, (extra, mode, message) in cases.items():
-            if mode == "fine":
-                run = sd.run_product(self.root / f"rej_{label}", self.frames[:1], mode="fine",
-                                     t_raw=T_RAW, k=10, shard=0, weights_file=self.wfile,
-                                     fmt="float32", extra=extra)
-            else:
-                run = sd.run_product(self.root / f"rej_{label}", [coarse_raw], mode="coarse",
-                                     t_raw=320, k=320, shard=0, weights_file=coarse_w,
-                                     fmt="float32", extra=extra)
+            run = sd.run_product(self.root / f"rej_{label}", self.frames[:1], mode=mode,
+                                 t_raw=T_RAW, k=10, shard=0, weights_file=self.wfile,
+                                 fmt="float32", extra=extra)
             report[label] = {"rejected": len(run["intensity"]) == 0,
                              "message_found": message in run["log"]}
         record("g_rejected_configurations", report)

@@ -66,7 +66,7 @@ def create_packet_loss_yaml(yaml_path: Path, input_dir: Path, output_dir: Path,
                             frames: int, *, mode: str = "fine", raw_n_time: int = 640,
                             k: int | None = None, gpu_depth: int = 3,
                             raw_depth: int = 4, mask_depth: int = 5,
-                            output_depth: int = 4, num_beams: int = 64) -> Path:
+                            output_depth: int = 4, num_beams: int = 128) -> Path:
     """Two shards with pre-zeroed voltage and original masks via existing cudaInputData.
 
     All output is float32 for numerical checks. The associated exposure descriptor
@@ -81,35 +81,33 @@ def create_packet_loss_yaml(yaml_path: Path, input_dir: Path, output_dir: Path,
     """
     from .pipeline import create_beamformer_yaml
 
-    k = (10 if mode == "fine" else 320) if k is None else k
-    if mode not in ("fine", "coarse") or (mode == "fine" and k != 10):
-        raise ValueError("fine requires K=10; mode must be fine or coarse")
-    if mode == "coarse" and k not in (10, 320):
-        raise ValueError("coarse requires K=10 or 320")
-    if raw_n_time <= 0 or (mode == "fine" and (raw_n_time < 96 or raw_n_time % 32)):
+    k = 10 if k is None else k
+    if mode != "fine" or k != 10:
+        raise ValueError("the beamformer is always fine (U=32) with K=10; coarse was removed")
+    if raw_n_time < 96 or raw_n_time % 32:
         raise ValueError("fine requires T_raw >= 96 divisible by 32")
     if frames < 1 or gpu_depth < 1 or min(raw_depth, mask_depth, output_depth) < gpu_depth:
         raise ValueError("positive frame count and host depths >= GPU depth are required")
-    if not 1 <= num_beams <= 128:
-        raise ValueError("num_beams must be between 1 and 128")
+    if num_beams != 128:
+        raise ValueError("num_beams must be 128 (fixed beam count)")
     yaml_path.parent.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
-    n_time = raw_n_time // 32 if mode == "fine" else raw_n_time
+    n_time = raw_n_time // 32
     n_integrated = (n_time + k - 1) // k
-    count_dtype = "uint8" if mode == "fine" else "uint16"
+    count_dtype = "uint8"
     descriptor = {"schema": "charts-exposure-validation-v1", "input_mode": mode,
-                  "T_raw": raw_n_time, "U": 32 if mode == "fine" else 1, "K": k,
+                  "T_raw": raw_n_time, "U": 32, "K": k,
                   "shape": [n_integrated, 336], "dtype": count_dtype,
                   "byte_order": "native", "num_elements": 64, "num_beams": num_beams,
                   "intensity_dtype": "float32",
-                  "intensity_shape": [n_integrated, 10752 if mode == "fine" else 336, num_beams],
+                  "intensity_shape": [n_integrated, 10752, num_beams],
                   "weight_identity": "generated default geometry; coherent beam=num_beams//2",
                   "association": ["configured_shard", "FPGA_SEQ_NUM", "T_raw"],
                   "timestamp_step": 1, "raw_tick_seconds": [10, 3000000],
                   "mask_polarity": "1=missing, 0=valid",
                   "voltage_preparation": "replay fixtures pre-zero missing spectra",
-                  "fine_bins_per_count": 32 if mode == "fine" else 1,
-                  "startup_incomplete_fine_spectra": 3 if mode == "fine" else 0,
+                  "fine_bins_per_count": 32,
+                  "startup_incomplete_fine_spectra": 3,
                   "power_convention": "sum-power of supplied zeroed samples; no normalization",
                   "tail_supplied_spectra": min(k, n_time - (n_integrated - 1) * k),
                   "shards": []}

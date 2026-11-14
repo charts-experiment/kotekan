@@ -311,7 +311,7 @@ def create_beamformer_yaml(
     output_name: str,
     num_frames: int,
     num_elements: int = 64,
-    num_beams: int = 64,
+    num_beams: int = 128,
     samples_per_data_set: int = 15360,
     integration_spectra: int = 10,
     input_mode: str = "fine",
@@ -322,17 +322,20 @@ def create_beamformer_yaml(
     beam_l_step: float = 0.01,
     weights_file: Optional[Path] = None,
 ) -> Path:
-    """Generates Kotekan YAML for rawFileRead -> cudaChartsBeamformerCommand -> rawFileWrite."""
+    """Generates Kotekan YAML for rawFileRead -> cudaChartsBeamformerCommand -> rawFileWrite.
+
+    The beamformer always upchannelizes (U=32, K=10) and forms exactly 128 beams; input_mode
+    and num_beams are kept for callers but only accept those values.
+    """
+    if input_mode != "fine":
+        raise ValueError("input_mode: coarse was removed; the beamformer is always fine (U=32)")
+    if num_beams != 128 or integration_spectra != 10:
+        raise ValueError("the CHARTS beamformer requires num_beams=128 and integration_spectra=10")
     yaml_path.parent.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if input_mode == "fine":
-        n_time_bf = samples_per_data_set // 32
-        n_freq_out = 336 * 32
-        integration_spectra = 10
-    else:
-        n_time_bf = samples_per_data_set
-        n_freq_out = 336
+    n_time_bf = samples_per_data_set // 32
+    n_freq_out = 336 * 32
 
     n_time_out = (n_time_bf + integration_spectra - 1) // integration_spectra
     bytes_per_sample = 1 if output_format == "int8" else 4
