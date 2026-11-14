@@ -137,6 +137,9 @@ cudaRfiMitigationCommand::cudaRfiMitigationCommand(Config& config, const std::st
         (static_cast<std::size_t>(_samples_per_data_set) + init_cfg.time_chunk_size - 1)
         / init_cfg.time_chunk_size;
     _last_channel_stats.resize(static_cast<std::size_t>(_num_local_freq));
+    _h_static_notch.assign(static_cast<std::size_t>(_num_local_freq), 0);
+    _pending_channel_gains.assign(static_cast<std::size_t>(_num_local_freq), 1.0f);
+    _exec_channel_gains.assign(static_cast<std::size_t>(_num_local_freq), 1.0f);
 
     {
         std::lock_guard<std::mutex> lk(_global_mutex);
@@ -241,6 +244,56 @@ cudaRfiMitigationCommand::cudaRfiMitigationCommand(Config& config, const std::st
                 reply["overall_flagged_chunk_fraction"] =
                     (total_channels > 0) ? (sum_flagged_frac / total_channels) : 0.0;
                 reply["top_rfi_channels"] = top_rfi;
+                conn.send_json_reply(reply);
+            });
+
+            rest.register_get_callback("/rfi_mitigation/channels", [](connectionInstance& conn) {
+                struct InstSnapshot {
+                    cudaRfiMitigationCommand* inst;
+                    std::vector<float> gains;
+                };
+                std::vector<InstSnapshot> sorted_insts;
+                {
+                    std::lock_guard<std::mutex> glk(_global_mutex);
+                    std::map<double, cudaRfiMitigationCommand*> freq_map;
+                    for (auto* ptr : _instances) {
+                        auto it = freq_map.find(ptr->get_freq_start_hz());
+                        if (it == freq_map.end()
+                            || ptr->get_frame_counter() > it->second->get_frame_counter()) {
+                            freq_map[ptr->get_freq_start_hz()] = ptr;
+                        }
+                    }
+                    for (auto& [f0, ptr] : freq_map) {
+                        sorted_insts.push_back({ptr, ptr->_pending_channel_gains});
+                    }
+                }
+
+                nlohmann::json channels = nlohmann::json::array();
+                for (std::size_t sb = 0; sb < sorted_insts.size(); ++sb) {
+                    auto* inst_ptr = sorted_insts[sb].inst;
+                    const auto& gains = sorted_insts[sb].gains;
+                    const auto stats = inst_ptr->get_last_channel_stats();
+                    const double f_start = inst_ptr->get_freq_start_hz();
+                    const double f_step = inst_ptr->get_freq_step_hz();
+                    for (std::size_t f = 0; f < stats.size(); ++f) {
+                        nlohmann::json item;
+                        item["freq_mhz"] = (f_start + static_cast<double>(f) * f_step) * 1.0e-6;
+                        item["subband"] = static_cast<int>(sb);
+                        item["local_channel"] = static_cast<int>(f);
+                        item["mean_power"] = stats[f].mean_power;
+                        item["mean_sk"] = stats[f].mean_sk;
+                        item["max_sk"] = stats[f].max_sk;
+                        item["freq_mad_z"] = stats[f].freq_mad_z;
+                        item["flagged_chunk_fraction"] = stats[f].flagged_chunk_fraction;
+                        item["flag_bits"] = stats[f].flag_bits;
+                        item["gain"] = (f < gains.size()) ? gains[f] : 1.0f;
+                        channels.push_back(std::move(item));
+                    }
+                }
+
+                nlohmann::json reply;
+                reply["total_channels"] = static_cast<int>(channels.size());
+                reply["channels"] = std::move(channels);
                 conn.send_json_reply(reply);
             });
 
@@ -353,6 +406,37 @@ cudaRfiMitigationCommand::cudaRfiMitigationCommand(Config& config, const std::st
                         }
                     } catch (const std::exception& e) {
                         conn.send_error(fmt::format("Error setting gains: {:s}\n", e.what()),
+                                        HTTP_RESPONSE::BAD_REQUEST);
+                    }
+                });
+
+            rest.register_post_callback(
+                "/rfi_mitigation/reset_ema", [](connectionInstance& conn, nlohmann::json& j) {
+                    try {
+                        std::vector<double> freqs_mhz;
+                        if (j.is_object() && j.contains("freq_mhz") && j["freq_mhz"].is_array()) {
+                            freqs_mhz = j["freq_mhz"].get<std::vector<double>>();
+                        }
+                        if (freqs_mhz.empty()
+                            || (j.is_object() && j.contains("all") && j["all"].get<bool>())) {
+                            std::lock_guard<std::mutex> glk(_global_mutex);
+                            _ema_reset_generation++;
+                            nlohmann::json reply;
+                            reply["status"] = "ok";
+                            reply["mode"] = "all";
+                            reply["instances_updated"] = static_cast<int>(_instances.size());
+                            conn.send_json_reply(reply);
+                            return;
+                        }
+                        const auto [matched, insts] = reset_ema_channels_by_freq_mhz(freqs_mhz);
+                        nlohmann::json reply;
+                        reply["status"] = "ok";
+                        reply["mode"] = "selective";
+                        reply["matched_channels"] = matched;
+                        reply["instances_updated"] = insts;
+                        conn.send_json_reply(reply);
+                    } catch (const std::exception& e) {
+                        conn.send_error(fmt::format("Error resetting EMA: {:s}\n", e.what()),
                                         HTTP_RESPONSE::BAD_REQUEST);
                     }
                 });
@@ -472,27 +556,55 @@ void cudaRfiMitigationCommand::free_device_buffers() {
     }
 }
 
-void cudaRfiMitigationCommand::rebuild_static_notch_mask(const RfiMitigationConfig& cfg) {
-    std::vector<std::uint8_t> h_notch(static_cast<std::size_t>(_num_local_freq), 0);
+void cudaRfiMitigationCommand::rebuild_static_notch_mask(const RfiMitigationConfig& cfg,
+                                                         cudaStream_t stream) {
+    _h_static_notch.assign(static_cast<std::size_t>(_num_local_freq), 0);
     for (int f = 0; f < _num_local_freq; ++f) {
         const double f_mhz = (_freq_start_hz + static_cast<double>(f) * _freq_step_hz) * 1.0e-6;
         for (const auto& [lo_mhz, hi_mhz] : cfg.static_notch_bands_mhz) {
             if (f_mhz >= lo_mhz && f_mhz <= hi_mhz) {
-                h_notch[static_cast<std::size_t>(f)] = 1;
+                _h_static_notch[static_cast<std::size_t>(f)] = 1;
                 break;
             }
         }
     }
-    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(_d_static_notch, h_notch.data(),
-                                        _num_local_freq * sizeof(std::uint8_t),
-                                        cudaMemcpyHostToDevice));
+    if (stream != nullptr) {
+        CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_d_static_notch, _h_static_notch.data(),
+                                                _num_local_freq * sizeof(std::uint8_t),
+                                                cudaMemcpyHostToDevice, stream));
+    } else {
+        CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(_d_static_notch, _h_static_notch.data(),
+                                           _num_local_freq * sizeof(std::uint8_t),
+                                           cudaMemcpyHostToDevice));
+    }
+}
+
+std::vector<float> cudaRfiMitigationCommand::get_pending_channel_gains() const {
+    std::lock_guard<std::mutex> lk(_global_mutex);
+    return _pending_channel_gains;
 }
 
 void cudaRfiMitigationCommand::set_local_channel_gains(const std::vector<float>& gains) {
-    const std::size_t n = std::min<std::size_t>(gains.size(), static_cast<std::size_t>(_num_local_freq));
-    if (n > 0 && _d_channel_gains != nullptr) {
-        CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(_d_channel_gains, gains.data(), n * sizeof(float),
-                                           cudaMemcpyHostToDevice));
+    // Caller must hold _global_mutex (or run single-threaded before execute()).
+    _pending_channel_gains.assign(static_cast<std::size_t>(_num_local_freq), 1.0f);
+    const std::size_t n =
+        std::min<std::size_t>(gains.size(), static_cast<std::size_t>(_num_local_freq));
+    for (std::size_t i = 0; i < n; ++i) {
+        if (std::isfinite(gains[i]) && gains[i] > 0.0f) {
+            _pending_channel_gains[i] = gains[i];
+        }
+    }
+    _pending_gains_dirty = true;
+}
+
+void cudaRfiMitigationCommand::queue_ema_reset_channel(int local_channel) {
+    // Caller must hold _global_mutex.
+    if (local_channel >= 0 && local_channel < _num_local_freq) {
+        if (std::find(_pending_ema_reset_indices.begin(), _pending_ema_reset_indices.end(),
+                      local_channel)
+            == _pending_ema_reset_indices.end()) {
+            _pending_ema_reset_indices.push_back(local_channel);
+        }
     }
 }
 
@@ -507,6 +619,35 @@ bool cudaRfiMitigationCommand::set_channel_gains_by_freq(double freq_start_hz,
         }
     }
     return found;
+}
+
+std::pair<int, int> cudaRfiMitigationCommand::reset_ema_channels_by_freq_mhz(
+    const std::vector<double>& freqs_mhz) {
+    std::lock_guard<std::mutex> lk(_global_mutex);
+    int matched = 0;
+    int insts_updated = 0;
+    for (auto* ptr : _instances) {
+        const double f0_hz = ptr->get_freq_start_hz();
+        const double step_hz = ptr->get_freq_step_hz();
+        const int n_freq = ptr->get_num_local_freq();
+        if (step_hz <= 0.0 || n_freq <= 0) {
+            continue;
+        }
+        bool inst_touched = false;
+        for (double f_mhz : freqs_mhz) {
+            const double df_idx = (f_mhz * 1.0e6 - f0_hz) / step_hz;
+            const int idx = static_cast<int>(std::llround(df_idx));
+            if (idx >= 0 && idx < n_freq && std::abs(df_idx - static_cast<double>(idx)) <= 0.49) {
+                ptr->queue_ema_reset_channel(idx);
+                matched++;
+                inst_touched = true;
+            }
+        }
+        if (inst_touched) {
+            insts_updated++;
+        }
+    }
+    return {matched, insts_updated};
 }
 
 RfiMitigationConfig cudaRfiMitigationCommand::get_config() {
@@ -574,16 +715,31 @@ cudaEvent_t cudaRfiMitigationCommand::execute(cudaPipelineState& /*pipestate*/,
     RfiMitigationConfig cfg;
     std::uint64_t cfg_gen = 0;
     std::uint64_t ema_reset_gen = 0;
+    bool upload_gains_now = false;
+    std::vector<int> ema_reset_chans;
     {
         std::lock_guard<std::mutex> lk(_global_mutex);
         cfg = _shared_config;
         cfg_gen = _config_generation;
         ema_reset_gen = _ema_reset_generation;
+        if (_pending_gains_dirty) {
+            _exec_channel_gains = _pending_channel_gains;
+            _pending_gains_dirty = false;
+            upload_gains_now = true;
+        }
+        if (!_pending_ema_reset_indices.empty()) {
+            ema_reset_chans.swap(_pending_ema_reset_indices);
+        }
     }
 
     if (_applied_rfi_cfg_gen != cfg_gen) {
-        rebuild_static_notch_mask(cfg);
+        rebuild_static_notch_mask(cfg, stream);
         _applied_rfi_cfg_gen = cfg_gen;
+    }
+    if (upload_gains_now && _d_channel_gains != nullptr) {
+        CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_d_channel_gains, _exec_channel_gains.data(),
+                                                _num_local_freq * sizeof(float),
+                                                cudaMemcpyHostToDevice, stream));
     }
 
     // Sync active antenna mask from cudaAntennaMaskCommand and tracker calibration mask
@@ -626,6 +782,19 @@ cudaEvent_t cudaRfiMitigationCommand::execute(cudaPipelineState& /*pipestate*/,
                 cudaMemsetAsync(_d_ema_mad, 0, _num_local_freq * sizeof(float), stream));
         }
         _applied_ema_reset_gen = ema_reset_gen;
+    } else if (!ema_reset_chans.empty()) {
+        for (int f_idx : ema_reset_chans) {
+            if (f_idx >= 0 && f_idx < _num_local_freq) {
+                if (_d_ema_power) {
+                    CHECK_CUDA_ERROR_NON_OO(
+                        cudaMemsetAsync(_d_ema_power + f_idx, 0, sizeof(float), stream));
+                }
+                if (_d_ema_mad) {
+                    CHECK_CUDA_ERROR_NON_OO(
+                        cudaMemsetAsync(_d_ema_mad + f_idx, 0, sizeof(float), stream));
+                }
+            }
+        }
     }
 
     if (cfg.enabled && !_current_active_raw.empty()) {

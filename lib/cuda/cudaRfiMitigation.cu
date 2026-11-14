@@ -456,7 +456,7 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
                         d_ema_mad[f] = chan_mad_p;
                     }
                 }
-            } else if (flagged_chunks == 0U || chan_med_p < ema_p) {
+            } else if (flagged_chunks == 0U) {
                 d_ema_power[f] = (1.0f - alpha) * ema_p + alpha * chan_med_p;
                 if (d_ema_mad != nullptr) {
                     d_ema_mad[f] = (1.0f - alpha) * ema_mad + alpha * chan_mad_p;

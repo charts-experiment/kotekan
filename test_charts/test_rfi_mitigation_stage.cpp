@@ -588,6 +588,76 @@ int main() {
     std::printf("  Result: [PASSED] Edge-channel excision and persistent EMA step-burst detection verified!\n\n");
     std::fflush(stdout);
 
+    // 5C: Verify flagged dips do NOT ratchet d_ema_power downward (preventing false TIME_BURST lock)
+    const std::size_t f_dip = 70;
+    std::vector<int4x2_t> h_flagged_dip = h_clean_base;
+    for (std::size_t t = 0; t < n_time; ++t) {
+        const std::size_t base = (t * n_freq + f_dip) * n_elem;
+        for (int a = 0; a < num_active; ++a) {
+            const int raw_e = active_raw[a];
+            const int re = (a % 2 == 0) ? 1 : -1;
+            const int im = (t % 2 == 0) ? 1 : -1;
+            h_flagged_dip[base + raw_e] = pack_int4x2_signed(re, im);
+        }
+    }
+
+    cudaMemset(d_ema_power, 0, n_freq * sizeof(float));
+    cudaMemset(d_ema_mad, 0, n_freq * sizeof(float));
+    cudaMemcpy(d_voltages, h_clean_base.data(), frame_elems * sizeof(int4x2_t),
+               cudaMemcpyHostToDevice);
+    for (int warmup = 0; warmup < 5; ++warmup) {
+        launch_inspect_rfi_chunks(d_voltages, d_active_antennas, num_active, d_chunk_power,
+                                  d_chunk_sk, d_chunk_sat_frac, n_time, n_freq, n_elem, chunk_size,
+                                  1, nullptr, false);
+        launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_chunk_sat_frac, d_static_notch,
+                                  d_channel_gains, d_chunk_rfi_mask, d_channel_stats, n_chunks,
+                                  n_freq, num_active, chunk_size, cfg_bench, nullptr, nullptr,
+                                  d_ema_power, d_ema_mad);
+    }
+    cudaDeviceSynchronize();
+    float dip_ema_before = 0.0f;
+    cudaMemcpy(&dip_ema_before, d_ema_power + f_dip, sizeof(float), cudaMemcpyDeviceToHost);
+
+    cudaMemcpy(d_voltages, h_flagged_dip.data(), frame_elems * sizeof(int4x2_t),
+               cudaMemcpyHostToDevice);
+    for (int df = 0; df < 5; ++df) {
+        launch_inspect_rfi_chunks(d_voltages, d_active_antennas, num_active, d_chunk_power,
+                                  d_chunk_sk, d_chunk_sat_frac, n_time, n_freq, n_elem, chunk_size,
+                                  1, nullptr, false);
+        launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_chunk_sat_frac, d_static_notch,
+                                  d_channel_gains, d_chunk_rfi_mask, d_channel_stats, n_chunks,
+                                  n_freq, num_active, chunk_size, cfg_bench, nullptr, nullptr,
+                                  d_ema_power, d_ema_mad);
+    }
+    cudaDeviceSynchronize();
+    float dip_ema_after = 0.0f;
+    cudaMemcpy(&dip_ema_after, d_ema_power + f_dip, sizeof(float), cudaMemcpyDeviceToHost);
+
+    cudaMemcpy(d_voltages, h_clean_base.data(), frame_elems * sizeof(int4x2_t),
+               cudaMemcpyHostToDevice);
+    launch_inspect_rfi_chunks(d_voltages, d_active_antennas, num_active, d_chunk_power,
+                              d_chunk_sk, d_chunk_sat_frac, n_time, n_freq, n_elem, chunk_size,
+                              1, nullptr, false);
+    launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_chunk_sat_frac, d_static_notch,
+                              d_channel_gains, d_chunk_rfi_mask, d_channel_stats, n_chunks,
+                              n_freq, num_active, chunk_size, cfg_bench, nullptr, nullptr,
+                              d_ema_power, d_ema_mad);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h_stats.data(), d_channel_stats, n_freq * sizeof(RfiChannelStats),
+               cudaMemcpyDeviceToHost);
+
+    std::printf("  5. Flagged dip recovery ch=%zu: EMA=%.4f -> %.4f, post-dip flags=0x%02x (frac=%.2f)\n",
+                f_dip, dip_ema_before, dip_ema_after, h_stats[f_dip].flag_bits,
+                h_stats[f_dip].flagged_chunk_fraction);
+    if (std::abs(dip_ema_after - dip_ema_before) > 1.0e-5f
+        || (h_stats[f_dip].flag_bits & RFI_TIME_BURST) != 0) {
+        std::printf("  Result: [FAILED] Flagged dip corrupted EMA baseline!\n");
+        std::fflush(stdout);
+        return 1;
+    }
+    std::printf("  Result: [PASSED] Flagged dips no longer ratchet persistent EMA downward!\n\n");
+    std::fflush(stdout);
+
     cudaFree(d_ema_power);
     cudaFree(d_ema_mad);
 

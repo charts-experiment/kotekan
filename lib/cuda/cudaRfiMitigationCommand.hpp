@@ -51,17 +51,20 @@ public:
         std::lock_guard<std::mutex> lk(_stats_mutex);
         return _last_channel_stats;
     }
+    std::vector<float> get_pending_channel_gains() const;
 
     void set_local_channel_gains(const std::vector<float>& gains);
+    void queue_ema_reset_channel(int local_channel);
 
     static RfiMitigationConfig get_config();
     static void update_config(const RfiMitigationConfig& cfg);
     static bool set_channel_gains_by_freq(double freq_start_hz, const std::vector<float>& gains);
+    static std::pair<int, int> reset_ema_channels_by_freq_mhz(const std::vector<double>& freqs_mhz);
 
 private:
     void allocate_device_buffers();
     void free_device_buffers();
-    void rebuild_static_notch_mask(const RfiMitigationConfig& cfg);
+    void rebuild_static_notch_mask(const RfiMitigationConfig& cfg, cudaStream_t stream = nullptr);
 
     std::string _gpu_mem_voltage;
     std::string _gpu_mem_rfi_mask;
@@ -98,6 +101,13 @@ private:
     float* _d_ema_power = nullptr;
     float* _d_ema_mad = nullptr;
     RfiChannelStats* _d_channel_stats = nullptr;
+
+    // Host pending/staging buffers (async-uploaded on stage CUDA stream in execute())
+    std::vector<std::uint8_t> _h_static_notch;
+    std::vector<float> _pending_channel_gains;
+    std::vector<float> _exec_channel_gains;
+    bool _pending_gains_dirty = false;
+    std::vector<int> _pending_ema_reset_indices;
 
     // Pinned host telemetry buffer
     RfiChannelStats* _h_channel_stats = nullptr;
