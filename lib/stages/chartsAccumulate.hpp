@@ -13,10 +13,11 @@
 class chartsMetadata;
 
 /**
- * Accumulate int32 CHARTS frames while keeping the output format unchanged.
+ * Accumulate int32 or float32 CHARTS frames while keeping the output format unchanged.
  *
- * Input frames are accumulated in int64_t and converted back to int32_t only
- * when the output frame is complete.
+ * int32 frames are accumulated in int64_t and converted back to int32_t only when
+ * the output frame is complete. float32 frames are accumulated in double and can
+ * optionally be averaged over the accumulated frames.
  */
 class chartsAccumulate : public kotekan::Stage {
 public:
@@ -32,6 +33,8 @@ private:
     Buffer* out_buf;
 
     int32_t _num_frames_to_accumulate;
+    bool _is_float32;
+    bool _average;
     std::size_t _num_values;
 };
 

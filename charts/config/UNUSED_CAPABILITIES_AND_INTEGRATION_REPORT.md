@@ -15,9 +15,8 @@ This audit details the mathematical formulation, kernel implementation, activati
 ## 1. Per-Antenna Complex Gain & Phase Calibration
 
 ### 1.1 Architecture & Implementation Status
-- **Source Code:** `lib/cuda/cudaDirectBeamTrackerCommand.cpp` (`upload_calibration_gains`), `lib/cuda/cudaDirectBeamTracker.cu` (`generate_steering_weights_legacy_kernel` and `generate_steering_weights_tapered_kernel`), `lib/utils/chartsMvdr.cpp` (`load_gains_npy`, `calibration_correctors`).
-- **Compilation Status:** Fully compiled into `kotekan_cuda` and `test_charts` executables.
-- **Dormancy Root Cause:** Default operational YAML configs (`64antennas_direct_tracker.yaml`, `64antennas_direct_tracker_10beams.yaml`) leave `gains_file: ""` unset. Furthermore, while static loading was implemented at stage initialization, no REST callback was exposed to update calibration vectors dynamically during long observation tracks.
+- **Source Code:** `lib/cuda/cudaDirectBeamTrackerCommand.cpp` (`upload_calibration_gains`, `reload_gains`), `lib/cuda/cudaDirectBeamTracker.cu` (`generate_steering_weights_legacy_kernel` and `generate_steering_weights_tapered_kernel`), `lib/utils/chartsMvdr.cpp` (`load_gains_npy`, `calibration_correctors`).
+- **Compilation & Deployment Status:** Compiled into `kotekan_cuda` and `test_charts` executables, and active in `charts/config/64antennas_zenith_1beam.yaml` using `/data/calibration/corr_1113/gains_corr_1113_0_4_32_36_freqflt_672x64.npy`. Uncalibrated template configs (`64antennas_direct_tracker.yaml`, `64antennas_direct_tracker_10beams.yaml`) keep `gains_file: ""` unset for uncalibrated quick runs. Live gain hot-reloading is exposed via `POST /direct_tracker/reload_gains` (and `/beam_tracker/reload_gains`).
 
 ### 1.2 Mathematical Formulation
 Frontend analog receiver chains introduce time- and frequency-dependent complex gains $g_a(f) = |g_a(f)| e^{j \psi_a(f)}$ on antenna $a$ and channel $f$, such that observed voltages satisfy:
@@ -41,10 +40,21 @@ if (calibration_gains != nullptr) {
 To activate complex calibration in production pipelines, configure:
 ```yaml
     - name: cudaDirectBeamTrackerCommand
-      gains_file: "/data/calibration/charts_64ant_current_gains.npy"
+      gains_file: "/data/calibration/corr_1113/gains_corr_1113_0_4_32_36_freqflt_672x64.npy"
       gains_first_channel: 0     # Sharded node offset
 ```
-Gains are loaded from standard 2D NumPy arrays `(n_freq, n_ant)` containing `complex64` or `complex128`. Zero or non-finite gain values automatically drop the corresponding antenna from steering weight normalization without pipeline interruption.
+Gains are loaded from standard 2D NumPy arrays `(n_freq, n_ant)` containing `complex64` or `complex128`. Zero or non-finite gain values automatically drop the corresponding antenna from steering weight normalization without pipeline interruption. During active observations, new `.npy` calibration tables can be hot-reloaded without restarting Kotekan via:
+```bash
+curl -s -X POST http://127.0.0.1:12048/direct_tracker/reload_gains \
+  -H 'Content-Type: application/json' \
+  -d '{"gains_file": "/path/to/updated_gains.npy"}'
+```
+
+Related closed-loop self-tuning improvements active on the telemetry & RFI path:
+- `cudaAntennaMaskCommand` evaluates host moments/coherence asynchronously in `finalize_frame()` (no blocking `cudaStreamSynchronize` in `execute()`) and serves `GET /antenna_mask/channel_power`.
+- `cudaRfiMitigationCommand` enables cross-frame persistent EMA burst tracking (`enable_persistent_ema: true`, `ema_alpha: 0.02`, `edge_channels_to_ignore: 0`) and runtime passband pre-whitening via `POST /rfi_mitigation/set_gains`.
+- `chartsAccumulate` excludes zero-blanked/non-finite sub-frames when `average: true`.
+- `charts/self_tune_tracker.py` automates closed-loop passband flattening, gain hot-reloading, and run waterfall verification.
 
 ---
 

@@ -115,8 +115,8 @@ Ordenados por prioridad.
 2. **Confirmar con gains reales.** `gains_E_2026-10-19_with0.npy` tiene forma `(672, 4, 7)`: 4 antenas × 7 tiempos. El archivo no indica qué antenas son; las pruebas asumieron 0,4,6,8. Confirmar los índices, y revisar el rango de amplitudes (mín 0.0018, máx 18) para descartar saturación de `int32` en los autos.
 3. **Prueba en el nodo con `64antennas_corr_cal.yaml`.** Ajustar la ruta de la tabla, correr con captura real y comprobar que `chartsAccumulate`, `rawFileWrite` y los scripts de charts-utils (`plot_triangular_vis.py`, `cal_pipeline_gpu.py`) funcionan con la salida calibrada.
 4. **Medir rendimiento bajo carga real.** Repetir `bench-vis-cal` con el config de producción (2 shards, 15360 muestras por frame) y datos distintos entre frames, para descartar el efecto de L2.
-5. **Recarga en caliente por REST.** Hoy se recalibra reiniciando kotekan. Si hace falta, agregar un endpoint con doble buffer en GPU y swap al inicio de un frame.
-6. **Aplicar la misma idea al beamforming.** Según la tarea de Notion, en el tracking beam y el multi-beamforming las gains se multiplican en cada etapa, después de la cuantización interna. Es trabajo aparte.
+5. **Recarga en caliente por REST.** `cudaDirectBeamTrackerCommand` ya soporta recarga en caliente sin reiniciar kotekan vía `POST /direct_tracker/reload_gains` (alias `/beam_tracker/reload_gains`, además de `POST /rfi_mitigation/set_gains` para pre-blanqueo espectral RFI). El calibrador de visibilidades del correlador sigue cargando al inicio; si hiciera falta recargarlo en caliente, usaría el mismo patrón con doble buffer en GPU.
+6. **Beamforming.** `cudaDirectBeamTrackerCommand` aplica calibración de gains por antena (`gains_file` activo en `64antennas_zenith_1beam.yaml`). Para pipelines multi-haz / MVDR heredados, verificar las rutas equivalentes antes de habilitar.
 7. **Revisar el promedio de gains.** Con ventanas largas, `nanmean` de complejos puede reducir la amplitud si la fase deriva. Definir un umbral de `phase_scatter_deg` para aceptar una calibración.
 8. **Higiene del repo.**
    - Reparar o retirar `create_correlator_yaml` (7.2) y resolver el NVRTC (7.1).

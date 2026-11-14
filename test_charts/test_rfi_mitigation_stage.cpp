@@ -411,6 +411,256 @@ int main() {
     cudaFree(d_power);
     cudaFree(d_comp_mask);
 
+    // >>> TEST 5: Edge Channels (edge_channels_to_ignore=0) & Persistent Cross-Frame EMA <<<
+    std::printf(">>> TEST 5: Edge-Channel Excision & Persistent Cross-Frame EMA (Multi-Second Step) <<<\n");
+
+    const std::size_t f_edge = 5;    // Inside old edge_channels_to_ignore=16 blind spot
+    const std::size_t f_steady = 160; // Analog of 414.0 MHz multi-second steady burst
+
+    // Synthesize fresh clean noise frame
+    std::vector<int4x2_t> h_clean_base(frame_elems);
+    std::memset(h_clean_base.data(), 0, frame_elems * sizeof(int4x2_t));
+    for (std::size_t t = 0; t < n_time; ++t) {
+        for (std::size_t f = 0; f < n_freq; ++f) {
+            const float pb_scale = passband_scale[f];
+            const std::size_t base = (t * n_freq + f) * n_elem;
+            for (int a = 0; a < num_active; ++a) {
+                const int raw_e = active_raw[a];
+                const float sig = ant_sigmas[a] * pb_scale;
+                const int re = static_cast<int>(std::round(norm(rng) * sig));
+                const int im = static_cast<int>(std::round(norm(rng) * sig));
+                h_clean_base[base + raw_e] = pack_int4x2_signed(re, im);
+            }
+        }
+    }
+
+    // 5A: Verify edge channel burst (ch=5) is caught when edge_channels_to_ignore=0
+    std::vector<int4x2_t> h_edge_burst = h_clean_base;
+    for (std::size_t t = 0; t < n_time; ++t) {
+        const std::size_t base = (t * n_freq + f_edge) * n_elem;
+        for (int a = 0; a < num_active; ++a) {
+            const int raw_e = active_raw[a];
+            const float sig = ant_sigmas[a] * 2.5f;
+            const int re = static_cast<int>(std::round(norm(rng) * sig));
+            const int im = static_cast<int>(std::round(norm(rng) * sig));
+            h_edge_burst[base + raw_e] = pack_int4x2_signed(re, im);
+        }
+    }
+
+    RfiMitigationConfig cfg_edge = cfg;
+    cfg_edge.edge_channels_to_ignore = 0;
+    cfg_edge.enable_persistent_ema = false;
+
+    cudaMemset(d_static_notch, 0, n_freq * sizeof(std::uint8_t));
+    cudaMemcpy(d_voltages, h_edge_burst.data(), frame_elems * sizeof(int4x2_t),
+               cudaMemcpyHostToDevice);
+    launch_inspect_rfi_chunks(d_voltages, d_active_antennas, num_active, d_chunk_power, d_chunk_sk,
+                              d_chunk_sat_frac, n_time, n_freq, n_elem, chunk_size, 1, nullptr,
+                              false);
+    launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_chunk_sat_frac, d_static_notch,
+                              d_channel_gains, d_chunk_rfi_mask, d_channel_stats, n_chunks, n_freq,
+                              num_active, chunk_size, cfg_edge, nullptr);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h_stats.data(), d_channel_stats, n_freq * sizeof(RfiChannelStats),
+               cudaMemcpyDeviceToHost);
+
+    const std::uint32_t edge_flags = h_stats[f_edge].flag_bits;
+    std::printf("  1. Edge Channel (%zu) flags with edge_channels_to_ignore=0: 0x%02x (Expected FREQ_MAD 0x08)\n",
+                f_edge, edge_flags);
+    if ((edge_flags & RFI_FREQ_MAD) == 0) {
+        std::printf("  Result: [FAILED] Edge channel burst was ignored!\n");
+        std::fflush(stdout);
+        return 1;
+    }
+
+    // 5B: Full-frame steady +step burst across 10 consecutive frames (414 MHz CW/step analog)
+    std::vector<int4x2_t> h_step_burst = h_clean_base;
+    for (std::size_t t = 0; t < n_time; ++t) {
+        const std::size_t base = (t * n_freq + f_steady) * n_elem;
+        for (int a = 0; a < num_active; ++a) {
+            const int raw_e = active_raw[a];
+            const float sig = ant_sigmas[a] * passband_scale[f_steady] * 2.0f;
+            const int re = static_cast<int>(std::round(norm(rng) * sig));
+            const int im = static_cast<int>(std::round(norm(rng) * sig));
+            h_step_burst[base + raw_e] = pack_int4x2_signed(re, im);
+        }
+    }
+
+    // Isolate temporal detection: without EMA, a steady full-frame burst hides inside single-frame median
+    RfiMitigationConfig cfg_no_ema = cfg;
+    cfg_no_ema.edge_channels_to_ignore = 0;
+    cfg_no_ema.enable_freq_mad_check = false;
+    cfg_no_ema.enable_persistent_ema = false;
+
+    cudaMemcpy(d_voltages, h_step_burst.data(), frame_elems * sizeof(int4x2_t),
+               cudaMemcpyHostToDevice);
+    launch_inspect_rfi_chunks(d_voltages, d_active_antennas, num_active, d_chunk_power, d_chunk_sk,
+                              d_chunk_sat_frac, n_time, n_freq, n_elem, chunk_size, 1, nullptr,
+                              false);
+    launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_chunk_sat_frac, d_static_notch,
+                              d_channel_gains, d_chunk_rfi_mask, d_channel_stats, n_chunks, n_freq,
+                              num_active, chunk_size, cfg_no_ema, nullptr);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h_stats.data(), d_channel_stats, n_freq * sizeof(RfiChannelStats),
+               cudaMemcpyDeviceToHost);
+    const std::uint32_t no_ema_flags = h_stats[f_steady].flag_bits;
+
+    // Now allocate persistent EMA buffers, warm up on 5 clean frames, then feed 10 consecutive step frames
+    float* d_ema_power = nullptr;
+    float* d_ema_mad = nullptr;
+    cudaMalloc(&d_ema_power, n_freq * sizeof(float));
+    cudaMalloc(&d_ema_mad, n_freq * sizeof(float));
+    cudaMemset(d_ema_power, 0, n_freq * sizeof(float));
+    cudaMemset(d_ema_mad, 0, n_freq * sizeof(float));
+
+    RfiMitigationConfig cfg_ema = cfg_no_ema;
+    cfg_ema.enable_persistent_ema = true;
+    cfg_ema.ema_alpha = 0.02f;
+
+    cudaMemcpy(d_voltages, h_clean_base.data(), frame_elems * sizeof(int4x2_t),
+               cudaMemcpyHostToDevice);
+    for (int warmup = 0; warmup < 5; ++warmup) {
+        launch_inspect_rfi_chunks(d_voltages, d_active_antennas, num_active, d_chunk_power,
+                                  d_chunk_sk, d_chunk_sat_frac, n_time, n_freq, n_elem, chunk_size,
+                                  1, nullptr, false);
+        launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_chunk_sat_frac, d_static_notch,
+                                  d_channel_gains, d_chunk_rfi_mask, d_channel_stats, n_chunks,
+                                  n_freq, num_active, chunk_size, cfg_ema, nullptr, nullptr,
+                                  d_ema_power, d_ema_mad);
+    }
+    cudaDeviceSynchronize();
+    float ema_before = 0.0f;
+    cudaMemcpy(&ema_before, d_ema_power + f_steady, sizeof(float), cudaMemcpyDeviceToHost);
+
+    cudaMemcpy(d_voltages, h_step_burst.data(), frame_elems * sizeof(int4x2_t),
+               cudaMemcpyHostToDevice);
+    float min_flagged_frac = 1.0f;
+    std::uint32_t ema_flags = 0;
+    for (int burst_f = 0; burst_f < 10; ++burst_f) {
+        launch_inspect_rfi_chunks(d_voltages, d_active_antennas, num_active, d_chunk_power,
+                                  d_chunk_sk, d_chunk_sat_frac, n_time, n_freq, n_elem, chunk_size,
+                                  1, nullptr, false);
+        launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_chunk_sat_frac, d_static_notch,
+                                  d_channel_gains, d_chunk_rfi_mask, d_channel_stats, n_chunks,
+                                  n_freq, num_active, chunk_size, cfg_ema, nullptr, nullptr,
+                                  d_ema_power, d_ema_mad);
+        cudaDeviceSynchronize();
+        cudaMemcpy(h_stats.data(), d_channel_stats, n_freq * sizeof(RfiChannelStats),
+                   cudaMemcpyDeviceToHost);
+        ema_flags = h_stats[f_steady].flag_bits;
+        min_flagged_frac = std::min(min_flagged_frac, h_stats[f_steady].flagged_chunk_fraction);
+    }
+    float ema_after = 0.0f;
+    cudaMemcpy(&ema_after, d_ema_power + f_steady, sizeof(float), cudaMemcpyDeviceToHost);
+
+    // Measure full 3-pass latency with persistent EMA enabled
+    RfiMitigationConfig cfg_bench = cfg;
+    cfg_bench.edge_channels_to_ignore = 0;
+    cfg_bench.enable_persistent_ema = true;
+    cudaEventRecord(ev_start);
+    launch_inspect_rfi_chunks(d_voltages, d_active_antennas, num_active, d_chunk_power, d_chunk_sk,
+                              d_chunk_sat_frac, n_time, n_freq, n_elem, chunk_size, 1, nullptr,
+                              false);
+    launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_chunk_sat_frac, d_static_notch,
+                              d_channel_gains, d_chunk_rfi_mask, d_channel_stats, n_chunks, n_freq,
+                              num_active, chunk_size, cfg_bench, nullptr, nullptr, d_ema_power,
+                              d_ema_mad);
+    launch_blank_rfi_chunks(d_voltages, d_chunk_rfi_mask, n_time, n_freq, n_elem, chunk_size,
+                            nullptr, false);
+    cudaEventRecord(ev_stop);
+    cudaEventSynchronize(ev_stop);
+    float ema_elapsed_ms = 0.0f;
+    cudaEventElapsedTime(&ema_elapsed_ms, ev_start, ev_stop);
+
+    std::printf("  2. Full-frame step burst ch=%zu WITHOUT EMA: flags=0x%02x (Expected TIME_BURST=0, escaped)\n",
+                f_steady, no_ema_flags);
+    std::printf("  3. Full-frame step burst ch=%zu WITH Persistent EMA (10 frames): flags=0x%02x, min_flagged=%.2f, EMA=%.4f -> %.4f\n",
+                f_steady, ema_flags, min_flagged_frac, ema_before, ema_after);
+    std::printf("  4. 3-Pass Latency with EMA enabled: %.3f ms (%.2f%% of 51.20 ms frame budget)\n",
+                ema_elapsed_ms, 100.0 * ema_elapsed_ms / 51.20);
+
+    if ((no_ema_flags & RFI_TIME_BURST) != 0 || (ema_flags & RFI_TIME_BURST) == 0
+        || min_flagged_frac < 0.90f || std::abs(ema_after - ema_before) > 1.0e-5f) {
+        std::printf("  Result: [FAILED] Persistent cross-frame EMA failed!\n");
+        std::fflush(stdout);
+        return 1;
+    }
+    std::printf("  Result: [PASSED] Edge-channel excision and persistent EMA step-burst detection verified!\n\n");
+    std::fflush(stdout);
+
+    // 5C: Verify flagged dips do NOT ratchet d_ema_power downward (preventing false TIME_BURST lock)
+    const std::size_t f_dip = 70;
+    std::vector<int4x2_t> h_flagged_dip = h_clean_base;
+    for (std::size_t t = 0; t < n_time; ++t) {
+        const std::size_t base = (t * n_freq + f_dip) * n_elem;
+        for (int a = 0; a < num_active; ++a) {
+            const int raw_e = active_raw[a];
+            const int re = (a % 2 == 0) ? 1 : -1;
+            const int im = (t % 2 == 0) ? 1 : -1;
+            h_flagged_dip[base + raw_e] = pack_int4x2_signed(re, im);
+        }
+    }
+
+    cudaMemset(d_ema_power, 0, n_freq * sizeof(float));
+    cudaMemset(d_ema_mad, 0, n_freq * sizeof(float));
+    cudaMemcpy(d_voltages, h_clean_base.data(), frame_elems * sizeof(int4x2_t),
+               cudaMemcpyHostToDevice);
+    for (int warmup = 0; warmup < 5; ++warmup) {
+        launch_inspect_rfi_chunks(d_voltages, d_active_antennas, num_active, d_chunk_power,
+                                  d_chunk_sk, d_chunk_sat_frac, n_time, n_freq, n_elem, chunk_size,
+                                  1, nullptr, false);
+        launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_chunk_sat_frac, d_static_notch,
+                                  d_channel_gains, d_chunk_rfi_mask, d_channel_stats, n_chunks,
+                                  n_freq, num_active, chunk_size, cfg_bench, nullptr, nullptr,
+                                  d_ema_power, d_ema_mad);
+    }
+    cudaDeviceSynchronize();
+    float dip_ema_before = 0.0f;
+    cudaMemcpy(&dip_ema_before, d_ema_power + f_dip, sizeof(float), cudaMemcpyDeviceToHost);
+
+    cudaMemcpy(d_voltages, h_flagged_dip.data(), frame_elems * sizeof(int4x2_t),
+               cudaMemcpyHostToDevice);
+    for (int df = 0; df < 5; ++df) {
+        launch_inspect_rfi_chunks(d_voltages, d_active_antennas, num_active, d_chunk_power,
+                                  d_chunk_sk, d_chunk_sat_frac, n_time, n_freq, n_elem, chunk_size,
+                                  1, nullptr, false);
+        launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_chunk_sat_frac, d_static_notch,
+                                  d_channel_gains, d_chunk_rfi_mask, d_channel_stats, n_chunks,
+                                  n_freq, num_active, chunk_size, cfg_bench, nullptr, nullptr,
+                                  d_ema_power, d_ema_mad);
+    }
+    cudaDeviceSynchronize();
+    float dip_ema_after = 0.0f;
+    cudaMemcpy(&dip_ema_after, d_ema_power + f_dip, sizeof(float), cudaMemcpyDeviceToHost);
+
+    cudaMemcpy(d_voltages, h_clean_base.data(), frame_elems * sizeof(int4x2_t),
+               cudaMemcpyHostToDevice);
+    launch_inspect_rfi_chunks(d_voltages, d_active_antennas, num_active, d_chunk_power,
+                              d_chunk_sk, d_chunk_sat_frac, n_time, n_freq, n_elem, chunk_size,
+                              1, nullptr, false);
+    launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_chunk_sat_frac, d_static_notch,
+                              d_channel_gains, d_chunk_rfi_mask, d_channel_stats, n_chunks,
+                              n_freq, num_active, chunk_size, cfg_bench, nullptr, nullptr,
+                              d_ema_power, d_ema_mad);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h_stats.data(), d_channel_stats, n_freq * sizeof(RfiChannelStats),
+               cudaMemcpyDeviceToHost);
+
+    std::printf("  5. Flagged dip recovery ch=%zu: EMA=%.4f -> %.4f, post-dip flags=0x%02x (frac=%.2f)\n",
+                f_dip, dip_ema_before, dip_ema_after, h_stats[f_dip].flag_bits,
+                h_stats[f_dip].flagged_chunk_fraction);
+    if (std::abs(dip_ema_after - dip_ema_before) > 1.0e-5f
+        || (h_stats[f_dip].flag_bits & RFI_TIME_BURST) != 0) {
+        std::printf("  Result: [FAILED] Flagged dip corrupted EMA baseline!\n");
+        std::fflush(stdout);
+        return 1;
+    }
+    std::printf("  Result: [PASSED] Flagged dips no longer ratchet persistent EMA downward!\n\n");
+    std::fflush(stdout);
+
+    cudaFree(d_ema_power);
+    cudaFree(d_ema_mad);
+
     std::printf("====================================================================================================\n");
     std::printf(" RFI MITIGATION STAGE TEST RESULT: ALL TESTS PASSED (100%% OPERATIONAL)\n");
     std::printf("====================================================================================================\n");

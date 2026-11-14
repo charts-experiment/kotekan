@@ -1,23 +1,22 @@
 ---
 # ==============================================================================
-# CHARTS 64-Antenna DPDK -> 1-Beam Direct Tracker: Fixed Zenith, Calibrated (sun_1104)
+# CHARTS 64-Antenna DPDK -> 1-Beam Direct Tracker: Fixed Zenith, Calibrated (corr_1113)
 # ==============================================================================
 # - One stationary beam at zenith (l0 = m0 = 0, n0 = 1); no celestial target set.
-# - Frequency-dependent complex gains: /data/calibration/sun_1104/gains_sun_1104_0_4_32_36_interp_672x64.npy
+# - Frequency-dependent complex gains: /data/calibration/corr_1113/gains_corr_1113_0_4_32_36_freqflt_672x64.npy
 # - Fitted antenna positions: /data/calibration/sun_1104/positions_1104_sunfit.npy
-# - Active Antennas: Fully dynamic auto-masking (all 64 elements start unmasked;
-#   cudaAntennaMaskCommand auto-detects alive/connected lines via moments & coherence).
-# - Records only the integrated beam power (rawFileWrite, ~1.024 s cadence,
-#   one file per hour per subband). Raw/formed voltages are not written.
+# - Active Antennas: [0, 4, 32, 36] with dynamic auto-masking + RFI mitigation.
+# - Records true ~1.024 s integrated beam power (chartsAccumulate float32 average
+#   over 20 frames -> rawFileWrite, one file per ~hour per subband).
 # - Runs until stopped (capture_n_frames: 0, no exit_after_n_files).
-# - base_dir is the `current` symlink that scripts/start_zenith_1beam.sh points
-#   at a fresh run_<timestamp> directory under /home/fpalma/zenith_beam_data.
+# - base_dir is the `current` symlink that points at a fresh run_<timestamp>
+#   directory under /home/fpalma/zenith_beam_data.
 # ==============================================================================
 
 type: config
 log_level: info
 
-cpu_affinity: [6, 7, 8, 9]
+cpu_affinity: [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
 
 # ------------------------------------------------------------------------------
 # Array Dimensions & Sampling Parameters
@@ -33,7 +32,7 @@ frame_arrival_period: samples_per_data_set * sample_period_s
 bytes_per_dataset: n_channels_per_packet * local_subbands_per_packet * samples_per_data_set
 capture_n_frames: 0               # run until stopped
 
-buffer_depth: 20
+buffer_depth: 40
 gpu_buffer_depth: 3
 
 spacing_m: 0.6
@@ -188,11 +187,31 @@ host_beam_power_buffer_1:
     zero_new_frames: true
     mlock_frames: false
 
+# True 1-second Integrated Beam Power Buffers (float: [max_beams][num_local_freq])
+integrated_beam_power_buffer_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: max_beams * num_local_freq * sizeof_float
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
+integrated_beam_power_buffer_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: max_beams * num_local_freq * sizeof_float
+    numa_node: 0
+    metadata_pool: main_pool
+    zero_new_frames: true
+    mlock_frames: false
+
 # ------------------------------------------------------------------------------
 # Network Ingest Stage: DPDK Core (Dual Port)
 # ------------------------------------------------------------------------------
 dpdk:
     kotekan_stage: dpdkCore
+    pcie_block_list: ["0000:70:00.0"]
     lcore_start_delay: 1
     lcore_cpu_map: [3, 5]
     main_lcore_cpu: 4
@@ -242,7 +261,7 @@ zero_samples_1:
 # GPU Direct Beam Tracker & Antenna Health Stages
 # ------------------------------------------------------------------------------
 gpu:
-    profiling: false
+    profiling: true
 
     # Command Pipeline for Stream 0 (Frequencies 0..335, 300.0 - 400.5 MHz)
     commands_0: &command_list_0
@@ -267,11 +286,41 @@ gpu:
           clip_fraction_threshold: 0.15
           revival_frames: 5
 
+        - name: cudaRfiMitigationCommand
+          gpu_mem_voltage: voltage_0
+          gpu_mem_rfi_mask: rfi_mask_0
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          buffer_depth: 3
+          antenna_order: "descending"
+          active_antennas: [0, 4, 32, 36]
+          freq_start_hz: 300000000.0
+          freq_step_hz: 300000.0
+          enabled: true
+          blank_voltages_enabled: true
+          time_chunk_size: 256
+          sample_stride: 1
+          enable_sk_check: true
+          sk_sigma_threshold: 4.5
+          enable_time_burst_check: true
+          burst_sigma_threshold: 5.0
+          enable_freq_mad_check: true
+          freq_window_half_width: 8
+          mad_sigma_threshold: 6.0
+          enable_saturation_check: true
+          saturation_fraction_threshold: 0.02
+          enable_morphology_sir: true
+          edge_channels_to_ignore: 0
+          enable_persistent_ema: true
+          ema_alpha: 0.02
+
         # Direct Beam Tracker Kernel (1 fixed zenith beam)
         - name: cudaDirectBeamTrackerCommand
           gpu_mem_voltage: voltage_0
           gpu_mem_formed_beams: formed_beams_0
           gpu_mem_beam_power: beam_power_0
+          gpu_mem_rfi_mask: rfi_mask_0
           num_elements: 64
           num_local_freq: 336
           samples_per_data_set: 15360
@@ -288,7 +337,7 @@ gpu:
           normalize_weights: true
           beam_tile_size: 4
           enable_cuda_graph: false
-          gains_file: /home/fpalma/calibration/gains_sun_1104_0_4_32_36_fringehp_full672_672x64.npy
+          gains_file: /data/calibration/corr_1113/gains_corr_1113_0_4_32_36_freqflt_672x64.npy
           enable_grid_mode: false
           grid_step: 0.02
           site_lat_deg: -33.4211146
@@ -333,11 +382,41 @@ gpu:
           clip_fraction_threshold: 0.15
           revival_frames: 5
 
+        - name: cudaRfiMitigationCommand
+          gpu_mem_voltage: voltage_1
+          gpu_mem_rfi_mask: rfi_mask_1
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          buffer_depth: 3
+          antenna_order: "descending"
+          active_antennas: [0, 4, 32, 36]
+          freq_start_hz: 400800000.0
+          freq_step_hz: 300000.0
+          enabled: true
+          blank_voltages_enabled: true
+          time_chunk_size: 256
+          sample_stride: 1
+          enable_sk_check: true
+          sk_sigma_threshold: 4.5
+          enable_time_burst_check: true
+          burst_sigma_threshold: 5.0
+          enable_freq_mad_check: true
+          freq_window_half_width: 8
+          mad_sigma_threshold: 6.0
+          enable_saturation_check: true
+          saturation_fraction_threshold: 0.02
+          enable_morphology_sir: true
+          edge_channels_to_ignore: 0
+          enable_persistent_ema: true
+          ema_alpha: 0.02
+
         # Direct Beam Tracker Kernel (1 fixed zenith beam)
         - name: cudaDirectBeamTrackerCommand
           gpu_mem_voltage: voltage_1
           gpu_mem_formed_beams: formed_beams_1
           gpu_mem_beam_power: beam_power_1
+          gpu_mem_rfi_mask: rfi_mask_1
           num_elements: 64
           num_local_freq: 336
           samples_per_data_set: 15360
@@ -354,7 +433,7 @@ gpu:
           normalize_weights: true
           beam_tile_size: 4
           enable_cuda_graph: false
-          gains_file: /home/fpalma/calibration/gains_sun_1104_0_4_32_36_fringehp_full672_672x64.npy
+          gains_file: /data/calibration/corr_1113/gains_corr_1113_0_4_32_36_freqflt_672x64.npy
           enable_grid_mode: false
           grid_step: 0.02
           site_lat_deg: -33.4211146
@@ -417,28 +496,42 @@ inspect_beams_1:
     len: 4194304
 
 # ------------------------------------------------------------------------------
-# Integrated Beam Power Recording (1 beam x 336 channels per subband)
+# Integrated Beam Power Recording (true ~1.024 s average, 1 beam x 336 ch)
 # ------------------------------------------------------------------------------
+accumulate_power_0:
+    kotekan_stage: chartsAccumulate
+    in_buf: host_beam_power_buffer_0
+    out_buf: integrated_beam_power_buffer_0
+    data_type: "float32"
+    average: true
+    num_frames_to_accumulate: 20
+
+accumulate_power_1:
+    kotekan_stage: chartsAccumulate
+    in_buf: host_beam_power_buffer_1
+    out_buf: integrated_beam_power_buffer_1
+    data_type: "float32"
+    average: true
+    num_frames_to_accumulate: 20
+
 raw_file_write_power_0:
     kotekan_stage: rawFileWrite
-    in_buf: host_beam_power_buffer_0
+    in_buf: integrated_beam_power_buffer_0
     base_dir: /home/fpalma/zenith_beam_data/current
     file_name: beam_power_freq0
     file_ext: bin
     prefix_hostname: false
-    skip_frames: 20
-    write_every_n_frames: 20       # ~1.024s cadence
-    num_frames_per_file: 3600      # 1 hour per file
+    skip_frames: 1
+    num_frames_per_file: 3600      # ~1 hour per file at ~1.024s cadence
 
 raw_file_write_power_1:
     kotekan_stage: rawFileWrite
-    in_buf: host_beam_power_buffer_1
+    in_buf: integrated_beam_power_buffer_1
     base_dir: /home/fpalma/zenith_beam_data/current
     file_name: beam_power_freq1
     file_ext: bin
     prefix_hostname: false
-    skip_frames: 20
-    write_every_n_frames: 20       # ~1.024s cadence
+    skip_frames: 1
     num_frames_per_file: 3600
 
 run_metadata:
