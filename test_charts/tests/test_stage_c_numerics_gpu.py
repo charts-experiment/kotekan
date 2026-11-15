@@ -6,12 +6,19 @@ Expectations are analytical, per fixture, never a port of the kernels:
 * Beamforming: V[t,f,b] = sum_e W[b,f,e] x[t,f,e] with x = low nibble + i*high nibble,
   P = sum over the window of |V|^2 (sum-power, tails sum only the supplied spectra).
 * Fine channelization: the documented section-2 equation, evaluated as a direct 128-tap sum
-  Y[m,f,u,e] = sum_s h_s x[32m-96+s,f,e] exp(-2 pi i (u-15.5) s/32), zero history at startup
-  or after a sequence jump, then the documented symmetric clamp -7..7 and round half to even.
-  Components within TIE of a half-integer may round either way on the GPU (float32 FFT);
-  each such component is allowed |dq| <= 1 and propagated with the section-5 item-3 bound
-  sum_m (2|V_m| eps_m + eps_m^2), eps_m = sum_e |W_e| (number of ambiguous components).
+  Y[m,f,u,e] = G[u] sum_s h_s x[32m-96+s,f,e] exp(-2 pi i (u-15.5) s/32) in float64, with the
+  CHORD upchan.jl window h_s = cos^2(pi s') sinc(4 s') / 32, s' = (2s - 127)/256, zero
+  history at startup or after a sequence jump, then each component rounded to float16
+  (round to nearest even), as the GPU stores it (fp32 FIR/FFT, no clamp, no int4 rounding).
+  The GPU rounds its float32 value, which differs from the float64 one by at most
+  delta = 64 * 2^-24 * G * sum_s |h_s| (|Re x_s| + |Im x_s|) (FIR, twiddle and five FFT
+  stages, about 30 roundings, with margin). A component closer than delta to an fp16 rounding
+  midpoint may round to either neighbour: it is allowed |dX| <= one fp16 spacing, and the
+  per-sample allowance eps (|dRe| + |dIm|) is propagated with the section-5 item-3 bound
+  sum_m (2|V_m| eps_m + eps_m^2), eps_m = sum_e |W_e| eps_e. Elsewhere X_gpu = X_ref exactly.
 * Float32 accumulation allowance: 1e-3 + 4 * 2^-24 * (E + K) * sum_m (sum_e |W_e||x_e|)^2.
+* One-hot beams reproduce the fp16 voltages: P = sum_m |X_fp16|^2 to float32 rounding,
+  |dP| <= (2K + 2) 2^-24 P, wherever no component is ambiguous.
 
 Probe weights expose single elements without diagnostic dumps: beams 0..47 are one-hot on
 elements 0..47 (W = 1), beams 48..127 are seeded non-unit complex combinations of all 64.
@@ -47,9 +54,12 @@ B = 128
 F = 336
 U = 32
 FF = F * U
-CLAMP = 7.0
-TIE = 2e-4
 EPS32 = 2.0 ** -24
+# CHORD upchan.jl window denominator 2*M*U; the int4 path (beamform-64) used 2*(L+1) = 258.
+WINDOW_DENOMINATOR = 256
+OLD_WINDOW_DENOMINATOR = 258
+# |X_fp32 - X_float64| <= FP32_FINE_ERROR * G * sum_s |h_s| (|Re x_s| + |Im x_s|).
+FP32_FINE_ERROR = 64 * EPS32
 N_ONEHOT = 48
 
 
@@ -77,58 +87,78 @@ def quantize_input(z: np.ndarray) -> np.ndarray:
 
 # --------------------------------------------------------------------------- PFB
 
-def prototype() -> np.ndarray:
+def prototype(denominator: int = WINDOW_DENOMINATOR) -> np.ndarray:
+    """CHORD upchan.jl Wkernel / U: cos^2(pi s') sinc(4 s') / 32, s' = (2s - 127)/denominator.
+    denominator=OLD_WINDOW_DENOMINATOR (258) is the negative control for the window change."""
     s = np.arange(128)
-    q = (2 * s - 127) / 258
+    q = (2 * s - 127) / denominator
     return np.cos(np.pi * q) ** 2 * np.sinc(4 * q) / 32
 
 
-def analysis_matrix(alternating_sign: bool = True) -> np.ndarray:
+def analysis_matrix(alternating_sign: bool = True,
+                    denominator: int = WINDOW_DENOMINATOR) -> np.ndarray:
     """[128][32]. alternating_sign=False is a negative control: it drops the (-1)^j that the
     complete-prototype phase contributes to a branch implementation (s = 32j + p)."""
     s = np.arange(128)[:, None]
     u = np.arange(U)[None, :]
-    km = prototype()[:, None] * np.exp(-2j * np.pi * (u - 15.5) * s / 32)
+    km = prototype(denominator)[:, None] * np.exp(-2j * np.pi * (u - 15.5) * s / 32)
     if not alternating_sign:
         km = km * ((-1.0) ** (s // 32))
     return km
 
 
-def fine_quantized(raw_frame: np.ndarray, history: np.ndarray | None, *,
-                   alternating_sign: bool = True, shift: int = 0, gain=None):
-    """Section-2 equation, optional fine gain, then clamp/round. Returns q [M][F*32][E]
-    complex64, amb uint8. shift (negative control) moves the 128-sample support later by that
-    many samples. gain: 32 real values G[u] (upchan_gain), applied before the clamp."""
+def fp16_round(c: np.ndarray, delta: np.ndarray):
+    """Round float64 components to float16 (nearest even) as the GPU stores them. Returns
+    (x16 as float64, allowance): allowance is one fp16 spacing where c lies within delta of a
+    rounding midpoint (the GPU's float32 value may round to the other neighbour), else 0."""
+    h = c.astype(np.float16)
+    x = h.astype(np.float64)
+    lo = np.nextafter(h, np.float16(-np.inf)).astype(np.float64)
+    hi = np.nextafter(h, np.float16(np.inf)).astype(np.float64)
+    if not (np.all(np.isfinite(x)) and np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))):
+        raise ValueError("fine voltage outside the fp16 range")
+    near = np.minimum(np.abs(c - 0.5 * (x + lo)), np.abs(c - 0.5 * (x + hi))) < delta
+    return x, np.where(near, np.maximum(x - lo, hi - x), 0.0)
+
+
+def fine_fp16(raw_frame: np.ndarray, history: np.ndarray | None, *,
+              alternating_sign: bool = True, shift: int = 0, gain=None,
+              denominator: int = WINDOW_DENOMINATOR):
+    """Section-2 equation in float64, optional fine gain, then fp16 rounding per component.
+    Returns X [M][F*32][E] complex64 (fp16 values, exact in complex64) and eps [M][F*32][E]
+    float32, the allowed |dRe| + |dIm| (nonzero only where a component is within the float32
+    error of an fp16 rounding midpoint). shift (negative control) moves the 128-sample support
+    later by that many samples. gain: 32 real values G[u] (upchan_gain)."""
     t_raw = raw_frame.shape[0]
     m_count = t_raw // 32
     x = decode(raw_frame)
     hist = np.zeros((96, F, E), complex) if history is None else decode(history)
     ext = np.concatenate([hist, x, np.zeros((shift, F, E), complex)], axis=0)[shift:]
-    km = analysis_matrix(alternating_sign)
-    q = np.empty((m_count, F, U, E), np.complex64)
-    amb = np.empty((m_count, F, U, E), np.uint8)
+    mag = np.abs(ext.real) + np.abs(ext.imag)
+    km = analysis_matrix(alternating_sign, denominator)
+    habs = np.abs(prototype(denominator))
+    g = np.ones(U) if gain is None else np.asarray(gain, np.float64)
+    out = np.empty((m_count, F, U, E), np.complex64)
+    eps = np.empty((m_count, F, U, E), np.float32)
     for f0 in range(0, F, 16):
         win = np.lib.stride_tricks.sliding_window_view(ext[:, f0:f0 + 16], 128, axis=0)[::32][:m_count]
-        y = (win @ km).transpose(0, 1, 3, 2)                                   # [M][16][U][E]
-        if gain is not None:
-            y = y * np.asarray(gain, np.float64)[None, None, :, None]
-        parts = []
-        a = np.zeros(y.shape, np.uint8)
-        for comp in (y.real, y.imag):
-            c = np.clip(comp, -CLAMP, CLAMP)
-            parts.append(np.rint(c))
-            a += (np.abs(c - np.floor(c) - 0.5) < TIE).astype(np.uint8)
-        q[:, f0:f0 + 16] = parts[0] + 1j * parts[1]
-        amb[:, f0:f0 + 16] = a
-    return q.reshape(m_count, FF, E), amb.reshape(m_count, FF, E)
+        y = (win @ km).transpose(0, 1, 3, 2) * g[None, None, :, None]       # [M][16][U][E]
+        wmag = np.lib.stride_tricks.sliding_window_view(mag[:, f0:f0 + 16], 128, axis=0)[::32][:m_count]
+        delta = FP32_FINE_ERROR * (wmag @ habs)[:, :, None, :] * g[None, None, :, None]
+        re, er = fp16_round(y.real, delta)
+        im, ei = fp16_round(y.imag, delta)
+        out[:, f0:f0 + 16] = re + 1j * im
+        eps[:, f0:f0 + 16] = er + ei
+    return out.reshape(m_count, FF, E), eps.reshape(m_count, FF, E)
 
 
 # --------------------------------------------------------------------------- beam power
 
-def expected_power(x: np.ndarray, amb: np.ndarray | None, w_bfe: np.ndarray, k: int):
-    """x [T][F'][E] complex; w [B][F'][E], or [B][E] for frequency-independent probes.
+def expected_power(x: np.ndarray, eps: np.ndarray | None, w_bfe: np.ndarray, k: int):
+    """x [T][F'][E] complex; eps [T][F'][E] allowed |dRe| + |dIm| per sample (fine_fp16) or
+    None; w [B][F'][E], or [B][E] for frequency-independent probes.
     Returns (P, bound, ambiguous) as [ceil(T/K)][F'][B]; ambiguous marks windows whose
-    expectation contains a near-half-integer rounding (the only place bound exceeds float)."""
+    expectation contains an fp16 rounding ambiguity (the only place bound exceeds float)."""
     t, nf, _ = x.shape
     n_out = -(-t // k)
     p = np.zeros((n_out, nf, B))
@@ -147,10 +177,10 @@ def expected_power(x: np.ndarray, amb: np.ndarray | None, w_bfe: np.ndarray, k: 
         mag = np.abs(xs) @ aw
         p[wdx] = np.sum(av ** 2, axis=1)
         bnd = 1e-3 + 4 * EPS32 * (E + k) * np.sum(mag ** 2, axis=1)
-        if amb is not None:
-            eps = amb[sl].transpose(1, 0, 2).astype(float) @ aw
-            bnd = bnd + np.sum(2 * av * eps + eps ** 2, axis=1)
-            ambiguous[wdx] = np.sum(eps, axis=1) > 0
+        if eps is not None:
+            em = eps[sl].transpose(1, 0, 2).astype(float) @ aw
+            bnd = bnd + np.sum(2 * av * em + em ** 2, axis=1)
+            ambiguous[wdx] = np.sum(em, axis=1) > 0
         bound[wdx] = bnd
     return p, bound, ambiguous
 
@@ -166,9 +196,24 @@ def probe_weights(seed: int) -> np.ndarray:
     return w
 
 
+def onehot_check(got: np.ndarray, want: np.ndarray, ambiguous: np.ndarray, k: int = 10,
+                 n_beams: int = N_ONEHOT) -> dict:
+    """One-hot beams (W = 1 on one element) reproduce the fp16 voltages: P equals the window
+    sum of |X_fp16|^2 to float32 rounding, |dP| <= (2K + 2) 2^-24 P (|X_fp16|^2 components are
+    exact in float32; the re^2 + im^2 sum and K accumulations each round once), wherever no
+    component is ambiguous."""
+    mask = ~ambiguous[..., :n_beams]
+    g = got[..., :n_beams][mask].astype(np.float64)
+    w = want[..., :n_beams][mask]
+    err = np.abs(g - w)
+    return {"onehot_checked": int(mask.sum()),
+            "onehot_violations": int(np.sum(err > (2 * k + 2) * EPS32 * w)),
+            "onehot_max_rel_err": float(np.max(err / np.maximum(w, 1e-30))) if err.size else 0.0}
+
+
 def compare(got: np.ndarray, want: np.ndarray, bound: np.ndarray, ambiguous=None) -> dict:
     """Bound violations everywhere; the tolerance 1e-3 + 1e-5|P| where no rounding is
-    ambiguous (elsewhere a legitimate float32 rounding flip changes P by whole codes)."""
+    ambiguous (elsewhere a legitimate fp16 rounding flip changes the voltage by one spacing)."""
     err = np.abs(got.astype(np.float64) - want)
     ratio = err / bound
     worst = np.unravel_index(int(np.argmax(ratio)), ratio.shape)
@@ -319,9 +364,11 @@ class CodecLayoutGpu(GpuCase):
         wfile = write_weights(self.root / f"{name}_w.bin", w)
         got = run_kotekan(self.root / name, [raw], t_raw=t_raw, shard=shard,
                           weights_file=wfile)[0]
-        q, amb = fine_quantized(raw, None)
-        want, bound, ambig = expected_power(q, amb, w, 10)
+        x16, eps = fine_fp16(raw, None)
+        want, bound, ambig = expected_power(x16, eps, w, 10)
         m = compare(got, want, bound, ambig)
+        oh = onehot_check(got, want, ambig, n_beams=8)
+        m.update(oh)
         n_spec = t_raw // U
         m.update({"t_raw": t_raw, "K": 10, "shard": shard, "windows": int(got.shape[0]),
                   "tail_spectra": int(n_spec - (got.shape[0] - 1) * 10),
@@ -331,10 +378,9 @@ class CodecLayoutGpu(GpuCase):
         self.assertEqual(m["violations"], 0, m)
         self.assertEqual(m["zero_channel_max"], 0.0)              # coarse channel 0 -> bins 0..31
         self.assertEqual(m["plan_tolerance_violations"], 0, m)
-        # One-hot beams on integer fine codes are exact integers in float32 wherever no
-        # rounding is ambiguous.
-        exact = ~ambig[..., :8]
-        self.assertTrue(np.array_equal(got[..., :8][exact], want[..., :8][exact].astype(np.float32)))
+        # One-hot beams reproduce the fp16 fine voltages to float32 rounding.
+        self.assertGreater(m["onehot_checked"], 0, m)
+        self.assertEqual(m["onehot_violations"], 0, m)
 
     def test_k10_partial_tail(self):
         self.check("k10_t800", 800, 0)            # 25 spectra: tail of 5
@@ -381,8 +427,9 @@ def fine_fixture(t_raw: int, seed: int, n0: int = 0,
             raw[:, f] = quantize_input(tone(3.3125 - 15.5))
             info[f] = ("offgrid", 3.3125)
         elif g == 7:
-            raw[:, f] = quantize_input(tone(8 - 15.5, np.full(E, 7.4)))  # fine output clips
-            info[f] = ("clip", 8)
+            # Strong tone: fine components exceed the int4 path's +-7 clamp (no clamp now).
+            raw[:, f] = quantize_input(tone(8 - 15.5, np.full(E, 7.4)))
+            info[f] = ("strong", 8)
         elif g == 8:
             raw[:, f] = frame_rng.choice(np.array([0x88, 0x77, 0x78, 0x87], np.uint8), (t_raw, E))
             info[f] = ("extremes", None)
@@ -407,10 +454,15 @@ class PfbCoefficients(unittest.TestCase):
     def test_prototype_formula(self):
         h = prototype()
         self.assertTrue(np.allclose(h, h[::-1], atol=0, rtol=0))
-        self.assertAlmostEqual(float(h.sum()), 1.02061496, places=8)
-        self.assertAlmostEqual(float(h[63]), 0.031233014, places=9)
-        self.assertAlmostEqual(float(h[0]), -2.91355805e-07, places=14)
+        # Independent evaluation of CHORD upchan.jl Wkernel(s, M=4, U=32) / U.
+        sp = (2 * np.arange(128) - (4 * 32 - 1)) / (2 * 4 * 32)
+        chord = np.cos(np.pi * sp) ** 2 * np.where(sp == 0, 1.0, np.sin(np.pi * 4 * sp)
+                                                   / (np.pi * 4 * np.where(sp == 0, 1, sp))) / 32
+        np.testing.assert_allclose(h, chord, rtol=1e-13, atol=1e-18)
+        self.assertAlmostEqual(float(h.sum()), 1.0127032260, places=9)
         self.assertEqual(int(np.argmax(h)), 63)
+        # The old window (denominator 258) is measurably different.
+        self.assertGreater(float(np.max(np.abs(prototype(OLD_WINDOW_DENOMINATOR) - h))), 1e-5)
         record("c2_prototype", {"sum": float(h.sum()), "sum_sq": float(np.sum(h ** 2)),
                                 "h0": float(h[0]), "h63": float(h[63]),
                                 "overlap_corr_lag1": float(np.sum(h[32:] * h[:96]) / np.sum(h ** 2))})
@@ -458,14 +510,15 @@ class PfbToneGpu(GpuCase):
             raw, info = self.fixture(shard)
             got = run_kotekan(self.root / f"fine{shard}", [raw], mode="fine", t_raw=self.T_RAW,
                               k=10, shard=shard, weights_file=self.wfile)[0]
-            q, amb = fine_quantized(raw, None)
-            want, bound, ambig = expected_power(q, amb, self.w, 10)
-            self.runs[shard] = (raw, info, got, want, bound, ambig, q, amb)
+            x16, eps = fine_fp16(raw, None)
+            want, bound, ambig = expected_power(x16, eps, self.w, 10)
+            self.runs[shard] = (raw, info, got, want, bound, ambig, x16, eps)
         return self.runs[shard]
 
     def check_shard(self, shard):
-        raw, info, got, want, bound, ambig, q, amb = self.run_shard(shard)
+        raw, info, got, want, bound, ambig, x16, eps = self.run_shard(shard)
         m = compare(got, want, bound, ambig)
+        m.update(onehot_check(got, want, ambig))
         grid = got.reshape(-1, F, U, B)
         steady = grid[1:]                                              # windows 1..3
         loc, between, dc = [], [], []
@@ -479,14 +532,11 @@ class PfbToneGpu(GpuCase):
             elif kind == "dc":
                 dc.append(np.mean(np.isin(np.argmax(onehot, axis=1), (15, 16))))
         late = [f for f, (kind, _) in info.items() if kind == "late_start"]
-        clipped = [f for f, (kind, _) in info.items() if kind == "clip"]
-        self.assertEqual(q.shape[0] % 10, 0)
-        exact_mask = ~ambig[..., :N_ONEHOT]
-        exact_equal = bool(np.array_equal(got[..., :N_ONEHOT][exact_mask],
-                                          want[..., :N_ONEHOT][exact_mask].astype(np.float32)))
-        qc = q.reshape(-1, F, U, E)
+        strong = [f for f, (kind, _) in info.items() if kind == "strong"]
+        self.assertEqual(x16.shape[0] % 10, 0)
+        xc = x16.reshape(-1, F, U, E)
         # Leakage of center tones into adjacent bins, predicted from the actual 128-tap filter
-        # with quantization (the expectation) and measured on the GPU, steady windows.
+        # with fp16 voltages (the expectation) and measured on the GPU, steady windows.
         centers = [f for f, (kind, _) in info.items() if kind == "center" and 0 < info[f][1] < 31]
         wgrid = want.reshape(-1, F, U, B)[1:]
 
@@ -500,37 +550,38 @@ class PfbToneGpu(GpuCase):
         sx = np.arange(128)
         m.update({
             "shard": shard,
-            "ambiguous_components": int(amb.sum()),
-            "ambiguous_fraction": float(amb.mean() / 2),
-            "onehot_unambiguous_exact": exact_equal,
+            "ambiguous_samples": int(np.count_nonzero(eps)),
+            "ambiguous_fraction": float(np.count_nonzero(eps) / eps.size),
             "tone_center_argmax_fraction": float(np.mean(loc)),
             "tone_between_top2_19_20_fraction": float(np.mean(between)),
             "dc_argmax_15_16_fraction": float(np.mean(dc)),
             "late_start_window0_max": float(grid[0, late].max()),
             "late_start_window1_min_onehot": float(grid[1, late][..., :N_ONEHOT].sum(axis=1).min()),
-            # Fixture coverage from the expectation (not a GPU measurement):
-            "reference_clipped_components": int(np.sum(np.abs(qc[:, clipped].real) == 7)
-                                                + np.sum(np.abs(qc[:, clipped].imag) == 7)),
+            # Fixture coverage from the expectation (not a GPU measurement): components the
+            # int4 path would have clamped at +-7. Zero violations with them shows no clamp.
+            "reference_components_above_7": int(np.sum(np.abs(xc[:, strong].real) > 7)
+                                                + np.sum(np.abs(xc[:, strong].imag) > 7)),
             "onehot_max_per_spectrum": float(got[..., :N_ONEHOT].max() / 10),
             "adjacent_over_main_measured": adjacent_ratio(steady),
-            "adjacent_over_main_predicted_quantized": adjacent_ratio(wgrid),
+            "adjacent_over_main_predicted_fp16": adjacent_ratio(wgrid),
             "adjacent_over_main_predicted_unquantized": float(
                 abs(np.sum(h * np.exp(2j * np.pi * sx / 32))) ** 2 / np.sum(h) ** 2),
-            "rounding_ties_to_even": "not exercised: exact half-integers do not occur",
+            "fp16_ties_to_even": "not exercised: exact fp16 midpoints do not occur",
         })
         record(f"c2_fine_tones_shard{shard}", m)
 
         self.assertEqual(m["violations"], 0, m)
         self.assertEqual(m["plan_tolerance_violations"], 0, m)
-        self.assertTrue(exact_equal)
+        self.assertGreater(m["onehot_checked"], 0, m)
+        self.assertEqual(m["onehot_violations"], 0, m)
         self.assertEqual(m["tone_center_argmax_fraction"], 1.0, m)
         self.assertEqual(m["tone_between_top2_19_20_fraction"], 1.0, m)
         self.assertEqual(m["dc_argmax_15_16_fraction"], 1.0, m)
         self.assertEqual(m["late_start_window0_max"], 0.0, m)
         self.assertGreater(m["late_start_window1_min_onehot"], 0.0, m)
-        self.assertGreater(m["reference_clipped_components"], 0)
-        self.assertLessEqual(m["onehot_max_per_spectrum"], 98.0)
-        self.assertEqual(m["adjacent_over_main_measured"], m["adjacent_over_main_predicted_quantized"])
+        self.assertGreater(m["reference_components_above_7"], 0, m)
+        self.assertTrue(np.isclose(m["adjacent_over_main_measured"],
+                                   m["adjacent_over_main_predicted_fp16"], rtol=1e-4, atol=0), m)
 
     def test_fine_tones_shard0(self):
         self.check_shard(0)
@@ -540,13 +591,15 @@ class PfbToneGpu(GpuCase):
 
     def test_negative_controls(self):
         """The same comparison must fail for a mirrored bin order, a branch implementation
-        without the (-1)^j tap sign, and a support shifted by one raw sample."""
-        raw, info, got, want, bound, ambig, q, amb = self.run_shard(0)
+        without the (-1)^j tap sign, a support shifted by one raw sample, and the int4 path's
+        window denominator 258 instead of CHORD's 256."""
+        raw, info, got, want, bound, ambig, x16, eps = self.run_shard(0)
         mirrored = got.reshape(-1, F, U, B)[:, :, ::-1].reshape(got.shape)
         counts = {"mirrored_bins": compare(mirrored, want, bound)["violations"]}
         for label, kwargs in (("no_alternating_sign", {"alternating_sign": False}),
-                              ("support_shift_1", {"shift": 1})):
-            w2, b2, _ = expected_power(*fine_quantized(raw, None, **kwargs), self.w, 10)
+                              ("support_shift_1", {"shift": 1}),
+                              ("window_denominator_258", {"denominator": OLD_WINDOW_DENOMINATOR})):
+            w2, b2, _ = expected_power(*fine_fp16(raw, None, **kwargs), self.w, 10)
             counts[label] = compare(got, w2, b2)["violations"]
         record("c2_negative_controls", counts)
         for label, n in counts.items():
@@ -574,12 +627,12 @@ class TwoShardHistoryGpu(GpuCase):
             viol, plan, swapped = [], [], []
             for i in range(self.N_FRAMES):
                 history = frames[s][i - 1][-96:] if i else None
-                q, amb = fine_quantized(frames[s][i], history)
-                m = compare(got[s][i], *expected_power(q, amb, weights[s], 10))
+                x16, eps = fine_fp16(frames[s][i], history)
+                m = compare(got[s][i], *expected_power(x16, eps, weights[s], 10))
                 viol.append(m["violations"])
                 plan.append(m["plan_tolerance_violations"])
                 # Sensitivity: the other shard's weights must not explain this output.
-                swapped.append(compare(got[s][i], *expected_power(q, amb, weights[1 - s], 10))["violations"])
+                swapped.append(compare(got[s][i], *expected_power(x16, eps, weights[1 - s], 10))["violations"])
             report["violations"][s] = viol
             report["plan_tolerance_violations"][s] = plan
             report["swapped_shard_violations"][s] = swapped
@@ -610,8 +663,8 @@ class HistoryRingGpu(GpuCase):
                 for i in range(self.N_FRAMES)]
 
     def violations(self, got, frame, history):
-        q, amb = fine_quantized(frame, history)
-        return compare(got, *expected_power(q, amb, self.w, 10))
+        x16, eps = fine_fp16(frame, history)
+        return compare(got, *expected_power(x16, eps, self.w, 10))
 
     def check(self, name, depth, jump_at=None):
         frames = self.frames(seed=200 + depth)
@@ -674,14 +727,16 @@ def rounded_gaussian_pmf(sigma: float):
     return k, normal_cdf(hi / sigma) - normal_cdf(lo / sigma)
 
 
-def quantized_square_moments(sigma: float, n_max: int = 12):
-    """For g ~ N(0, sigma^2) and Q = round_half_even(clamp(g, -7, 7))^2: mean, variance and
-    the Hermite coefficients c_n = E[Q He_n(g/sigma)] used for Cov at correlation r
-    (Mehler: Cov = sum_{n even >= 2} r^n c_n^2 / n!)."""
+def fine_square_moments(sigma: float, n_max: int = 12):
+    """For g ~ N(0, sigma^2) and Q = g^2 (the fp16 fine voltage has no clamp or integer
+    rounding; its fp16 rounding variance, <= (2^-11 g)^2 / 3, is negligible): mean, variance
+    and the Hermite coefficients c_n = E[Q He_n(g/sigma)] used for Cov at correlation r
+    (Mehler: Cov = sum_{n even >= 2} r^n c_n^2 / n!; here mean sigma^2, var 2 sigma^4,
+    Cov 2 r^2 sigma^4)."""
     z = np.linspace(-12, 12, 400001)
     dz = z[1] - z[0]
     pdf = np.exp(-z ** 2 / 2) / math.sqrt(2 * math.pi)
-    qv = np.rint(np.clip(sigma * z, -CLAMP, CLAMP)) ** 2
+    qv = (sigma * z) ** 2
     he = [np.ones_like(z), z]
     for n in range(2, n_max + 1):
         he.append(z * he[-1] - (n - 1) * he[-2])
@@ -696,7 +751,8 @@ def cov_q2(r: float, c) -> float:
 
 
 class NoiseStatisticsGpu(GpuCase):
-    """seeded noise, quantization-aware mean and covariance-aware K_eff."""
+    """seeded int4 noise, fp16 fine voltages: Gaussian square-law mean and
+    covariance-aware K_eff."""
 
     T_RAW = 15360
     SIGMA_IN = 3.0
@@ -723,7 +779,7 @@ class NoiseStatisticsGpu(GpuCase):
         var_in = float(np.sum(pmf * k ** 2) - np.sum(pmf * k) ** 2)
         h = prototype()
         sigma_y = math.sqrt(var_in * np.sum(h ** 2))
-        mean_q2, var_q2, c = quantized_square_moments(sigma_y)
+        mean_q2, var_q2, c = fine_square_moments(sigma_y)
         r = [1.0] + [(-1) ** d * float(np.sum(h[32 * d:] * h[:128 - 32 * d]) / np.sum(h ** 2))
                      for d in (1, 2, 3)]
         kk = 10

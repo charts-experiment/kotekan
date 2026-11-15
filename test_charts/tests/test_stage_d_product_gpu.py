@@ -3,7 +3,7 @@
 Run with /usr/bin/python3 -m test_charts.tests.test_stage_d_product_gpu [--results-dir PATH].
 
 Acceptance:
-* cudaChartsBeamformerCommand writes charts-intensity-product-v2 (product_descriptor_file);
+* cudaChartsBeamformerCommand writes charts-intensity-product-v3 (product_descriptor_file);
   its shape/dtype/U/K/frequency map/timing/weights identity/exposure/int8 sections match the
   configuration and the frame files, and test_charts.sim.intensity_product round-trips them.
 * int8 offset/scale per 1x16x16 chunk is exported per frame (gpu_mem_quant_params ->
@@ -228,14 +228,22 @@ class ProductGpu(unittest.TestCase):
         self.assertTrue(d["kotekan_git_commit"])
         if fmt == "float32":
             self.assertIsNone(d["int8"])
+        self.assertEqual(d["schema"], ip.SCHEMA)
+        self.assertEqual(d["history"]["fine_format"], "fp16")
+        self.assertNotIn("fine_quantization", d["history"])
+        self.assertIn("(2s - 127)/256", d["history"]["pfb"])
+        self.assertIn("fp16 fine voltage", d["intensity"]["power_convention"])
 
     # ------------------------------------------------------------------ fixtures
     # The constant-chunk fixture needs a nonzero chunk whose 16 fine bins x 16 beams are equal
-    # power. A very large upchannelizer gain saturates every fine component of coarse channels
-    # 0..15 to +-7 (|q|^2 = 98), so fine tile 0 of the identical one-hot beams 0..15 is
-    # constant. The gain is a test vehicle only; the fixture checks the saturation first.
-    SATURATING_GAIN = {"upchan_gain": [1e5] * 32, "upchan_gain_source": "analytic",
-                       "upchan_gain_reference": "stage D saturation fixture"}
+    # power. Element 0 of coarse channel 0 carries an impulse train c at raw samples n = 0 mod 32
+    # (zero elsewhere). Every 128-tap spectrum then sees it only at polyphase branch p = 0, so
+    # after the FIR the 32-point FFT input is a delta at index 0 and every fine bin u receives
+    # the same value z = c * sum_j (-1)^j h_32j (only taps present in that spectrum): the FFT
+    # butterflies add exact zeros, so all u are bit-identical on the GPU. Fine tile 0 (u 0..15)
+    # of the identical one-hot beams 0..15 is therefore constant in every window. The fixture
+    # checks this on the fp16 reference first.
+    IMPULSE = 0x77                                         # c = 7 + 7i
 
     def fine_weights(self):
         """[B][FF][E]: beams 0..15 identical one-hot on element 0, the rest random per coarse
@@ -265,17 +273,23 @@ class ProductGpu(unittest.TestCase):
         w_inf = w.copy()
         w_inf[20, 40 * 32:41 * 32, :] = 1e20               # |V|^2 overflows to inf
         raw = self.fine_input(t_raw)
-        # Fixture precondition: every fine component of element 0 in fine tile 0 saturates.
-        q_ref, _ = sc.fine_quantized(raw, None, gain=self.SATURATING_GAIN["upchan_gain"])
-        tile = q_ref[:, :16, 0]
-        self.assertTrue(np.all((np.abs(tile.real) == 7) & (np.abs(tile.imag) == 7)))
+        raw[:, 0, 0] = 0
+        raw[::32, 0, 0] = self.IMPULSE
+        # Fixture precondition: element 0 of fine tile 0 is identical across u in every
+        # spectrum, nonzero, and no component is near an fp16 rounding midpoint.
+        x_ref, eps_ref = sc.fine_fp16(raw, None)
+        tile = x_ref[:, :16, 0]
+        self.assertTrue(np.all(tile == tile[:, :1]))
+        self.assertTrue(np.all(np.abs(tile) > 0))
+        self.assertTrue(np.all(eps_ref[:, :16, 0] == 0))
+        spectrum_power = (np.abs(tile[:, 0].astype(np.complex128)) ** 2)
+        expected = [float(spectrum_power[a:a + 10].sum()) for a in (0, 10, 20)]
         out = {}
         for label, weights in (("finite", w), ("inf", w_inf)):
             wfile = sc.write_weights(self.root / f"const_{label}.bin", weights)
             for fmt in ("float32", "int8"):
                 run = run_product(self.root / f"const_{label}_{fmt}", [raw], t_raw=t_raw,
-                                  shard=0, weights_file=wfile, fmt=fmt,
-                                  extra=self.SATURATING_GAIN)
+                                  shard=0, weights_file=wfile, fmt=fmt)
                 self.assert_ok(run, 1)
                 out[label, fmt] = run
         d = ip.load_descriptor(out["finite", "int8"]["descriptor"])
@@ -294,7 +308,9 @@ class ProductGpu(unittest.TestCase):
                  "constant_chunk_exact": bool(np.array_equal(i_hat[:, :16, :16],
                                                               i_float[:, :16, :16].astype(np.float64))),
                  "constant_chunk_value": float(i_float[0, 0, 0]),
-                 "constant_chunk_expected": [98.0 * 10, 98.0 * 10, 98.0 * 5]}
+                 "constant_chunk_bit_identical": bool(np.all(
+                     i_float[:, :16, :16] == i_float[:, :1, :1])),
+                 "constant_chunk_expected": expected}
             if label == "inf":
                 bad = np.unique(idx[~np.isfinite(i_float)])
                 m.update({
@@ -320,8 +336,12 @@ class ProductGpu(unittest.TestCase):
             self.assertTrue(all(s == 0 for s in report[label]["constant_chunk_scale"]), report)
             self.assertTrue(report[label]["constant_chunk_exact"], report)
             self.assertGreater(report[label]["constant_chunk_value"], 0)
-        self.assertEqual(report["finite"]["constant_chunk_values"],
-                         report["finite"]["constant_chunk_expected"], report)
+        for label in ("finite", "inf"):
+            self.assertTrue(report[label]["constant_chunk_bit_identical"], report)
+        # Window sums of the identical fp16 voltages, to float32 rounding ((2K + 2) 2^-24).
+        np.testing.assert_allclose(report["finite"]["constant_chunk_values"],
+                                   report["finite"]["constant_chunk_expected"],
+                                   rtol=22 * 2.0 ** -24, atol=0)
         self.assertEqual(report["finite"]["violations"], 0, report)
         r = report["inf"]
         self.assertGreater(r["nonfinite_outputs_float32"], 0, r)
@@ -394,6 +414,9 @@ class ProductGpu(unittest.TestCase):
                              "max_beams was removed"),
             "k_320": (dict(fmt="float32", extra={"integration_spectra": 320}),
                       "integration_spectra must be 10"),
+            # The fp16 fine path has no clamp or int4 re-quantization.
+            "quantize_clamp": (dict(fmt="float32", extra={"quantize_clamp": 7.0}),
+                               "quantize_clamp was removed"),
         }
         report = {}
         for label, (kwargs, message) in cases.items():

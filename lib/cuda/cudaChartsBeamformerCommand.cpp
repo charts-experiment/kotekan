@@ -35,7 +35,6 @@ public:
     std::size_t shard_id = 0;
     std::size_t raw_n_time = 15360;
     std::size_t integration_spectra = 10;
-    float pfb_quantize_clamp = 7.0F;
     // Real fine-channel gain G(u), one value per fine index u (centred half-bin order),
     // repeated for every local coarse channel. Unity by default.
     std::vector<float> upchan_gain = std::vector<float>(upchannelization_factor, 1.0F);
@@ -60,7 +59,7 @@ public:
     ComplexFloat* device_weights = nullptr;
     float* device_upchan_gain = nullptr; // [336*32], immutable after init
     std::uint8_t* device_history_samples = nullptr;
-    std::uint8_t* device_fine_packed = nullptr;
+    __half2* device_fine_fp16 = nullptr; // [T_raw/32][10752][64] fine voltages
     float* device_fp32_scratch = nullptr;
     Int8QuantizationParameters* device_quant_params = nullptr;
     std::uint8_t* device_raw_validity = nullptr;
@@ -103,13 +102,16 @@ public:
         beamform_dims = {raw_n_time / upchannelization_factor, fine_frequency_channels, n_ant,
                          n_beams};
 
-        pfb_quantize_clamp = cfg.get_default<float>(name, "quantize_clamp", 7.0F);
+        require(!cfg.exists(name, "quantize_clamp"),
+                "quantize_clamp was removed: fine voltages are fp16 with no clamp or int4 "
+                "re-quantization");
 
         upchan_gain = cfg.get_default<std::vector<float>>(name, "upchan_gain", upchan_gain);
         require(upchan_gain.size() == upchannelization_factor,
                 "upchan_gain must have 32 values, one per fine index u");
         for (const float g : upchan_gain)
-            require(std::isfinite(g) && g > 0.0F, "upchan_gain values must be finite and > 0");
+            require(std::isfinite(g) && g > 0.0F && g <= maximum_upchan_gain,
+                    "upchan_gain values must be finite, > 0 and <= 3000 (fp16 range)");
         upchan_gain_unity = true;
         for (const float g : upchan_gain)
             upchan_gain_unity = upchan_gain_unity && g == 1.0F;
@@ -241,10 +243,10 @@ public:
                 device.get_gpu_memory(name + "/pfb_history", history_bytes));
             CHECK_CUDA_ERROR(cudaMemset(device_history_samples, 0, history_bytes));
 
-            const std::size_t fine_packed_bytes =
-                beamform_dims.n_time * beamform_dims.n_freq * beamform_dims.n_ant;
-            device_fine_packed = static_cast<std::uint8_t*>(
-                device.get_gpu_memory(name + "/fine_packed", fine_packed_bytes));
+            const std::size_t fine_bytes =
+                beamform_dims.n_time * beamform_dims.n_freq * beamform_dims.n_ant * sizeof(__half2);
+            device_fine_fp16 = static_cast<__half2*>(
+                device.get_gpu_memory(name + "/fine_fp16", fine_bytes));
 
             // Per-shard global memory (not __constant__, which every instance of the module
             // shares). Written once here, before any frame, and only read afterwards.
@@ -404,7 +406,6 @@ public:
             product.freq_step_hz = state->freq_step_hz;
             product.frequencies_hz =
                 shard_frequencies_hz(state->shard_id, state->freq_zero_hz, state->freq_step_hz);
-            product.quantize_clamp = state->pfb_quantize_clamp;
             product.upchan_gain = state->upchan_gain;
             product.upchan_gain_unity = state->upchan_gain_unity;
             product.upchan_gain_source = state->upchan_gain_source;
@@ -516,10 +517,9 @@ public:
         }
 
         launch_fused_upchannelizer(stream, d_voltage, state->device_history_samples,
-                                   state->history_initialized, state->device_fine_packed,
+                                   state->history_initialized, state->device_fine_fp16,
                                    state->raw_n_time, local_frequency_channels,
-                                   state->beamform_dims.n_ant, state->pfb_quantize_clamp,
-                                   state->device_upchan_gain);
+                                   state->beamform_dims.n_ant, state->device_upchan_gain);
         launch_pfb_history_update(stream, d_voltage, state->device_history_samples,
                                   state->raw_n_time, local_frequency_channels,
                                   state->beamform_dims.n_ant);
@@ -527,10 +527,10 @@ public:
 
         float* fp32_target =
             state->quantize_int8 ? state->device_fp32_scratch : static_cast<float*>(d_output);
-        launch_tiled_packed_integrated_beamformer(stream, state->device_fine_packed,
-                                                  state->device_weights,
-                                                  fp32_target, state->beamform_dims,
-                                                  state->integration_spectra);
+        launch_tiled_fp16_integrated_beamformer(stream, state->device_fine_fp16,
+                                                state->device_weights,
+                                                fp32_target, state->beamform_dims,
+                                                state->integration_spectra);
 
         if (state->quantize_int8) {
             launch_quantize_integrated_intensity(

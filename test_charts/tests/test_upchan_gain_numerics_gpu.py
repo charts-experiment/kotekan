@@ -3,27 +3,34 @@
 Run with ~/charts-utils/.venv/bin/python -m test_charts.tests.test_upchan_gain_numerics_gpu
     [--results-dir PATH] [--kotekan-bin PATH]
 
-Acceptance (FINE_PATH_SCALLOPING_QUANTIZATION.md §4 steps 2, 4-7):
-* Exact scaling before the rounding. Fixture tones/noise/extremes, both shards. The output
-  with a non-uniform G and with G = 5.65/H_amp matches the reference fine transform with
-  G applied before the clamp and round, with 0 bound violations and exact one-hot power
-  where no rounding is ambiguous. Negative controls (G ignored, G mirrored in u, G applied
-  after the rounding) are rejected.
+fp16 fine path (FP16_TC_ARCHITECTURE.md): G multiplies the fine voltages in fp32 after the
+FFT and before the fp16 conversion; there is no clamp or int4 re-quantization, so G is a
+linear flux correction of the firmware PFB scalloping (CHORD upchan.jl step 7).
+
+Acceptance:
+* Exact placement. Fixture tones/noise/extremes, both shards. The output with a non-uniform
+  G and with G = 1/H_amp matches the fp16 reference fine transform with G applied before the
+  fp16 rounding, with 0 bound violations and one-hot power equal to the fp16 voltages to
+  float32 rounding where no rounding is ambiguous. Negative controls (G ignored, G mirrored
+  in u, G applied after the fp16 rounding) are rejected.
+* Large G stays linear. With G = 8 = 2^3 in every bin the fp16 voltages are exactly 8 times
+  those of G = 1 wherever both are normal fp16 numbers (power-of-two scaling commutes with
+  rounding; subnormal sidelobe values, |X| < 2^-14, do not), so the float32 output is exactly
+  64 times the G = 1 output in every window whose reference voltages scale exactly, with fine
+  components far above the int4 path's +-7 clamp.
 * Shaped noise. Coarse noise has the firmware PFB spectrum (CASPER pfb_fir, 8192 points,
   4 taps, hamming, fwidth 1, aliasing included) and is quantized to int4 saturating at ±7.
-  - With G = 1 at the f-engine level (σ = 1.20 per component), the centre/edge ratio is
-    inflated to ≈ 9.5 dB.
-  - With G = 5.65/H_amp it is flat, within the 0.17 dB that the coarse quantization noise
-    adds at the edges.
-  - At each level and u, the mean window power matches the Gaussian rounded-square model to
-    1 % (model tolerance, as in stage C), or to 4 standard errors where the power is small.
+  - With G = 1 (σ = 1.20 per component) the centre/edge ratio is the unquantized ≈ 2.9 dB
+    (the int4 path inflated it to ≈ 9.5 dB).
+  - With G = 1/H_amp it is flat, within the 0.17 dB that the coarse quantization noise adds
+    at the edges.
+  - At each level and u, the mean window power matches the linear model K 2 (G σ_u)^2 to
+    1 % (model tolerance, as in stage C) or 4 standard errors, in every bin.
 * Level dependence. Coarse σ = 0.6, 1.2 and 2.4 per component. Fine power per coarse power
-  (divided by G²) varies over several decades with G = 1 and stays close to linear with g₀.
-* Clipping. A large gain (G = 8) clips the fixture's fine outputs at ±7 exactly as the
-  reference does.
+  (divided by G²) is linear for both G = 1 and G = 1/H_amp (no level-dependent rounding).
 * History and masks. With G != 1, continuous frames, ring wrap and a sequence jump follow
   the reference with the right history (wrong-history hypotheses fail). Exposure files with
-  a lossy mask are byte-identical for G = 1 and G = 5.65/H_amp on both shards.
+  a lossy mask are byte-identical for G = 1 and G = 1/H_amp on both shards.
 Synthetic verification only; no observational claim.
 """
 
@@ -50,12 +57,14 @@ B, E, F, U, FF = 128, 64, 336, 32, 336 * 32
 N1 = sc.N_ONEHOT
 
 # Firmware PFB amplitude response per fine bin, normalized to u = 15, 16
-# (test_charts/results/fine_scalloping_hu_20261102, analytic column).
+# (test_charts/results/fine_scalloping_hu_20261102, analytic column). The CHORD window
+# (denominator 256) changes it by < 0.0002 dB, below the 4-digit rounding here.
 H_AMP_HALF = np.array([0.7048, 0.7175, 0.7410, 0.7722, 0.8076, 0.8439, 0.8784, 0.9092,
                        0.9352, 0.9561, 0.9720, 0.9834, 0.9912, 0.9960, 0.9988, 1.0000])
 H_AMP = np.concatenate([H_AMP_HALF, H_AMP_HALF[::-1]])
-G0 = 5.65
-G_PROFILE = (G0 / H_AMP).astype(np.float32)
+# Scalloping correction with the band centre at unity. The normalization of the production
+# profile is an open decision (FP16_TC_ARCHITECTURE.md §7); these tests do not depend on it.
+G_PROFILE = (1.0 / H_AMP).astype(np.float32)
 
 
 def record(name, payload):
@@ -149,9 +158,8 @@ def fine_sigma_per_u(raw: np.ndarray, n_seg: int = 1024) -> tuple[np.ndarray, fl
 
 
 def window_power_model(sigma_u: np.ndarray, gain: np.ndarray, k: int = 10):
-    """Mean one-hot window power per u: K * 2 * E[round(clamp(G sigma z))^2]."""
-    return np.array([k * 2 * sc.quantized_square_moments(float(g * s), n_max=2)[0]
-                     for s, g in zip(sigma_u, gain)])
+    """Mean one-hot window power per u for fp16 fine voltages (linear): K * 2 * (G sigma)^2."""
+    return k * 2 * (np.asarray(gain, np.float64) * np.asarray(sigma_u, np.float64)) ** 2
 
 
 def measured_window_power(got: np.ndarray):
@@ -196,39 +204,45 @@ class UpchanGainNumericsGpu(unittest.TestCase):
     # ------------------------------------------------------------------ exact scaling
     def check_exact(self, label, shard, gain, t_raw=1280):
         raw, _ = sc.fine_fixture(t_raw, seed=900 + shard)
+        unity = bool(np.all(np.asarray(gain) == 1))
+        # An all-unity gain must be configured as the default (source 'unity').
         got = run_fine(self.root / f"exact_{label}_{shard}", [raw], shard=shard,
-                       wfile=self.wfile, gain=gain, t_raw=t_raw)[0]
-        q, amb = sc.fine_quantized(raw, None, gain=gain)
-        want, bound, ambig = sc.expected_power(q, amb, self.w, 10)
+                       wfile=self.wfile, gain=None if unity else gain, t_raw=t_raw)[0]
+        x16, eps = sc.fine_fp16(raw, None, gain=gain)
+        want, bound, ambig = sc.expected_power(x16, eps, self.w, 10)
         m = sc.compare(got, want, bound, ambig)
-        exact_mask = ~ambig[..., :N1]
-        m["onehot_unambiguous_exact"] = bool(np.array_equal(
-            got[..., :N1][exact_mask], want[..., :N1][exact_mask].astype(np.float32)))
-        m["clipped_components_reference"] = int(np.sum(np.abs(q.real) == 7)
-                                                + np.sum(np.abs(q.imag) == 7))
-        m["ambiguous_components"] = int(amb.sum())
+        m.update(sc.onehot_check(got, want, ambig))
+        m["components_above_7_reference"] = int(np.sum(np.abs(x16.real) > 7)
+                                                + np.sum(np.abs(x16.imag) > 7))
+        m["ambiguous_samples"] = int(np.count_nonzero(eps))
+        g_arr = np.asarray(gain, np.float64)
+        dyadic = bool(np.all(np.log2(g_arr) == np.round(np.log2(g_arr))))
         controls = {}
         for c_label, c_gain in (("gain_ignored", None),
-                                ("gain_mirrored_u", np.asarray(gain)[::-1]),
-                                ("gain_after_rounding", "after")):
+                                ("gain_mirrored_u", g_arr[::-1]),
+                                ("gain_after_fp16", "after")):
+            if c_label == "gain_ignored" and unity:
+                continue
+            if c_label == "gain_mirrored_u" and np.array_equal(g_arr, g_arr[::-1]):
+                continue
+            if c_label == "gain_after_fp16" and dyadic:
+                continue              # a power-of-two G commutes with fp16 rounding
             if isinstance(c_gain, str):
-                q0, _ = sc.fine_quantized(raw, None)
-                g = np.tile(np.asarray(gain, np.float64), F)[None, :, None]
-                w2, b2, _ = sc.expected_power(q0 * g, None, self.w, 10)
+                x0, _ = sc.fine_fp16(raw, None)
+                g = np.tile(g_arr, F)[None, :, None]
+                w2, b2, _ = sc.expected_power(x0 * g, None, self.w, 10)
             else:
-                w2, b2, _ = sc.expected_power(*sc.fine_quantized(raw, None, gain=c_gain),
-                                              self.w, 10)
+                w2, b2, _ = sc.expected_power(*sc.fine_fp16(raw, None, gain=c_gain), self.w, 10)
             controls[c_label] = sc.compare(got, w2, b2)["violations"]
         m["negative_control_violations"] = controls
         record(f"g2_exact_{label}_shard{shard}", m)
         self.assertEqual(m["violations"], 0, m)
         self.assertEqual(m["plan_tolerance_violations"], 0, m)
-        self.assertTrue(m["onehot_unambiguous_exact"], m)
+        self.assertGreater(m["onehot_checked"], 0, m)
+        self.assertEqual(m["onehot_violations"], 0, m)
         for c_label, n in controls.items():
-            if c_label == "gain_mirrored_u" and np.array_equal(gain, np.asarray(gain)[::-1]):
-                continue
             self.assertGreater(n, 1000, (c_label, controls))
-        return m
+        return m, got
 
     def test_exact_nonuniform_gain_both_shards(self):
         rng = np.random.default_rng(5)
@@ -240,11 +254,26 @@ class UpchanGainNumericsGpu(unittest.TestCase):
         for shard in (0, 1):
             self.check_exact("profile", shard, G_PROFILE)
 
-    def test_exact_clipping_large_gain(self):
-        gain = np.full(U, 8.0, np.float32)
-        gain[0] = 7.5                         # not symmetric, so the mirror control applies
-        m = self.check_exact("clip", 0, gain)
-        self.assertGreater(m["clipped_components_reference"], 100000, m)
+    def test_large_gain_stays_linear(self):
+        """G = 8 everywhere: no saturation, output exactly 64 x the G = 1 output."""
+        m8, got8 = self.check_exact("large", 0, np.full(U, 8.0, np.float32))
+        m1, got1 = self.check_exact("unity", 0, np.ones(U, np.float32))
+        raw, _ = sc.fine_fixture(1280, seed=900)
+        x8, e8 = sc.fine_fp16(raw, None, gain=np.full(U, 8.0))
+        x1, e1 = sc.fine_fp16(raw, None)
+        # Samples whose reference does not scale exactly (subnormal) or is ambiguous.
+        off = (np.abs(x8.real - 8 * x1.real) + np.abs(x8.imag - 8 * x1.imag) + e8 + e1).astype(np.float32)
+        _, _, inexact = sc.expected_power(x8, off, self.w, 10)
+        clean = ~inexact
+        ratio_exact = bool(np.array_equal(got8[clean], (got1[clean] * np.float32(64))))
+        report = {"large": m8, "unity": m1, "output_exactly_64x_unity": ratio_exact,
+                  "exactly_scaling_windows": int(clean.sum()), "windows": int(clean.size),
+                  "max_over_unity_nonzero": float(np.max(got8[got1 > 0] / got1[got1 > 0])),
+                  "min_over_unity_nonzero": float(np.min(got8[got1 > 0] / got1[got1 > 0]))}
+        record("g2_large_gain_linear", report)
+        self.assertGreater(m8["components_above_7_reference"], 100000, m8)
+        self.assertGreater(report["exactly_scaling_windows"], 0, report)
+        self.assertTrue(ratio_exact, report)
 
     # ------------------------------------------------------------------ shaped noise
     def noise_run(self, sigma, gain_label, gain):
@@ -270,50 +299,44 @@ class UpchanGainNumericsGpu(unittest.TestCase):
                 "model_window_power": model.tolist(),
                 "model_rel_dev_per_u": (mean / model - 1).tolist(),
                 "max_abs_model_rel_dev": float(np.max(np.abs(mean / model - 1))),
-                # Model tolerance 1 %, or 4 standard errors where the power is small. The
-                # Gaussian model is checked only where G*sigma >= 0.3: below it a nonzero code
-                # is a > 1.7 sigma tail event of a 128-tap sum of int4 samples, whose tail is
-                # not Gaussian (reported, not asserted).
+                # Linear model (no rounding regime): checked in every bin, tolerance 1 % (the
+                # periodogram-based sigma_u estimate) or 4 standard errors.
                 "model_tolerance_per_u": np.maximum(0.01, 4 * se / np.maximum(mean, 1e-30)).tolist(),
-                "model_checked_u": [int(u) for u in np.flatnonzero(g * sig_u >= 0.3)],
-                "model_ok": bool(np.all((np.abs(mean / model - 1)
-                                         <= np.maximum(0.01, 4 * se / np.maximum(mean, 1e-30)))
-                                        [g * sig_u >= 0.3])),
+                "model_checked_u": list(range(U)),
+                "model_ok": bool(np.all(np.abs(mean / model - 1)
+                                        <= np.maximum(0.01, 4 * se / np.maximum(mean, 1e-30)))),
                 "centre_edge_dB_measured": centre_edge_db(mean),
                 "centre_edge_dB_model": centre_edge_db(model),
                 "centre_edge_dB_unquantized_fine": centre_edge_db((g * sig_u) ** 2),
                 "flatness_max_abs_dB": float(np.max(np.abs(db(mean / mean[15:17].mean())))),
                 "fine_power_per_coarse_power": float(
                     np.mean(mean[8:24] / g[8:24] ** 2) / (10 * 2 * var_c)),
-                "predicted_zero_fraction_centre": float(
-                    sc.rounded_gaussian_pmf(float(g[15] * sig_u[15]))[1][8] ** 2),
             }
         return self.noise[key]
 
     def test_shaped_noise_scalloping_and_flattening(self):
         r1 = self.noise_run(1.2, "unity", None)
-        rg = self.noise_run(1.2, "g0_over_H", G_PROFILE)
-        report = {"unity": r1, "g0_over_H": rg}
+        rg = self.noise_run(1.2, "inverse_H", G_PROFILE)
+        report = {"unity": r1, "inverse_H": rg}
         record("g2_shaped_noise_sigma1.2", report)
-        # Diagnosis: the int4 rounding inflates the ~2.9 dB input scalloping to ~9-10 dB.
-        self.assertGreater(r1["centre_edge_dB_measured"], 8.0, r1)
-        self.assertLess(r1["centre_edge_dB_unquantized_fine"], 3.2, r1)
-        # G = g0/H flattens it; the residual is the coarse quantization noise at the edges.
+        # Linear path: with G = 1 the measured scalloping is the unquantized ~2.9 dB (the int4
+        # path inflated it to ~9.5 dB).
+        self.assertLess(abs(r1["centre_edge_dB_measured"] - r1["centre_edge_dB_unquantized_fine"]),
+                        0.1, r1)
+        self.assertLess(r1["centre_edge_dB_measured"], 3.2, r1)
+        self.assertGreater(r1["centre_edge_dB_measured"], 2.5, r1)
+        # G = 1/H flattens it; the residual is the coarse quantization noise at the edges.
         self.assertLess(abs(rg["centre_edge_dB_measured"]), 0.4, rg)
         self.assertLess(rg["flatness_max_abs_dB"], 0.4, rg)
-        # G = 1 is entirely in the tail regime (G*sigma <= 0.22): only the centre/edge ratio is
-        # compared with the model. With g0 every bin is checked.
-        self.assertEqual(r1["model_checked_u"], [], r1)
-        self.assertLess(abs(r1["centre_edge_dB_measured"] - r1["centre_edge_dB_model"]), 0.3, r1)
-        self.assertEqual(len(rg["model_checked_u"]), U, rg)
-        self.assertTrue(rg["model_ok"], rg)
+        for r in (r1, rg):
+            self.assertTrue(r["model_ok"], r)
 
     def test_level_dependence(self):
         levels = (0.6, 1.2, 2.4)
-        report = {"unity": {}, "g0_over_H": {}}
+        report = {"unity": {}, "inverse_H": {}}
         for sigma in levels:
             report["unity"][sigma] = self.noise_run(sigma, "unity", None)
-            report["g0_over_H"][sigma] = self.noise_run(sigma, "g0_over_H", G_PROFILE)
+            report["inverse_H"][sigma] = self.noise_run(sigma, "inverse_H", G_PROFILE)
         summary = {}
         for label in report:
             ratios = [report[label][s]["fine_power_per_coarse_power"] for s in levels]
@@ -327,11 +350,14 @@ class UpchanGainNumericsGpu(unittest.TestCase):
                               "model_checked_u_count": [len(report[label][s]["model_checked_u"])
                                                         for s in levels]}
         record("g2_level_dependence", {"summary": summary, "runs": report})
-        self.assertGreater(summary["unity"]["spread_dB"], 20.0, summary)
-        self.assertLess(summary["g0_over_H"]["spread_dB"], 1.5, summary)
+        # Linear for both gains (the int4 path spread over > 20 dB with G = 1). Their fine/coarse
+        # ratios divided by G^2 must agree; the residual level dependence is only the share of
+        # white coarse quantization noise in the input spectrum.
         for label in summary:
+            self.assertLess(summary[label]["spread_dB"], 1.5, summary)
             self.assertTrue(summary[label]["model_ok"], summary)
-        self.assertEqual(summary["g0_over_H"]["model_checked_u_count"], [U, U, U], summary)
+        self.assertLess(abs(summary["unity"]["spread_dB"] - summary["inverse_H"]["spread_dB"]),
+                        0.1, summary)
 
     # ------------------------------------------------------------------ history
     def test_history_ring_and_jump_with_gain(self):
@@ -344,8 +370,8 @@ class UpchanGainNumericsGpu(unittest.TestCase):
         resets = {0, jump_at}
 
         def violations(i, history):
-            q, amb = sc.fine_quantized(frames[i], history, gain=G_PROFILE)
-            return sc.compare(got[i], *sc.expected_power(q, amb, self.w, 10))["violations"]
+            x16, eps = sc.fine_fp16(frames[i], history, gain=G_PROFILE)
+            return sc.compare(got[i], *sc.expected_power(x16, eps, self.w, 10))["violations"]
 
         right, wrong = [], {"no_history": [], "continuous_at_jump": []}
         for i in range(n_frames):
@@ -366,7 +392,7 @@ class UpchanGainNumericsGpu(unittest.TestCase):
         t_raw, n_frames = 640, 2
         rng = np.random.default_rng(77)
         outputs = {}
-        for label, gain in (("unity", None), ("g0_over_H", G_PROFILE)):
+        for label, gain in (("unity", None), ("inverse_H", G_PROFILE)):
             work = self.root / f"mask_{label}"
             shutil.rmtree(work, ignore_errors=True)
             inp, out = work / "in", work / "out"
@@ -399,7 +425,7 @@ class UpchanGainNumericsGpu(unittest.TestCase):
                 for shard in (0, 1)}
         report = {}
         for shard in (0, 1):
-            a, b = outputs["unity"][shard], outputs["g0_over_H"][shard]
+            a, b = outputs["unity"][shard], outputs["inverse_H"][shard]
             report[shard] = {"exposure_files": len(a["exposure"]),
                              "exposure_identical": a["exposure"] == b["exposure"],
                              "intensity_files": len(b["intensity"]),

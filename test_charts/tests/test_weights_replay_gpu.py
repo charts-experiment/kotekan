@@ -56,13 +56,13 @@ def make_gains():
 
 
 def fine_gain():
-    """H0 = sum of the 128 PFB coefficients (documented sinc-Hanning, 1/32 included).
+    """H0 = sum of the 128 PFB coefficients (CHORD sinc-Hanning window, 1/32 included).
 
     A tone at a fine-bin centre sees exactly this scalar in its own bin, the same for
     every element, so the steady-state array-factor expectation only gains |H0|².
     """
     s = np.arange(128)
-    q = (2 * s - 127) / 258
+    q = (2 * s - 127) / 256          # CHORD upchan.jl: s' = (2s - (M*U - 1)) / (2*M*U)
     return float(np.sum(np.cos(np.pi * q) ** 2 * np.sinc(4 * q) / 32))
 
 

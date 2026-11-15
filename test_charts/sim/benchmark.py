@@ -255,7 +255,7 @@ def calculate_beamformer_vram(
     beam_tiles = (n_beams + 31) // 32
     n_time_bf = n_time // 32
     n_freq_bf = local_freq * 32
-    fine_packed_bytes = n_time_bf * n_freq_bf * n_ant
+    fine_fp16_bytes = n_time_bf * n_freq_bf * n_ant * 4      # __half2 fine voltages
     pfb_history_bytes = local_freq * n_ant * 96
     upchan_gain_bytes = n_freq_bf * 4
 
@@ -278,7 +278,7 @@ def calculate_beamformer_vram(
     per_shard_bytes = (
         (input_frame_bytes + output_frame_bytes) * buffer_depth
         + weights_bytes
-        + fine_packed_bytes
+        + fine_fp16_bytes
         + pfb_history_bytes
         + upchan_gain_bytes
         + fp32_scratch_bytes
@@ -296,7 +296,7 @@ def calculate_beamformer_vram(
         "output_frame_mb": round(output_frame_bytes / (1024.0 * 1024.0), 3),
         "weights_mb": round(weights_bytes / (1024.0 * 1024.0), 3),
         "fine_workspace_mb": round(
-            (fine_packed_bytes + pfb_history_bytes + upchan_gain_bytes + fp32_scratch_bytes
+            (fine_fp16_bytes + pfb_history_bytes + upchan_gain_bytes + fp32_scratch_bytes
              + quant_params_bytes)
             / (1024.0 * 1024.0),
             3,

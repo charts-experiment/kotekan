@@ -189,11 +189,10 @@ __global__ void fused_upchannelizer_kernel(
     const std::uint8_t* __restrict__ raw_payload,
     const std::uint8_t* __restrict__ history_samples,
     const bool history_initialized,
-    std::uint8_t* __restrict__ channelized_packed,
+    __half2* __restrict__ fine_voltage,
     const std::size_t n_time,
     const std::size_t n_coarse,
     const std::size_t n_element,
-    const float quantize_clamp,
     const float* __restrict__ upchan_gain,
     const std::size_t total_transforms) {
     const std::size_t idx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -250,8 +249,8 @@ __global__ void fused_upchannelizer_kernel(
 
     fft32_in_place(r_real, r_imag);
 
-    // Optional real fine-channel gain G[f*32 + u], applied before the clamp and rounding as in
-    // CHIME/CHORD upchan.jl step 7 (E5 = G * E4). nullptr means unity.
+    // Optional real fine-channel gain G[f*32 + u] (CHORD upchan.jl step 7, E5 = G * E4), in
+    // fp32 before the fp16 conversion. nullptr means unity.
     if (upchan_gain != nullptr) {
         #pragma unroll
         for (std::size_t u = 0; u < 32; ++u) {
@@ -261,18 +260,12 @@ __global__ void fused_upchannelizer_kernel(
         }
     }
 
-    // Quantize and pack the results into 4-bit signed integers
+    // fp16 fine voltages, round to nearest even; no clamp or int4 re-quantization.
     const std::size_t base_out_idx = (t_out * n_coarse + f) * 32;
     #pragma unroll
     for (std::size_t u = 0; u < 32; ++u) {
         const std::size_t out_idx = (base_out_idx + u) * n_element + e;
-        const float clamped_r = fminf(fmaxf(r_real[u], -quantize_clamp), quantize_clamp);
-        const float clamped_i = fminf(fmaxf(r_imag[u], -quantize_clamp), quantize_clamp);
-        const int r = __float2int_rn(clamped_r);
-        const int i = __float2int_rn(clamped_i);
-        const auto byte = static_cast<std::uint8_t>(
-            (static_cast<std::uint8_t>(r) & 0x0F) | ((static_cast<std::uint8_t>(i) & 0x0F) << 4));
-        channelized_packed[out_idx] = byte;
+        fine_voltage[out_idx] = __floats2half2_rn(r_real[u], r_imag[u]);
     }
 }
 
@@ -352,10 +345,10 @@ __global__ void integrated_exposure_kernel(const std::uint8_t* validity, Count* 
 
 void launch_fused_upchannelizer(const cudaStream_t stream, const std::uint8_t* raw_payload,
                                 const std::uint8_t* history_samples, const bool history_initialized,
-                                std::uint8_t* channelized_packed, const std::size_t raw_n_time,
+                                __half2* fine_voltage, const std::size_t raw_n_time,
                                 const std::size_t n_coarse, const std::size_t n_element,
-                                const float quantize_clamp, const float* upchan_gain) {
-    if (!raw_payload || !channelized_packed) {
+                                const float* upchan_gain) {
+    if (!raw_payload || !fine_voltage) {
         throw std::invalid_argument("upchannelizer device pointers must not be null");
     }
     if (raw_n_time == 0 || raw_n_time % upchannelization_factor != 0) {
@@ -370,8 +363,8 @@ void launch_fused_upchannelizer(const cudaStream_t stream, const std::uint8_t* r
     const std::size_t blocks = (total_transforms + threads - 1) / threads;
     fused_upchannelizer_kernel<<<static_cast<unsigned int>(blocks),
                                  static_cast<unsigned int>(threads), 0, stream>>>(
-        raw_payload, history_samples, history_initialized, channelized_packed, raw_n_time, n_coarse,
-        n_element, quantize_clamp, upchan_gain, total_transforms);
+        raw_payload, history_samples, history_initialized, fine_voltage, raw_n_time, n_coarse,
+        n_element, upchan_gain, total_transforms);
     check_cuda(cudaGetLastError(), "fused_upchannelizer_kernel launch");
 }
 

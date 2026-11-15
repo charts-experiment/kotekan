@@ -130,12 +130,11 @@ void launch_tiled_packed_beamformer(cudaStream_t stream, const std::uint8_t* pac
                                     const ComplexFloat* tiled_weights, float* intensity,
                                     const Dimensions& dims);
 
-void launch_tiled_packed_integrated_beamformer(cudaStream_t stream,
-                                               const std::uint8_t* packed_voltage,
-                                               const ComplexFloat* tiled_weights,
-                                               float* integrated_intensity,
-                                               const Dimensions& dims,
-                                               std::size_t integration_spectra);
+// Scalar fp32 reference beamformer on fp16 fine voltages [t][f][e] (K = 10).
+void launch_tiled_fp16_integrated_beamformer(cudaStream_t stream, const __half2* fine_voltage,
+                                             const ComplexFloat* tiled_weights,
+                                             float* integrated_intensity, const Dimensions& dims,
+                                             std::size_t integration_spectra);
 
 void launch_quantize_integrated_intensity(cudaStream_t stream, const float* integrated_intensity,
                                           std::int8_t* quantized_intensity,

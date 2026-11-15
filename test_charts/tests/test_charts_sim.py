@@ -393,8 +393,8 @@ class TestChartsSimulationSuite(unittest.TestCase):
         self.assertGreaterEqual(info_default["min_intensity"], -128.0)
 
         # 2. Analytical float32 parity of the fine path with the command's generated default
-        # weights (no weights_file): reference fine transform (stage C) then the analytical
-        # default geometry; components within TIE of a half-integer are bounded, not exact.
+        # weights (no weights_file): fp16 reference fine transform (stage C) then the analytical
+        # default geometry; components near an fp16 rounding midpoint are bounded, not exact.
         from test_charts.tests import test_stage_c_numerics_gpu as sc
 
         out_f32_dir = self.temp_dir / "bf_out_f32"
@@ -428,9 +428,9 @@ class TestChartsSimulationSuite(unittest.TestCase):
         self.assertTrue(info_f32["all_finite"])
         self.assertEqual(info_f32["shape"], (2, 10752, 128))
 
-        q, amb = sc.fine_quantized(packed, None)
+        q, eps = sc.fine_fp16(packed, None)
         want, bound, ambiguous = sc.expected_power(
-            q, amb, default_geometry_weights(shard_id=0, num_beams=n_beams), 10)
+            q, eps, default_geometry_weights(shard_id=0, num_beams=n_beams), 10)
         metrics = sc.compare(info_f32["intensities"], want, bound, ambiguous)
         self.assertEqual(metrics["violations"], 0, metrics)
         self.assertEqual(metrics["plan_tolerance_violations"], 0, metrics)

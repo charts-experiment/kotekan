@@ -91,17 +91,19 @@ __global__ void tiled_packed_voltage_beamformer_kernel(
         sum_real * sum_real + sum_imag * sum_imag;
 }
 
-__global__ void tiled_packed_integrated_voltage_beamformer_kernel(
-    const std::uint8_t* packed_voltage, const ComplexFloat* weights,
+// Scalar fp32 reference: reads fp16 fine voltages, fp32 weights and arithmetic. Kept as the
+// test reference for the tensor-core kernel (FP16_TC_ARCHITECTURE.md, WP1/WP3).
+__global__ void tiled_fp16_integrated_voltage_beamformer_kernel(
+    const __half2* fine_voltage, const ComplexFloat* weights,
     float* integrated_intensity, const std::size_t n_time,
     const std::size_t n_freq, const std::size_t n_ant,
     const std::size_t n_beams, const std::size_t integration_spectra) {
     extern __shared__ unsigned char shared_storage[];
     auto* shared_weights = reinterpret_cast<ComplexFloat*>(shared_storage);
-    auto* shared_voltage =
-        shared_storage + tiled_max_antennas * tiled_beam_tile * sizeof(ComplexFloat);
+    auto* shared_voltage = reinterpret_cast<float2*>(
+        shared_storage + tiled_max_antennas * tiled_beam_tile * sizeof(ComplexFloat));
     auto* shared_power = reinterpret_cast<float*>(
-        shared_voltage + tiled_time_tile * tiled_max_antennas * sizeof(std::uint8_t));
+        shared_voltage + tiled_time_tile * tiled_max_antennas);
 
     const std::size_t local_beam = threadIdx.x;
     const std::size_t local_time = threadIdx.y;
@@ -146,8 +148,8 @@ __global__ void tiled_packed_integrated_voltage_beamformer_kernel(
             const std::size_t time = first_time + group_offset + tile_time;
             shared_voltage[tile_time * n_ant + antenna] =
                 time < last_time
-                    ? packed_voltage[(time * n_freq + frequency) * n_ant + antenna]
-                    : 0U;
+                    ? __half22float2(fine_voltage[(time * n_freq + frequency) * n_ant + antenna])
+                    : make_float2(0.0F, 0.0F);
         }
         __syncthreads();
 
@@ -157,10 +159,9 @@ __global__ void tiled_packed_integrated_voltage_beamformer_kernel(
             float sum_real = 0.0F;
             float sum_imag = 0.0F;
             for (std::size_t antenna = 0; antenna < n_ant; ++antenna) {
-                const ComplexInt4 packed_sample =
-                    unpack_complex_int4(shared_voltage[local_time * n_ant + antenna]);
-                const float sample_real = static_cast<float>(packed_sample.real);
-                const float sample_imag = static_cast<float>(packed_sample.imag);
+                const float2 sample = shared_voltage[local_time * n_ant + antenna];
+                const float sample_real = sample.x;
+                const float sample_imag = sample.y;
                 const ComplexFloat weight =
                     shared_weights[antenna * tiled_beam_tile + local_beam];
                 sum_real += weight.real * sample_real - weight.imag * sample_imag;
@@ -423,17 +424,17 @@ void launch_tiled_packed_beamformer(const cudaStream_t stream, const std::uint8_
     check_cuda(cudaGetLastError(), "tiled_packed_voltage_beamformer_kernel launch");
 }
 
-void launch_tiled_packed_integrated_beamformer(const cudaStream_t stream,
-                                               const std::uint8_t* packed_voltage,
-                                               const ComplexFloat* tiled_weights,
-                                               float* integrated_intensity,
-                                               const Dimensions& dims,
-                                               const std::size_t integration_spectra) {
-    if (!packed_voltage || !tiled_weights || !integrated_intensity) {
+void launch_tiled_fp16_integrated_beamformer(const cudaStream_t stream,
+                                             const __half2* fine_voltage,
+                                             const ComplexFloat* tiled_weights,
+                                             float* integrated_intensity,
+                                             const Dimensions& dims,
+                                             const std::size_t integration_spectra) {
+    if (!fine_voltage || !tiled_weights || !integrated_intensity) {
         throw std::invalid_argument("CUDA tiled integrated beamformer pointers must not be null");
     }
-    if (integration_spectra != 10 && integration_spectra != 320) {
-        throw std::invalid_argument("CUDA temporal integration supports 10 or 320 spectra only");
+    if (integration_spectra != 10) {
+        throw std::invalid_argument("CUDA temporal integration supports K = 10 only");
     }
     (void)cudaGetLastError();
 
@@ -441,16 +442,16 @@ void launch_tiled_packed_integrated_beamformer(const cudaStream_t stream,
     const auto grid_x = (dims.n_beams + tiled_beam_tile - 1) / tiled_beam_tile;
     constexpr std::size_t shared_bytes =
         tiled_max_antennas * tiled_beam_tile * sizeof(ComplexFloat)
-        + tiled_time_tile * tiled_max_antennas * sizeof(std::uint8_t)
+        + tiled_time_tile * tiled_max_antennas * sizeof(float2)
         + tiled_time_tile * tiled_beam_tile * sizeof(float);
     const dim3 grid(static_cast<unsigned int>(grid_x),
                     static_cast<unsigned int>(dims.n_freq),
                     static_cast<unsigned int>(window_count));
     const dim3 block(tiled_beam_tile, tiled_time_tile, 1);
-    tiled_packed_integrated_voltage_beamformer_kernel<<<grid, block, shared_bytes, stream>>>(
-        packed_voltage, tiled_weights, integrated_intensity, dims.n_time, dims.n_freq, dims.n_ant,
+    tiled_fp16_integrated_voltage_beamformer_kernel<<<grid, block, shared_bytes, stream>>>(
+        fine_voltage, tiled_weights, integrated_intensity, dims.n_time, dims.n_freq, dims.n_ant,
         dims.n_beams, integration_spectra);
-    check_cuda(cudaGetLastError(), "tiled_packed_integrated_voltage_beamformer_kernel launch");
+    check_cuda(cudaGetLastError(), "tiled_fp16_integrated_voltage_beamformer_kernel launch");
 }
 
 void launch_quantize_integrated_intensity(const cudaStream_t stream,

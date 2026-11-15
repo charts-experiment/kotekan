@@ -8,7 +8,7 @@
 #   intensity.shard<s>  int8 [48][10752][128]       66 060 288 B
 #   qparams.shard<s>    float32 (offset, scale) x 258048   2 064 384 B
 #   exposure.shard<s>   uint8 [48][336] valid spectra       16 128 B
-# plus intensity.shard<s>.product.json (charts-intensity-product-v2, written at start).
+# plus intensity.shard<s>.product.json (charts-intensity-product-v3, written at start).
 # Decode with test_charts/sim/intensity_product.py.
 #
 # Output rate is ~0.67 GB/s per shard, so the default output is tmpfs and the run is

@@ -1,4 +1,4 @@
-"""Reader/decoder for the CHARTS integrated intensity product (charts-intensity-product-v2).
+"""Reader/decoder for the CHARTS integrated intensity product (charts-intensity-product-v1..v3).
 
 The descriptor is the JSON sidecar written by cudaChartsBeamformerCommand when
 `product_descriptor_file` is configured. Frame records are native rawFileWrite records:
@@ -15,9 +15,10 @@ import numpy as np
 
 from .packet_loss import read_product
 
-SCHEMA = "charts-intensity-product-v2"
+SCHEMA = "charts-intensity-product-v3"
 # v1 descriptors (before 2026-11-02) have no history.upchan_gain; their fine gain is unity.
-SUPPORTED_SCHEMAS = ("charts-intensity-product-v1", SCHEMA)
+# v2: int4 fine path (beamform-64). v3: fp16 fine path, no fine_quantization block.
+SUPPORTED_SCHEMAS = ("charts-intensity-product-v1", "charts-intensity-product-v2", SCHEMA)
 INVALID_CODE = -128
 
 
@@ -33,6 +34,12 @@ def load_descriptor(path: Path) -> dict:
     for key in ("shard", "T_raw", "K", "U", "intensity", "frequency", "association"):
         if key not in d:
             raise ProductError(f"descriptor lacks {key!r}")
+    if d["schema"] == SCHEMA:
+        history = d.get("history") or {}
+        if "fine_quantization" in history:
+            raise ProductError("v3 descriptor must not carry history.fine_quantization")
+        if history.get("fine_format") != "fp16":
+            raise ProductError("v3 descriptor must declare history.fine_format = 'fp16'")
     return d
 
 

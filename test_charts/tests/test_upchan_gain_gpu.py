@@ -1,22 +1,23 @@
 """Fine upchannelizer gain G(u) (`upchan_gain`): stage 1, wiring with unity default.
 
-Run with /usr/bin/python3 -m test_charts.tests.test_upchan_gain_gpu
-    [--results-dir PATH] [--kotekan-bin PATH] [--reference-kotekan-bin PATH]
+Run with ~/miniconda3/envs/kotekan_test/bin/python -m test_charts.tests.test_upchan_gain_gpu
+    [--results-dir PATH] [--kotekan-bin PATH]
 
-Acceptance (FINE_PATH_SCALLOPING_QUANTIZATION.md §3, §4 step 3):
-* Unity is bit-identical. Fine float32 and int8 outputs (both shards) with no
-  `upchan_gain` key and with an explicit 32 x 1.0 gain are byte-identical. With
-  --reference-kotekan-bin (a binary built before the change), they are also byte-identical
-  to that binary's output, payload and raw metadata.
+fp16 fine path (FP16_TC_ARCHITECTURE.md). Acceptance:
+* Unity default. Fine float32 and int8 outputs (both shards) with no `upchan_gain` key and
+  with an explicit 32 x 1.0 gain are byte-identical. (No comparison with a pre-change binary:
+  the int4 path of beamform-64 differs from the fp16 path by design.)
 * Index wiring. With G = 1 except G[u0] = 3, only fine channels f*32 + u0 change, in every
-  local coarse channel and on both shards. A second u0 checks the order.
-* Descriptor v2: history.upchan_gain carries the values, unity flag, source, reference and
-  the SHA-256 of the applied float32 [336*32] array; ip.upchan_gain() returns that array.
-* Invalid configurations are rejected with their message: wrong length, <= 0, source
-  inconsistent with the values, unknown source. NaN is rejected by the
-  kotekan config parser (JSON has no NaN) before the command's own finite check.
-Synthetic verification of the plumbing only; the numerical effect of G (scaling before the
-rounding, shaped-noise flattening) is stage 2.
+  local coarse channel and on both shards, by a power ratio of 9 (linear path; fp16 rounding
+  of 3X vs 3 x fp16(X) only perturbs it at the 1e-3 level). A second u0 checks the order.
+* Descriptor v3: history.upchan_gain carries the values, unity flag, source, reference,
+  purpose, placement and the SHA-256 of the applied float32 [336*32] array;
+  ip.upchan_gain() returns that array; history.fine_format is fp16, no fine_quantization.
+* Invalid configurations are rejected with their message: wrong length, <= 0, > 3000 (fp16
+  range), source inconsistent with the values, unknown source, the removed quantize_clamp.
+  NaN is rejected by the kotekan config parser (JSON has no NaN) before the command's own
+  finite check.
+Synthetic verification of the plumbing only; the numerical effect of G is stage 2.
 """
 
 from __future__ import annotations
@@ -36,7 +37,6 @@ from test_charts.tests import test_stage_c_numerics_gpu as sc
 from test_charts.tests import test_stage_d_product_gpu as sd
 
 RESULTS = None
-REFERENCE_BIN = None
 B, E, F, U, FF = 128, 64, 336, 32, 336 * 32
 T_RAW = 640
 
@@ -67,16 +67,9 @@ class UpchanGainGpu(unittest.TestCase):
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
-    def run_fine(self, label, *, shard, fmt, extra=None, binary=None):
-        saved = sd.BINARY
-        try:
-            if binary is not None:
-                sd.BINARY = binary
-            run = sd.run_product(self.root / label, self.frames, mode="fine", t_raw=T_RAW,
-                                 k=10, shard=shard, weights_file=self.wfile, fmt=fmt,
-                                 extra=extra)
-        finally:
-            sd.BINARY = saved
+    def run_fine(self, label, *, shard, fmt, extra=None):
+        run = sd.run_product(self.root / label, self.frames, mode="fine", t_raw=T_RAW,
+                             k=10, shard=shard, weights_file=self.wfile, fmt=fmt, extra=extra)
         self.assertEqual(len(run["intensity"]), len(self.frames), run["log"][-3000:])
         return run
 
@@ -97,21 +90,8 @@ class UpchanGainGpu(unittest.TestCase):
                     "qparams_identical": self.files_bytes(base, "qparams")
                     == self.files_bytes(ones, "qparams"),
                 }
-                if REFERENCE_BIN is not None:
-                    ref = self.run_fine(f"u_ref_{shard}_{fmt}", shard=shard, fmt=fmt,
-                                        binary=REFERENCE_BIN)
-                    entry["reference_binary_identical"] = (
-                        self.files_bytes(base) == self.files_bytes(ref))
-                    entry["reference_qparams_identical"] = (
-                        self.files_bytes(base, "qparams") == self.files_bytes(ref, "qparams"))
                 entry["files"] = len(base["intensity"])
                 report[f"shard{shard}_{fmt}"] = entry
-        report["reference_binary"] = str(REFERENCE_BIN) if REFERENCE_BIN else None
-        if REFERENCE_BIN is None:
-            # Both runs above use the same kernel path (fine mode always passes a gain
-            # array), so only a pre-change binary proves bit-identity to the old output.
-            report["reference_check"] = "SKIPPED: pass --reference-kotekan-bin"
-            print("WARNING: unity bit-identity vs the pre-change binary not checked")
         record("g_unity_bit_identical", report)
         for label, entry in report.items():
             if isinstance(entry, dict):
@@ -144,32 +124,38 @@ class UpchanGainGpu(unittest.TestCase):
                     "untouched_bins_bit_identical": bool(
                         np.array_equal(i1[:, :, u_of != u0], i0[:, :, u_of != u0])),
                     "power_ratio_at_u0_median": float(np.median(
-                        i1[:, :, u_of == u0][i0[:, :, u_of == u0] > 0]
-                        / i0[:, :, u_of == u0][i0[:, :, u_of == u0] > 0])),
+                        i1[:, :, u_of == u0][i0[:, :, u_of == u0] > 1]
+                        / i0[:, :, u_of == u0][i0[:, :, u_of == u0] > 1])),
                 }
         record("g_single_bin_wiring", report)
         for label, r in report.items():
             self.assertEqual(r["changed_outside_u0"], 0, (label, r))
             self.assertTrue(r["untouched_bins_bit_identical"], (label, r))
-            # The fixture's channels with a tone or noise in u0 must respond.
+            # The fixture's channels with a tone or noise in u0 must respond, linearly.
             self.assertGreater(r["coarse_channels_changed_at_u0"], 0, (label, r))
+            self.assertLess(abs(r["power_ratio_at_u0_median"] - 9.0), 0.01, (label, r))
 
     # ------------------------------------------------------------------ descriptor
     def test_descriptor_records_gain(self):
         unity = self.run_fine("d_unity", shard=0, fmt="float32")
         d = ip.load_descriptor(unity["descriptor"])
-        self.assertEqual(d["schema"], "charts-intensity-product-v2")
+        self.assertEqual(d["schema"], "charts-intensity-product-v3")
+        self.assertEqual(d["history"]["fine_format"], "fp16")
+        self.assertNotIn("fine_quantization", d["history"])
+        self.assertIn("(2s - 127)/256", d["history"]["pfb"])
         g = d["history"]["upchan_gain"]
+        self.assertIn("scalloping", g["purpose"])
+        self.assertIn("before the fp16 conversion", g["placement"])
         self.assertTrue(g["unity"])
         self.assertEqual(g["source"], "unity")
         self.assertEqual(g["values"], [1.0] * U)
         self.assertEqual(g["sha256"], gain_sha256([1.0] * U))
         np.testing.assert_array_equal(ip.upchan_gain(d), np.ones(FF, np.float32))
 
-        # A profile with non-dyadic values (g0/H_amp of the firmware PFB, rounded).
+        # A profile with non-dyadic values (1/H_amp of the firmware PFB, rounded).
         h_amp = np.array([0.7048, 0.7175, 0.7410, 0.7722, 0.8076, 0.8439, 0.8784, 0.9092,
                           0.9352, 0.9561, 0.9720, 0.9834, 0.9912, 0.9960, 0.9988, 1.0000])
-        values = (5.65 / np.concatenate([h_amp, h_amp[::-1]])).astype(np.float32)
+        values = (1.0 / np.concatenate([h_amp, h_amp[::-1]])).astype(np.float32)
         run = self.run_fine("d_profile", shard=1, fmt="float32",
                             extra={"upchan_gain": [float(v) for v in values],
                                    "upchan_gain_source": "analytic",
@@ -196,16 +182,21 @@ class UpchanGainGpu(unittest.TestCase):
         neg = [1.0] * U
         neg[31] = -2.0
         two = [2.0] * U
+        too_large = [1.0] * U
+        too_large[7] = 3001.0
+        limit = "upchan_gain values must be finite, > 0 and <= 3000"
         cases = {
             "length": ({"upchan_gain": bad_len}, "fine", "upchan_gain must have 32 values"),
             # JSON has no NaN, so the kotekan config parser rejects it before the command; the
             # command's finite check is a second line of defence.
             "nan_config_parser": ({"upchan_gain": nan, "upchan_gain_source": "measured"},
                                   "fine", "json.exception.parse_error"),
-            "zero": ({"upchan_gain": zero, "upchan_gain_source": "measured"}, "fine",
-                     "upchan_gain values must be finite and > 0"),
-            "negative": ({"upchan_gain": neg, "upchan_gain_source": "measured"}, "fine",
-                         "upchan_gain values must be finite and > 0"),
+            "zero": ({"upchan_gain": zero, "upchan_gain_source": "measured"}, "fine", limit),
+            "negative": ({"upchan_gain": neg, "upchan_gain_source": "measured"}, "fine", limit),
+            "above_fp16_limit": ({"upchan_gain": too_large, "upchan_gain_source": "measured"},
+                                 "fine", limit),
+            "quantize_clamp_removed": ({"quantize_clamp": 7.0}, "fine",
+                                       "quantize_clamp was removed"),
             "non_unity_without_source": ({"upchan_gain": two}, "fine",
                                          "upchan_gain_source must be"),
             "non_unity_labelled_unity": ({"upchan_gain": two, "upchan_gain_source": "unity"},
@@ -228,20 +219,16 @@ class UpchanGainGpu(unittest.TestCase):
 
 
 def main():
-    global RESULTS, REFERENCE_BIN
+    global RESULTS
     parser = argparse.ArgumentParser()
     parser.add_argument("--results-dir", type=Path)
     parser.add_argument("--kotekan-bin", type=Path)
-    parser.add_argument("--reference-kotekan-bin", type=Path,
-                        help="binary built before the upchan_gain change, for bit identity")
     args, rest = parser.parse_known_args()
     if args.results_dir:
         RESULTS = args.results_dir
         RESULTS.mkdir(parents=True, exist_ok=True)
     if args.kotekan_bin:
         sd.BINARY = args.kotekan_bin
-    if args.reference_kotekan_bin:
-        REFERENCE_BIN = args.reference_kotekan_bin.resolve()
     unittest.main(argv=[sys.argv[0], *rest], verbosity=2)
 
 

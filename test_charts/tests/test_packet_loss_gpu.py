@@ -61,12 +61,18 @@ def exposure_expectation(missing, previous_missing, *, k=10, reset):
 def constant_fine_power(raw_n_time, *, reset, amplitude=7, previous_amplitude=7):
     """Closed-form response of a constant source: three startup cases and steady state.
 
-    Evaluate the documented 128-tap Fourier sum once per case. No arbitrary input
-    processing, CPU FFT, packed-voltage decoder or CPU beamformer is used.
-    All elements are identical; coherent beam B/2 = 64 (l = 0) has power 64²·|packed Y|².
+    Evaluate the documented 128-tap Fourier sum (CHORD window) once per case, then the fp16
+    rounding of each component. No arbitrary input processing, CPU FFT, packed-voltage
+    decoder or CPU beamformer is used. All elements are identical; coherent beam
+    B/2 = 64 (l = 0) has power 64²·|fp16 Y|² (64·Y and its squares are exact in float32).
+    A component within the GPU's float32 transform error (stage C bound) of an fp16 rounding
+    midpoint may round to either neighbour: it is allowed one fp16 spacing eps, giving the
+    power allowance 64²·(2|Y| eps + eps²) per spectrum (|dRe| + |dIm| <= eps). Sidelobe bins of
+    a constant source are tiny, so some ambiguity is unavoidable. Returns
+    (expected [W][10752], rounding allowance [W][10752]).
     """
     s = np.arange(128)
-    q = (2 * s - 127) / 258
+    q = (2 * s - 127) / 256          # CHORD upchan.jl window
     h = np.cos(np.pi * q) ** 2 * np.sinc(4 * q) / 32
     phase = np.exp(-2j * np.pi * (np.arange(32)[:, None] - 15.5) * s / 32)
     if reset:
@@ -76,19 +82,31 @@ def constant_fine_power(raw_n_time, *, reset, amplitude=7, previous_amplitude=7)
     responses = np.array([amplitude * (phase[:, start:] @ h[start:])
                           + previous_amplitude * (phase[:, :start] @ h[:start])
                           for start in (96, 64, 32, 0)])
-    components = np.concatenate((responses.real.ravel(), responses.imag.ravel()))
-    half_margin = float(np.min(np.abs(components - (np.floor(components) + 0.5))))
-    if half_margin < 0.02:
-        raise AssertionError("constant fixture is too close to a packing boundary")
-    real = np.clip(np.rint(responses.real), -7, 7)
-    imag = np.clip(np.rint(responses.imag), -7, 7)
+    # GPU float32 transform error bound (stage C): 64 * 2^-24 * sum|h| (|Re x| + |Im x|).
+    fp32_error = 64 * 2.0 ** -24 * np.sum(np.abs(h)) * max(amplitude, previous_amplitude)
+
+    def fp16(c):
+        r = c.astype(np.float16)
+        lo = np.nextafter(r, np.float16(-np.inf)).astype(np.float64)
+        hi = np.nextafter(r, np.float16(np.inf)).astype(np.float64)
+        x = r.astype(np.float64)
+        near = np.minimum(np.abs(c - 0.5 * (x + lo)), np.abs(c - 0.5 * (x + hi))) < fp32_error
+        return x, np.where(near, np.maximum(x - lo, hi - x), 0.0)
+
+    real, eps_r = fp16(responses.real)
+    imag, eps_i = fp16(responses.imag)
+    eps = eps_r + eps_i
     power = 4096 * (real * real + imag * imag)
+    rounding = 4096 * (2 * np.hypot(real, imag) * eps + eps * eps)
     indices = np.full(raw_n_time // 32, 3)
     indices[:3] = np.arange(3)
-    spectrum_power = power[indices]
-    integrated = np.array([spectrum_power[t:t + 10].sum(axis=0)
-                           for t in range(0, len(indices), 10)])
-    return np.tile(integrated[:, None, :], (1, 336, 1)).reshape(len(integrated), 10752), half_margin
+
+    def integrate(per_spectrum):
+        sp = per_spectrum[indices]
+        out = np.array([sp[t:t + 10].sum(axis=0) for t in range(0, len(indices), 10)])
+        return np.tile(out[:, None, :], (1, 336, 1)).reshape(len(out), 10752)
+
+    return integrate(power), integrate(rounding)
 
 
 class ReplayHelpers(unittest.TestCase):
@@ -299,18 +317,19 @@ class PacketLossGPU(unittest.TestCase):
                                                     "uint8", (n_integrated, 336))
                         im, power = read_product(product_path("intensity", shard, frame),
                                                 "float32", (n_integrated, 10752, B))
+                        rounding = 0.0
                         if constant:
-                            expected_power, margin = constant_fine_power(
+                            expected_power, rounding = constant_fine_power(
                                 nt, reset=reset,
                                 amplitude=0 if np.all(masks[shard, frame]) else amplitudes[shard, frame],
                                 previous_amplitude=0 if reset or np.all(masks[shard, frame - 1])
                                 else amplitudes[shard, frame - 1])
                             actual = power[:, :, COHERENT_BEAM]
-                            report["packing_half_integer_margin"] = margin
+                            report["fp16_rounding_allowance_max"] = float(np.max(rounding))
                         else:
                             expected_power = np.zeros_like(power)
                             actual = power
-                        allowance = 1e-3 + 1e-5 * np.abs(expected_power)
+                        allowance = 1e-3 + 1e-5 * np.abs(expected_power) + rounding
                         error = np.abs(actual - expected_power)
                         report["frames"].append({"shard": shard, "frame": frame,
                             "sequence": em.fpga_seq_num, "reset": reset,

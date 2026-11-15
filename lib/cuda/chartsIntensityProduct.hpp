@@ -19,7 +19,9 @@ namespace beamformer {
 // provenance; this sidecar describes what the payload means. Per-frame data (exposure counts,
 // int8 offset/scale) are separate products carrying the same raw metadata.
 // v2 (2026-11-02): history.upchan_gain describes the fine-channel gain G(u).
-inline constexpr const char* product_schema = "charts-intensity-product-v2";
+// v3 (2026-11-14, branch beamform-64-fp16-tc): fp16 fine voltages without clamp or int4
+// re-quantization (history.fine_format), CHORD PFB window; no fine_quantization block.
+inline constexpr const char* product_schema = "charts-intensity-product-v3";
 
 struct ProductDescription {
     bool int8 = true;
@@ -33,7 +35,6 @@ struct ProductDescription {
     double freq_zero_hz = 0;
     double freq_step_hz = 0;
     std::vector<double> frequencies_hz;
-    float quantize_clamp = 7.0F;
     std::vector<float> upchan_gain;  // 32 values per fine index u
     bool upchan_gain_unity = true;
     std::string upchan_gain_source = "unity";
@@ -72,9 +73,10 @@ inline nlohmann::json product_descriptor(const ProductDescription& p) {
           {"layout", "C-order, beam fastest"},
           {"power_convention",
            "sum over the window of |sum_e W[b,f,e] x[f,e]|^2 for every supplied spectrum, "
-           "where x is the fine int4 code after the gain G(u) (history.upchan_gain); no "
+           "where x is the fp16 fine voltage after the gain G(u) (history.upchan_gain); no "
            "averaging, exposure normalization or rejection; arbitrary units of "
-           "(weight * int4 code)^2"},
+           "(weight * fine voltage)^2, the fine voltage being the PFB output of int4 input "
+           "codes"},
           {"component_convention", "x = low nibble + i*high nibble"}}},
         {"frequency",
          {{"nu0_hz", p.freq_zero_hz},
@@ -91,8 +93,13 @@ inline nlohmann::json product_descriptor(const ProductDescription& p) {
            "window w sums fine spectra [w*K, min((w+1)*K, M)); spectrum m uses raw ticks "
            "[seq + 32m - 96, seq + 32m + 31]"}}},
         {"history",
-         json{{"pfb", "4-tap sinc-Hanning, L=128, coefficients include 1/32, forward "
-                               "FFT, centered half-bin order"},
+         json{{"pfb", "4-tap sinc-Hanning, L=128, CHORD upchan.jl window "
+                              "s' = (2s - 127)/256, coefficients include 1/32 and no other "
+                              "normalization, forward FFT, centered half-bin order, fp32 "
+                              "arithmetic"},
+                       {"fine_format", "fp16"},
+                       {"fine_conversion", "fp32 -> fp16 round to nearest even after G(u); no "
+                                           "clamp, no int4 re-quantization"},
                        {"upchan_gain",
                         {{"values", p.upchan_gain},
                          {"unity", p.upchan_gain_unity},
@@ -101,14 +108,12 @@ inline nlohmann::json product_descriptor(const ProductDescription& p) {
                          {"applied", "float32 [336*32], G[f*32 + u] = values[u] for every local "
                                      "coarse channel f"},
                          {"sha256", p.upchan_gain_sha256},
-                         {"placement", "multiplies the fine voltages after the FFT and before "
-                                       "the clamp and int4 rounding (CHIME/CHORD upchan.jl "
-                                       "step 7)"},
-                         {"power", "intensity scales as G(u)^2 where the int4 rounding is "
-                                   "negligible; divide by G(u)^2 to refer power to the "
-                                   "ungained upchannelizer"}}},
-                       {"fine_quantization",
-                        {{"clamp", p.quantize_clamp}, {"rounding", "half to even"}}},
+                         {"placement", "multiplies the fine voltages in fp32 after the FFT and "
+                                       "before the fp16 conversion (CHORD upchan.jl step 7)"},
+                         {"purpose", "flux correction of the firmware PFB scalloping; values "
+                                     "applied verbatim from the configuration"},
+                         {"power", "intensity scales as G(u)^2 (linear path); divide by "
+                                   "G(u)^2 to refer power to the ungained upchannelizer"}}},
                        {"incomplete_spectra_after_start_or_reset", {0, 1, 2}},
                        {"reset", "a sequence jump on this shard zeroes sample and validity "
                                  "history"}}},

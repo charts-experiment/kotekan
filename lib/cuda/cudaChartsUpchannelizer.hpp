@@ -1,6 +1,7 @@
 #ifndef CUDA_CHARTS_UPCHANNELIZER_HPP
 #define CUDA_CHARTS_UPCHANNELIZER_HPP
 
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 #include <cmath>
@@ -23,6 +24,9 @@ inline constexpr std::size_t pfb_prototype_length =
 inline constexpr std::size_t pfb_history_samples =
     (pfb_taps_per_phase - 1) * upchannelization_factor; // 96
 inline constexpr std::size_t pfb_history_spectra = pfb_taps_per_phase - 1; // 3
+// Upper bound accepted for G(u): fine components are bounded by 16 * sum|h| * G (sum|h| ~ 1.1),
+// so G <= 3000 keeps every fp16 fine voltage finite (fp16 max 65504).
+inline constexpr float maximum_upchan_gain = 3000.0F;
 
 // -----------------------------------------------------------------------------
 // Signed int4x2 Codec (Real in low nibble, Imaginary in high nibble, [-8..7])
@@ -69,8 +73,8 @@ inline float sinc_hanning_pfb_weight(const std::size_t tap) {
     }
     constexpr double pi = 3.141592653589793238462643383279502884;
     constexpr double length = static_cast<double>(pfb_prototype_length);
-    const double coordinate =
-        (2.0 * static_cast<double>(tap) - (length - 1.0)) / (2.0 * (length + 1.0));
+    // CHORD upchan.jl Wkernel: s' = (2s - (M*U - 1)) / (2*M*U), normalized to (-1/2, +1/2).
+    const double coordinate = (2.0 * static_cast<double>(tap) - (length - 1.0)) / (2.0 * length);
     const double argument = static_cast<double>(pfb_taps_per_phase) * coordinate;
     const double sinc = argument == 0.0 ? 1.0 : std::sin(pi * argument) / (pi * argument);
     const double hanning = std::cos(pi * coordinate) * std::cos(pi * coordinate);
@@ -85,15 +89,15 @@ inline double upchannelized_bin_fraction(const std::size_t fine_bin) {
 // -----------------------------------------------------------------------------
 // Device Stage Launchers (Caller-Owned Buffers & Stream, Non-Blocking)
 // -----------------------------------------------------------------------------
-// upchan_gain: optional device array [n_coarse * 32] of real gains G[f*32 + u] (centred
-// half-bin order) that multiply the fine voltages after the FFT and before the clamp and
-// int4 rounding. nullptr is unity.
+// Writes fp16 fine voltages fine_voltage[t][f*32 + u][e] (__half2: real, imag), with no
+// clamp or re-quantization. upchan_gain: optional device array [n_coarse * 32] of real gains
+// G[f*32 + u] (centred half-bin order) applied in fp32 after the FFT and before the fp16
+// conversion (CHORD upchan.jl step 7). nullptr is unity.
 void launch_fused_upchannelizer(cudaStream_t stream, const std::uint8_t* raw_payload,
                                 const std::uint8_t* history_samples, bool history_initialized,
-                                std::uint8_t* channelized_packed, std::size_t raw_n_time,
+                                __half2* fine_voltage, std::size_t raw_n_time,
                                 std::size_t n_coarse = local_frequency_channels,
-                                std::size_t n_element = 64, float quantize_clamp = 7.0F,
-                                const float* upchan_gain = nullptr);
+                                std::size_t n_element = 64, const float* upchan_gain = nullptr);
 
 void launch_pfb_history_update(cudaStream_t stream, const std::uint8_t* raw_payload,
                                std::uint8_t* history_samples, std::size_t raw_n_time,
