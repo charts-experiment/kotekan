@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Unit tests for closed-loop telemetry and daemon helpers in self_tune_tracker.py."""
 
+import contextlib
+import io
+import math
 import os
 import struct
 import sys
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -353,6 +357,257 @@ class TestSelfTuneTrackerClosedLoop(unittest.TestCase):
                 run_dir=str(run_dir),
             )
             self.assertEqual(daemon.managed_notch_freqs, {424.2, 469.2})
+
+
+class TestSelfTuneTrackerSefdUtilsIntegration(unittest.TestCase):
+    def _write_test_npz(
+        self,
+        path: Path,
+        *,
+        format_version: int = 2,
+        n_freq: int = stt.N_CHAN_TOTAL,
+    ) -> tuple[np.ndarray, list[int], np.ndarray]:
+        rng = np.random.default_rng(1234)
+        antennas = [0, 4, 32, 36]
+        gains = (
+            rng.uniform(0.5, 1.5, (n_freq, len(antennas)))
+            * np.exp(1j * rng.uniform(-np.pi, np.pi, (n_freq, len(antennas))))
+        ).astype(np.complex128)
+        gains[10, 1] = np.nan + 0j
+        gains[11, 2] = np.inf + 0j
+
+        flagged = np.zeros(n_freq, dtype=bool)
+        bursty = np.zeros(n_freq, dtype=bool)
+        incoherent = np.zeros(n_freq, dtype=bool)
+        flagged[20:24] = True
+        bursty[100:103] = True
+        incoherent[400:405] = True
+        expected_bad = flagged | bursty | incoherent
+
+        np.savez(
+            path,
+            format_version=np.asarray(format_version),
+            gains=gains,
+            antennas=np.asarray(antennas, dtype=int),
+            freq_mhz=(stt.SUBBAND0_START_HZ + np.arange(n_freq) * stt.CHANNEL_WIDTH_HZ) / 1e6,
+            flagged_channels=flagged,
+            bursty_channels=bursty,
+            incoherent_channels=incoherent,
+        )
+        return gains, antennas, expected_bad
+
+    def test_expand_npz_gains_matches_charts_utils_and_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            npz_path = Path(tmp) / "gains_sun_test.npz"
+            gains, antennas, expected_bad = self._write_test_npz(npz_path, format_version=2)
+
+            out_lib = Path(tmp) / "out_lib.npy"
+            npy_lib, info_lib = stt.expand_npz_gains_to_npy(
+                str(npz_path), out_npy_path=str(out_lib), zero_flagged=False
+            )
+            arr_lib = np.load(npy_lib)
+
+            with mock.patch.object(stt, "_import_charts_utils_cal", return_value=(None, None)):
+                out_fb = Path(tmp) / "out_fb.npy"
+                npy_fb, info_fb = stt.expand_npz_gains_to_npy(
+                    str(npz_path), out_npy_path=str(out_fb), zero_flagged=False
+                )
+                arr_fb = np.load(npy_fb)
+
+            self.assertEqual(info_lib["source"], "charts_utils.cal")
+            self.assertEqual(info_fb["source"], "numpy_fallback")
+            self.assertEqual(arr_lib.shape, (stt.N_CHAN_TOTAL, 64))
+            self.assertEqual(arr_lib.dtype, np.complex64)
+            self.assertEqual(arr_fb.shape, (stt.N_CHAN_TOTAL, 64))
+            self.assertEqual(arr_fb.dtype, np.complex64)
+            np.testing.assert_allclose(arr_lib, arr_fb, rtol=1e-6, atol=1e-6)
+
+            uncal = [a for a in range(64) if a not in antennas]
+            self.assertTrue(np.all(arr_fb[:, uncal] == 0.0 + 0.0j))
+            self.assertEqual(arr_fb[10, 4], 0.0 + 0.0j)
+            self.assertEqual(arr_fb[11, 32], 0.0 + 0.0j)
+            np.testing.assert_allclose(arr_fb[50, antennas], gains[50].astype(np.complex64))
+            self.assertTrue(np.any(arr_fb[expected_bad, :][:, antennas] != 0.0))
+
+            # With zero_flagged=True, flagged | bursty | incoherent channels must be zeroed
+            out_zf = Path(tmp) / "out_zf.npy"
+            npy_zf, info_zf = stt.expand_npz_gains_to_npy(
+                str(npz_path), out_npy_path=str(out_zf), zero_flagged=True
+            )
+            arr_zf = np.load(npy_zf)
+            self.assertEqual(info_zf["zeroed_channels"], int(np.count_nonzero(expected_bad)))
+            self.assertTrue(np.all(arr_zf[expected_bad, :] == 0.0 + 0.0j))
+            np.testing.assert_allclose(arr_zf[~expected_bad, :], arr_lib[~expected_bad, :])
+
+            # Fallback zero_flagged=True must also match
+            with mock.patch.object(stt, "_import_charts_utils_cal", return_value=(None, None)):
+                out_zf_fb = Path(tmp) / "out_zf_fb.npy"
+                npy_zf_fb, _ = stt.expand_npz_gains_to_npy(
+                    str(npz_path), out_npy_path=str(out_zf_fb), zero_flagged=True
+                )
+                np.testing.assert_allclose(np.load(npy_zf_fb), arr_zf, rtol=1e-6, atol=1e-6)
+
+    def test_expand_npz_format1_conjugates_consistently_in_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            npz_path = Path(tmp) / "gains_sun_v1.npz"
+            self._write_test_npz(npz_path, format_version=1)
+
+            with self.assertWarns(UserWarning):
+                npy_lib, _ = stt.expand_npz_gains_to_npy(
+                    str(npz_path), out_npy_path=str(Path(tmp) / "v1_lib.npy")
+                )
+            with mock.patch.object(stt, "_import_charts_utils_cal", return_value=(None, None)):
+                npy_fb, _ = stt.expand_npz_gains_to_npy(
+                    str(npz_path), out_npy_path=str(Path(tmp) / "v1_fb.npy")
+                )
+            np.testing.assert_allclose(np.load(npy_lib), np.load(npy_fb), rtol=1e-6, atol=1e-6)
+
+    def test_reload_calibration_gains_cli_with_npz_and_zero_flagged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            npz_path = Path(tmp) / "gains_sun_20261116.npz"
+            _, _, expected_bad = self._write_test_npz(npz_path, format_version=2)
+            posted = []
+
+            def fake_post(_url: str, path: str, payload: dict, timeout: float = 5.0):
+                posted.append((path, payload))
+                return {"status": "ok", "gains_generation": 3}
+
+            with mock.patch.object(stt, "http_post_json", side_effect=fake_post), mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "self_tune_tracker.py",
+                    "--url",
+                    "http://127.0.0.1:12048",
+                    "--reload-cal-gains",
+                    str(npz_path),
+                    "--zero-flagged",
+                ],
+            ):
+                rc = stt.main()
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(posted), 1)
+            self.assertEqual(posted[0][0], "/direct_tracker/reload_gains")
+            reloaded_file = Path(posted[0][1]["gains_file"])
+            self.assertTrue(reloaded_file.is_file())
+            self.assertEqual(reloaded_file.suffix, ".npy")
+            arr = np.load(reloaded_file)
+            self.assertEqual(arr.shape, (stt.N_CHAN_TOTAL, 64))
+            self.assertEqual(arr.dtype, np.complex64)
+            self.assertTrue(np.all(arr[expected_bad, :] == 0.0 + 0.0j))
+
+    def test_quantizer_diagnostics_charts_sefd_and_fallback_parity(self) -> None:
+        powers = np.array([0.0, 0.2, 1.0, 4.0, 8.0, 16.0, 100.0], dtype=np.float64)
+        diag_lib = stt.quantizer_diagnostics_from_power(powers)
+        with mock.patch.object(stt, "_import_charts_sefd_quantization", return_value=None):
+            diag_fb = stt.quantizer_diagnostics_from_power(powers)
+
+        self.assertEqual(diag_fb["source"], "analytical_fallback")
+        np.testing.assert_allclose(diag_lib["sigma_lsb"], diag_fb["sigma_lsb"], rtol=1e-12, equal_nan=True)
+        np.testing.assert_allclose(diag_lib["eta_q"], diag_fb["eta_q"], rtol=1e-12, equal_nan=True)
+        np.testing.assert_allclose(diag_lib["q_rms"], diag_fb["q_rms"], rtol=1e-12, equal_nan=True)
+        np.testing.assert_array_equal(diag_lib["in_optimal_window"], diag_fb["in_optimal_window"])
+
+        # p=4.0 LSB^2 -> sigma ~1.958 LSB, eta_q ~0.9583, inside optimal window [0.933, 2.639]
+        scalar = stt.quantizer_diagnostics_from_power(4.0)
+        self.assertAlmostEqual(scalar["sigma_lsb"], 1.9579, places=3)
+        self.assertAlmostEqual(scalar["eta_q"], 0.9583, places=3)
+        self.assertTrue(scalar["in_optimal_window"])
+        self.assertTrue(math.isnan(stt.quantizer_diagnostics_from_power(0.0)["sigma_lsb"]))
+
+    def test_check_antennas_prints_and_returns_quantizer_metrics(self) -> None:
+        active_phys = [0, 4, 32, 36]
+        ant_rows = []
+        for raw_id in range(64):
+            phys_id = 63 - raw_id
+            is_act = phys_id in active_phys
+            ant_rows.append(
+                {
+                    "raw_id": raw_id,
+                    "physical_id": phys_id,
+                    "pol": raw_id % 2,
+                    "active": is_act,
+                    "status": "HEALTHY" if is_act else "DEAD",
+                    "power": 4.0 if is_act else 0.0,
+                    "clip_fraction": 0.0001 if is_act else 0.0,
+                    "coherence": 0.25 if is_act else 0.0,
+                }
+            )
+
+        mat_sb0 = np.zeros((stt.N_CHAN_SUBBAND, 64), dtype=np.float64)
+        mat_sb1 = np.zeros((stt.N_CHAN_SUBBAND, 64), dtype=np.float64)
+        for p in active_phys:
+            r = 63 - p
+            mat_sb0[:, r] = 4.0
+            mat_sb1[:, r] = 8.0
+
+        def fake_get(_url: str, path: str, timeout: float = 5.0):
+            if path == "/antenna_mask/status":
+                return {
+                    "active_physical_antennas": active_phys,
+                    "dead_antennas": 60,
+                    "saturated_antennas": 0,
+                    "masked_antennas": 60,
+                    "antennas": ant_rows,
+                }
+            if path == "/antenna_mask/channel_power":
+                return {
+                    "num_elements": 64,
+                    "subbands": [
+                        {
+                            "subband": 0,
+                            "freq_start_hz": stt.SUBBAND0_START_HZ,
+                            "num_local_freq": stt.N_CHAN_SUBBAND,
+                            "has_channel_power": True,
+                            "mean_active_power": [4.0] * stt.N_CHAN_SUBBAND,
+                            "channel_power": mat_sb0.tolist(),
+                        },
+                        {
+                            "subband": 1,
+                            "freq_start_hz": stt.SUBBAND1_START_HZ,
+                            "num_local_freq": stt.N_CHAN_SUBBAND,
+                            "has_channel_power": True,
+                            "mean_active_power": [8.0] * stt.N_CHAN_SUBBAND,
+                            "channel_power": mat_sb1.tolist(),
+                        },
+                    ],
+                }
+            raise AssertionError(f"Unexpected GET {path}")
+
+        buf = io.StringIO()
+        with mock.patch.object(stt, "http_get_json", side_effect=fake_get), contextlib.redirect_stdout(buf):
+            summary = stt.check_antennas("http://127.0.0.1:12048")
+
+        out = buf.getvalue()
+        self.assertIn("sigma=", out)
+        self.assertIn("eta_q=", out)
+        self.assertIn("Subband 0", out)
+        self.assertIn("Subband 1", out)
+        self.assertEqual(summary["active_physical_antennas"], active_phys)
+        self.assertEqual(len(summary["subbands"]), 2)
+        self.assertAlmostEqual(summary["subbands"][0]["sigma_lsb"], 1.9579, places=3)
+        self.assertAlmostEqual(summary["subbands"][1]["sigma_lsb"], 2.7997, places=3)
+
+        active_enriched = [a for a in summary["antennas"] if a["active"]]
+        self.assertEqual(len(active_enriched), 4)
+        for row in active_enriched:
+            self.assertAlmostEqual(row["sigma_lsb"], 1.9579, places=3)
+            self.assertAlmostEqual(row["eta_q"], 0.9583, places=3)
+            self.assertTrue(row["in_optimal_window"])
+            self.assertAlmostEqual(row["subband_channel_power"][0], 4.0)
+            self.assertAlmostEqual(row["subband_channel_power"][1], 8.0)
+
+        # Also verify graceful behavior when /antenna_mask/channel_power returns 404
+        def fake_get_404(_url: str, path: str, timeout: float = 5.0):
+            if path == "/antenna_mask/channel_power":
+                raise urllib.error.HTTPError(path, 404, "Not Found", hdrs=None, fp=None)
+            return fake_get(_url, path, timeout=timeout)
+
+        with mock.patch.object(stt, "http_get_json", side_effect=fake_get_404), contextlib.redirect_stdout(io.StringIO()):
+            summary_404 = stt.check_antennas("http://127.0.0.1:12048")
+        self.assertEqual(summary_404["subbands"], [])
+        self.assertEqual(len([a for a in summary_404["antennas"] if a["active"]]), 4)
 
 
 if __name__ == "__main__":

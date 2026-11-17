@@ -6,8 +6,10 @@ Supports:
                              and improved RFI mitigation across captured beam_power_freq*.bin files.
   --push-rfi-gains           Compute smooth passband pre-whitening gains g(f) from raw RFI
                              channel power (with fallback) and push to POST /rfi_mitigation/set_gains.
-  --reload-cal-gains <npy>   Hot-reload complex calibration gains via POST /direct_tracker/reload_gains.
-  --check-antennas           Inspect GET /antenna_mask/status and GET /antenna_mask/channel_power.
+  --reload-cal-gains <path>  Hot-reload complex calibration gains (.npy or charts-utils .npz)
+                             via POST /direct_tracker/reload_gains (supports --zero-flagged).
+  --check-antennas           Inspect GET /antenna_mask/status and GET /antenna_mask/channel_power,
+                             including 4-bit F-engine quantizer sigma [LSB] and eta_q diagnostics.
   --daemon                   Run the full closed-loop self-tuning sidecar (raw pre-whitening gains,
                              selective latched-EMA recovery, incremental 1.024s RFI/bandpass audit,
                              conservative static-notch hysteresis, and calibration hot-reload watch).
@@ -21,10 +23,12 @@ from collections import deque
 import datetime
 import glob
 import json
+import math
 import os
 import re
 import struct
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -39,6 +43,7 @@ SUBBAND1_START_HZ = 400.8e6
 CHANNEL_WIDTH_HZ = 300.0e3
 N_CHAN_SUBBAND = 336
 N_CHAN_TOTAL = 672
+N_ANT_DEFAULT = 64
 DEFAULT_SIGNAL_ANTS = [0, 4, 32, 36]
 DEFAULT_OLD_GAINS = "/data/calibration/corr_1113/gains_corr_1113_0_4_32_36_interp_672x64.npy"
 DEFAULT_NEW_GAINS = "/data/calibration/corr_1113/gains_corr_1113_0_4_32_36_freqflt_672x64.npy"
@@ -924,6 +929,425 @@ def validate_gains_file(
     return True, f"ok shape={g.shape} norm_med={med:.3f}"
 
 
+_SIBLING_REPOS_DIR = Path(__file__).resolve().parents[2]
+_FLAG_MASK_KEYS = ("flagged_channels", "bursty_channels", "incoherent_channels")
+
+# 4-bit mid-tread F-engine quantizer parameters (Mena-Parra et al. 2018 / charts_sefd.quantization)
+_QUANT_SAT = 7
+_QUANT_THRESHOLDS = np.arange(1, 15, dtype=np.float64) - 7.5
+_QUANT_OPTIMAL_SIGMA = (2.0 ** -0.1, 2.0 ** 1.4)
+_QUANT_GRID = 2.0 ** np.linspace(-6.0, 8.0, 4001)
+_QUANT_ERF = np.vectorize(math.erf, otypes=[float])
+
+
+def _quant_sigma_hat2(sigma: Any) -> np.ndarray:
+    s = np.maximum(np.asarray(sigma, dtype=np.float64), 1e-300)[..., None]
+    return 2.0 * (_QUANT_SAT**2) - 2.0 * np.sum(_QUANT_THRESHOLDS * _QUANT_ERF(_QUANT_THRESHOLDS / s), axis=-1)
+
+
+def _quant_a_coef(sigma: Any) -> np.ndarray:
+    sc = np.maximum(np.asarray(sigma, dtype=np.float64), 1e-300)[..., None] / math.sqrt(2.0)
+    phi = np.exp(-0.5 * (_QUANT_THRESHOLDS / sc) ** 2) / math.sqrt(2.0 * math.pi)
+    return np.sum(phi, axis=-1) / sc[..., 0] - 1.0
+
+
+_QUANT_SH2_GRID = _quant_sigma_hat2(_QUANT_GRID)
+
+
+def _fallback_sigma_from_power(power: Any) -> np.ndarray:
+    p = np.asarray(power, dtype=np.float64)
+    s = np.interp(p, _QUANT_SH2_GRID, _QUANT_GRID, left=np.nan, right=np.nan)
+    return np.where((p > _QUANT_SH2_GRID[0]) & (p < _QUANT_SH2_GRID[-1]), s, np.nan)
+
+
+def _fallback_eta_from_sigma(sigma: Any) -> np.ndarray:
+    s = np.asarray(sigma, dtype=np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return ((1.0 + _quant_a_coef(s)) * s) ** 2 / _quant_sigma_hat2(s)
+
+
+def _fallback_q_rms(sigma: Any) -> np.ndarray:
+    return 2.0 * np.sqrt(_quant_sigma_hat2(sigma))
+
+
+def _fallback_in_optimal_window(sigma: Any) -> np.ndarray:
+    s = np.asarray(sigma, dtype=np.float64)
+    return (s >= _QUANT_OPTIMAL_SIGMA[0]) & (s <= _QUANT_OPTIMAL_SIGMA[1])
+
+
+def _ensure_sibling_on_path(repo_name: str) -> None:
+    candidate = _SIBLING_REPOS_DIR / repo_name
+    if candidate.is_dir() and str(candidate) not in sys.path:
+        sys.path.insert(0, str(candidate))
+
+
+def _import_charts_sefd_quantization() -> Any:
+    try:
+        from charts_sefd import quantization  # type: ignore[import-not-found]
+        return quantization
+    except ImportError:
+        _ensure_sibling_on_path("charts-constants")
+        _ensure_sibling_on_path("charts-utils")
+        _ensure_sibling_on_path("charts-sefd")
+        try:
+            from charts_sefd import quantization  # type: ignore[import-not-found]
+            return quantization
+        except ImportError:
+            return None
+
+
+def _import_charts_utils_cal() -> Tuple[Any, Any]:
+    try:
+        from charts_utils.cal.gains import load_gains  # type: ignore[import-not-found]
+    except ImportError:
+        _ensure_sibling_on_path("charts-constants")
+        _ensure_sibling_on_path("charts-utils")
+        try:
+            from charts_utils.cal.gains import load_gains  # type: ignore[import-not-found]
+        except ImportError:
+            return None, None
+    try:
+        from charts_utils.cal.kotekan_calibration import (  # type: ignore[import-not-found]
+            gains_to_tracker_calibration,
+        )
+    except ImportError:
+        gains_to_tracker_calibration = None
+    return load_gains, gains_to_tracker_calibration
+
+
+def quantizer_diagnostics_from_power(mean_power_lsb2: Any) -> Dict[str, Any]:
+    """Compute 4-bit F-engine input sigma [LSB], eta_q, q_rms, and optimal-window status."""
+    is_scalar = np.ndim(mean_power_lsb2) == 0
+    pwr_arr = np.asarray(mean_power_lsb2, dtype=np.float64)
+    qmod = _import_charts_sefd_quantization()
+    if qmod is not None:
+        sigma = np.asarray(qmod.sigma_from_power(pwr_arr), dtype=np.float64)
+        eta_q = np.asarray(qmod.eta_from_sigma(sigma), dtype=np.float64)
+        q_rms = np.asarray(qmod.q_rms(sigma), dtype=np.float64)
+        in_opt = np.asarray(qmod.in_optimal_window(sigma), dtype=bool)
+        source = "charts_sefd.quantization"
+    else:
+        sigma = np.asarray(_fallback_sigma_from_power(pwr_arr), dtype=np.float64)
+        eta_q = np.asarray(_fallback_eta_from_sigma(sigma), dtype=np.float64)
+        q_rms = np.asarray(_fallback_q_rms(sigma), dtype=np.float64)
+        in_opt = np.asarray(_fallback_in_optimal_window(sigma), dtype=bool)
+        source = "analytical_fallback"
+
+    if is_scalar:
+        return {
+            "sigma_lsb": float(sigma.item()),
+            "eta_q": float(eta_q.item()),
+            "q_rms": float(q_rms.item()),
+            "in_optimal_window": bool(in_opt.item()),
+            "source": source,
+        }
+    return {
+        "sigma_lsb": sigma,
+        "eta_q": eta_q,
+        "q_rms": q_rms,
+        "in_optimal_window": in_opt,
+        "source": source,
+    }
+
+
+def _expand_gain_array_and_flags(
+    gains: np.ndarray,
+    antennas: Optional[List[int]],
+    n_ant: int,
+    flag_masks: Optional[Dict[str, Any]] = None,
+    zero_flagged: bool = False,
+) -> Tuple[np.ndarray, List[int], int]:
+    """Fallback expansion matching charts_utils.cal.kotekan_calibration.gains_to_tracker_calibration."""
+    if n_ant <= 0:
+        raise ValueError("n_ant must be positive.")
+    arr = np.asarray(gains)
+    if arr.ndim == 3:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            arr = np.nanmean(arr, axis=-1)
+    if arr.ndim != 2:
+        raise ValueError(f"gains must be 2-D or 3-D; got shape {arr.shape}.")
+
+    resolved = list(range(arr.shape[1])) if antennas is None else [int(a) for a in antennas]
+    if len(resolved) != arr.shape[1]:
+        raise ValueError(f"{len(resolved)} antenna indices given for {arr.shape[1]} gain columns.")
+    if resolved and (len(set(resolved)) != len(resolved) or min(resolved) < 0 or max(resolved) >= n_ant):
+        raise ValueError(f"Antenna indices must be unique and in 0..{n_ant - 1}.")
+
+    n_freq = arr.shape[0]
+    table = np.zeros((n_freq, n_ant), dtype=np.complex64)
+    if resolved:
+        col = np.asarray(arr, dtype=np.complex128).astype(np.complex64)
+        col = np.where(np.isfinite(col), col, np.complex64(0.0))
+        table[:, resolved] = col
+
+    zeroed_channels = 0
+    if zero_flagged and flag_masks:
+        bad = np.zeros(n_freq, dtype=bool)
+        for key in _FLAG_MASK_KEYS:
+            raw = flag_masks.get(key)
+            if raw is not None:
+                m = np.asarray(raw, dtype=bool)
+                if m.shape != (n_freq,):
+                    raise ValueError(f"{key!r} must have shape ({n_freq},); got {m.shape}.")
+                bad |= m
+        zeroed_channels = int(np.count_nonzero(bad))
+        table[bad, :] = np.complex64(0.0)
+    return table, resolved, zeroed_channels
+
+
+def expand_npz_gains_to_npy(
+    npz_path: str,
+    out_npy_path: Optional[str] = None,
+    n_ant: int = N_ANT_DEFAULT,
+    zero_flagged: bool = False,
+) -> Tuple[str, Dict[str, Any]]:
+    """Expand a charts-utils .npz gain solution into a (n_freq, n_ant) complex64 .npy table."""
+    src = Path(npz_path)
+    if not src.is_file():
+        raise FileNotFoundError(f"Calibration gain file not found: {npz_path}")
+
+    load_gains_fn, to_tracker_fn = _import_charts_utils_cal()
+    source_tag = "numpy_fallback"
+    zeroed_channels = 0
+
+    if load_gains_fn is not None and to_tracker_fn is not None:
+        sol = load_gains_fn(src)
+        table = np.asarray(
+            to_tracker_fn(sol, n_ant=n_ant, zero_flagged=zero_flagged), dtype=np.complex64
+        )
+        antennas = (
+            list(sol.antennas) if sol.antennas is not None else list(range(sol.gains.shape[1]))
+        )
+        if zero_flagged:
+            bad = np.zeros(table.shape[0], dtype=bool)
+            for key in _FLAG_MASK_KEYS:
+                raw = sol.meta.get(key)
+                if raw is not None:
+                    bad |= np.asarray(raw, dtype=bool)
+            zeroed_channels = int(np.count_nonzero(bad))
+        source_tag = "charts_utils.cal"
+    elif load_gains_fn is not None:
+        sol = load_gains_fn(src)
+        table, antennas, zeroed_channels = _expand_gain_array_and_flags(
+            sol.gains, sol.antennas, n_ant, flag_masks=sol.meta, zero_flagged=zero_flagged
+        )
+        source_tag = "charts_utils.cal.gains_fallback"
+    else:
+        with np.load(src, allow_pickle=False) as data:
+            if "gains" not in data.files:
+                raise ValueError(f"'{src}' has no 'gains' array (keys: {data.files}).")
+            gains = np.asarray(data["gains"])
+            fmt_ver = (
+                int(np.asarray(data["format_version"]).item())
+                if "format_version" in data.files
+                else 1
+            )
+            if fmt_ver < 2:
+                gains = np.conj(gains)
+            antennas_raw = (
+                [int(a) for a in np.asarray(data["antennas"]).ravel()]
+                if "antennas" in data.files
+                else None
+            )
+            flag_masks = {k: data[k] for k in _FLAG_MASK_KEYS if k in data.files}
+        table, antennas, zeroed_channels = _expand_gain_array_and_flags(
+            gains, antennas_raw, n_ant, flag_masks=flag_masks, zero_flagged=zero_flagged
+        )
+
+    n_freq, n_cols = table.shape
+    if out_npy_path is not None:
+        out_path = Path(out_npy_path)
+    else:
+        tag = "_freqflt" if zero_flagged else ""
+        fname = f"{src.stem}{tag}_{n_freq}x{n_cols}.npy"
+        out_path = src.with_name(fname)
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            probe = out_path.with_suffix(".tmp_write_check")
+            probe.write_bytes(b"")
+            probe.unlink()
+        except OSError:
+            out_path = Path(tempfile.gettempdir()) / fname
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "wb") as fh:
+        np.save(fh, np.ascontiguousarray(table, dtype=np.complex64))
+
+    info = {
+        "source": source_tag,
+        "input_npz": str(src.resolve()),
+        "output_npy": str(out_path.resolve()),
+        "shape": list(table.shape),
+        "dtype": str(table.dtype),
+        "antennas": antennas,
+        "zero_flagged": bool(zero_flagged),
+        "zeroed_channels": zeroed_channels,
+    }
+    return str(out_path.resolve()), info
+
+
+def reload_calibration_gains(
+    base_url: str,
+    gains_path: str,
+    zero_flagged: bool = False,
+    out_npy_path: Optional[str] = None,
+    n_ant: int = N_ANT_DEFAULT,
+) -> Dict[str, Any]:
+    """Hot-reload tracker gains from a .npy or charts-utils .npz file."""
+    if str(gains_path).lower().endswith(".npz"):
+        npy_path, info = expand_npz_gains_to_npy(
+            gains_path, out_npy_path=out_npy_path, n_ant=n_ant, zero_flagged=zero_flagged
+        )
+        print(
+            f"Expanded {Path(gains_path).name} -> {npy_path} "
+            f"(shape={tuple(info['shape'])}, dtype={info['dtype']}, "
+            f"ants={info['antennas']}, zero_flagged={info['zero_flagged']}, "
+            f"zeroed_ch={info['zeroed_channels']}, via={info['source']})"
+        )
+        resolved = npy_path
+    else:
+        resolved = str(Path(gains_path).resolve())
+    return http_post_json(base_url, "/direct_tracker/reload_gains", {"gains_file": resolved})
+
+
+def _fmt_opt(val: float, fmt: str = "{:.3f}") -> str:
+    return fmt.format(val) if math.isfinite(val) else "n/a"
+
+
+def check_antennas(base_url: str) -> Dict[str, Any]:
+    """Inspect /antenna_mask/status and /antenna_mask/channel_power with 4-bit quantizer diagnostics."""
+    status = http_get_json(base_url, "/antenna_mask/status")
+    chan_payload: Dict[str, Any] = {}
+    try:
+        chan_payload = http_get_json(base_url, "/antenna_mask/channel_power")
+    except urllib.error.HTTPError as err:
+        if err.code != 404:
+            raise
+
+    subbands = chan_payload.get("subbands", []) if isinstance(chan_payload, dict) else []
+    sb_elem_med: Dict[int, Dict[int, float]] = {}
+    subband_summaries: List[Dict[str, Any]] = []
+
+    for sub in subbands:
+        sb_id = int(sub.get("subband", len(subband_summaries)))
+        if not sub.get("has_channel_power") or not sub.get("channel_power"):
+            continue
+        mat = np.asarray(sub["channel_power"], dtype=np.float64)
+        if mat.ndim != 2 or mat.shape[0] == 0:
+            continue
+        per_elem: Dict[int, float] = {}
+        for raw_idx in range(mat.shape[1]):
+            col = mat[:, raw_idx]
+            pos = col[np.isfinite(col) & (col > 0.0)]
+            per_elem[raw_idx] = float(np.median(pos)) if pos.size else 0.0
+        sb_elem_med[sb_id] = per_elem
+
+        mean_act = np.asarray(sub.get("mean_active_power", []), dtype=np.float64)
+        pos_act = mean_act[np.isfinite(mean_act) & (mean_act > 0.0)]
+        med_act_pwr = float(np.median(pos_act)) if pos_act.size else 0.0
+        q_sub = quantizer_diagnostics_from_power(med_act_pwr)
+        subband_summaries.append(
+            {
+                "subband": sb_id,
+                "freq_start_hz": float(sub.get("freq_start_hz", 0.0)),
+                "num_local_freq": int(sub.get("num_local_freq", mat.shape[0])),
+                "median_active_power_lsb2": med_act_pwr,
+                "sigma_lsb": q_sub["sigma_lsb"],
+                "eta_q": q_sub["eta_q"],
+                "in_optimal_window": q_sub["in_optimal_window"],
+            }
+        )
+
+    ant_rows = status.get("antennas", [])
+    enriched_rows: List[Dict[str, Any]] = []
+    quant_source = "analytical_fallback"
+
+    for row in ant_rows:
+        raw_id = int(row.get("raw_id", row.get("id", row.get("antenna_id", 0))))
+        phys_id = int(row.get("physical_id", raw_id))
+        power_lsb2 = float(row.get("power", row.get("power_rms", 0.0)))
+        sb_powers = {sb_id: elem_map.get(raw_id, 0.0) for sb_id, elem_map in sorted(sb_elem_med.items())}
+        diag_power = power_lsb2
+        if diag_power <= 0.0 and sb_powers:
+            pos_sb = [v for v in sb_powers.values() if v > 0.0]
+            if pos_sb:
+                diag_power = float(np.mean(pos_sb))
+
+        q_diag = quantizer_diagnostics_from_power(diag_power)
+        quant_source = q_diag["source"]
+        enriched = dict(row)
+        enriched.update(
+            {
+                "raw_id": raw_id,
+                "physical_id": phys_id,
+                "power_lsb2": power_lsb2,
+                "diag_power_lsb2": diag_power,
+                "sigma_lsb": q_diag["sigma_lsb"],
+                "eta_q": q_diag["eta_q"],
+                "q_rms": q_diag["q_rms"],
+                "in_optimal_window": q_diag["in_optimal_window"],
+                "subband_channel_power": sb_powers,
+            }
+        )
+        enriched_rows.append(enriched)
+
+    active_phys = status.get("active_physical_antennas", [])
+    print(
+        f"=== CHARTS Antenna & 4-Bit Quantizer Check ({quant_source}, "
+        f"opt window [{_QUANT_OPTIMAL_SIGMA[0]:.2f}, {_QUANT_OPTIMAL_SIGMA[1]:.2f}] LSB) ==="
+    )
+    print(
+        f"Active ({len(active_phys)}): {active_phys} | "
+        f"dead={status.get('dead_antennas', 0)} "
+        f"sat={status.get('saturated_antennas', 0)} "
+        f"masked={status.get('masked_antennas', 0)}"
+    )
+
+    display_rows = [
+        r
+        for r in enriched_rows
+        if r.get("active") or r.get("diag_power_lsb2", 0.0) > 0.0 or r.get("status") not in ("DEAD", None)
+    ]
+    if not display_rows:
+        display_rows = enriched_rows[:8]
+
+    for r in display_rows:
+        sb_str = " ".join(
+            f"sb{sb}={p:.2f}" for sb, p in sorted(r["subband_channel_power"].items())
+        )
+        sb_part = f" {sb_str}" if sb_str else ""
+        opt_tag = "OPT" if r["in_optimal_window"] else "OUT"
+        print(
+            f"  ant={r['physical_id']:2d}(raw={r['raw_id']:2d}) "
+            f"status={str(r.get('status', '?')):11s} "
+            f"pwr={r['power_lsb2']:6.2f} LSB^2{sb_part} | "
+            f"sigma={_fmt_opt(r['sigma_lsb'], '{:.3f}'):>6s} LSB "
+            f"eta_q={_fmt_opt(r['eta_q'], '{:.4f}'):>6s} [{opt_tag}] "
+            f"clip={float(r.get('clip_fraction', 0.0)):.4f} "
+            f"coh={float(r.get('coherence', 0.0)):.3f}"
+        )
+
+    for s in subband_summaries:
+        opt_tag = "OPT" if s["in_optimal_window"] else "OUT"
+        print(
+            f"  Subband {s['subband']} ({s['freq_start_hz'] / 1e6:.1f} MHz): "
+            f"med_active_pwr={s['median_active_power_lsb2']:.2f} LSB^2 | "
+            f"sigma={_fmt_opt(s['sigma_lsb'], '{:.3f}')} LSB "
+            f"eta_q={_fmt_opt(s['eta_q'], '{:.4f}')} [{opt_tag}]"
+        )
+
+    return {
+        "active_physical_antennas": active_phys,
+        "dead_antennas": status.get("dead_antennas", 0),
+        "saturated_antennas": status.get("saturated_antennas", 0),
+        "masked_antennas": status.get("masked_antennas", 0),
+        "quantizer_source": quant_source,
+        "antennas": enriched_rows,
+        "subbands": subband_summaries,
+    }
+
+
 def _write_json_atomic(path: str, payload: Dict[str, Any]) -> None:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -1396,13 +1820,18 @@ def main() -> int:
     )
     parser.add_argument(
         "--reload-cal-gains",
-        metavar="NPY_PATH",
-        help="Hot-reload tracker complex gains via POST /direct_tracker/reload_gains",
+        metavar="GAIN_PATH",
+        help="Hot-reload tracker complex gains (.npy or charts-utils .npz) via POST /direct_tracker/reload_gains",
+    )
+    parser.add_argument(
+        "--zero-flagged",
+        action="store_true",
+        help="When --reload-cal-gains receives a .npz file, zero flagged/bursty/incoherent channels",
     )
     parser.add_argument(
         "--check-antennas",
         action="store_true",
-        help="Query /antenna_mask/status and /antenna_mask/channel_power",
+        help="Query /antenna_mask/status and /antenna_mask/channel_power with 4-bit quantizer diagnostics",
     )
     parser.add_argument("--daemon", action="store_true", help="Run periodic closed-loop sidecar")
     parser.add_argument("--once", action="store_true", help="Run one daemon step and exit")
@@ -1443,9 +1872,10 @@ def main() -> int:
         )
 
     if args.reload_cal_gains:
-        resolved = str(Path(args.reload_cal_gains).resolve())
-        reply = http_post_json(
-            args.url, "/direct_tracker/reload_gains", {"gains_file": resolved}
+        reply = reload_calibration_gains(
+            args.url,
+            args.reload_cal_gains,
+            zero_flagged=args.zero_flagged,
         )
         print(f"Reloaded calibration gains: {reply}")
 
