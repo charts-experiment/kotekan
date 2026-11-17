@@ -156,7 +156,7 @@ def plot_uv_coverage(ax: plt.Axes, wavelength_m: float = 0.857):
     ax.grid(True, linestyle="--", color="#334155", alpha=0.6)
 
     # 2D hexbin or scatter for density
-    hb = ax.hexbin(u_arr, v_arr, gridsize=30, cmap="mako", mincnt=1, edgecolors="none",)
+    hb = ax.hexbin(u_arr, v_arr, gridsize=30, cmap="viridis", mincnt=1, edgecolors="none",)
 
     ax.set_title(
         f"Interferometric Baseline Distribution (2016 Baselines)\n"

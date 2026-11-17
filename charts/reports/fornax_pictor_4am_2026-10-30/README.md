@@ -62,17 +62,25 @@ Over the `3.78`-hour (`13,600`-second) observation, Kotekan processed **`265,620
 
 ## 4. Complete Posterior Analysis Figures (`E0`–`E8`, `2.973 GB`)
 
-````carousel
-![Fig 0: 4-Hour System CPU, RAM, RTX 5090, CUDA Kernel Timings & 2.973 GB Spaced Disk Staircase](/home/fpalma/.gemini/antigravity-cli/brain/be03c2c4-062f-43ca-ab21-8006b1427135/fig0_4am_system_and_kernel_telemetry.png)
-<!-- slide -->
-![Fig 1: 64-Antenna Auto-Masking Stability Across 112 Cold-Sky Snapshots ([40, 37, 32, 5, 0] Locked)](/home/fpalma/.gemini/antigravity-cli/brain/be03c2c4-062f-43ca-ab21-8006b1427135/fig1_4am_antenna_mask_stability.png)
-<!-- slide -->
-![Fig 2: Fornax A (W/E) & Pictor A (W/E) Elevation Crossover and Topocentric (l, m) Trajectories](/home/fpalma/.gemini/antigravity-cli/brain/be03c2c4-062f-43ca-ab21-8006b1427135/fig2_4am_astrometry_and_transit_trajectories.png)
-<!-- slide -->
-![Fig 3: 4-Beam Full-Band Spectra (300–501.3 MHz) & 9-Epoch Stacked Waterfalls](/home/fpalma/.gemini/antigravity-cli/brain/be03c2c4-062f-43ca-ab21-8006b1427135/fig3_4am_4beam_spectra_and_waterfalls.png)
-<!-- slide -->
-![Fig 4: 9-Epoch Transit Light Curves (Streams 0 & 1), West-minus-East Lobe Differential & 4x4 Beam Coherence](/home/fpalma/.gemini/antigravity-cli/brain/be03c2c4-062f-43ca-ab21-8006b1427135/fig4_4am_transit_lightcurves_and_west_east_offset.png)
-````
+### Fig 0: System and Kernel Telemetry
+
+![4-Hour System CPU, RAM, RTX 5090, CUDA Kernel Timings & 2.973 GB Spaced Disk Staircase](fig0_4am_system_and_kernel_telemetry.png)
+
+### Fig 1: Antenna Mask Stability
+
+![64-Antenna Auto-Masking Stability Across 112 Cold-Sky Snapshots (40, 37, 32, 5, 0 Locked)](fig1_4am_antenna_mask_stability.png)
+
+### Fig 2: Astrometry and Transit Trajectories
+
+![Fornax A (W/E) & Pictor A (W/E) Elevation Crossover and Topocentric (l, m) Trajectories](fig2_4am_astrometry_and_transit_trajectories.png)
+
+### Fig 3: Spectra and Waterfalls
+
+![4-Beam Full-Band Spectra (300–501.3 MHz) & 9-Epoch Stacked Waterfalls](fig3_4am_4beam_spectra_and_waterfalls.png)
+
+### Fig 4: Transit Light Curves
+
+![9-Epoch Transit Light Curves (Streams 0 & 1), West-minus-East Lobe Differential & 4x4 Beam Coherence](fig4_4am_transit_lightcurves_and_west_east_offset.png)
 
 ---
 

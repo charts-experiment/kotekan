@@ -72,9 +72,11 @@ const TargetInfo* lookup_target(const std::string& scenario_name) {
 }
 
 inline uint8_t pack_int4x2(int8_t real, int8_t imag) {
-    uint8_t r_nibble = static_cast<uint8_t>(real & 0x0F);
-    uint8_t i_nibble = static_cast<uint8_t>((imag & 0x0F) << 4);
-    return r_nibble | i_nibble;
+    // int4x2_swapped_withoffset: unsigned nibble [0..15] = value + 8,
+    // imag in low nibble, real in high nibble (swapped)
+    uint8_t r_nibble = static_cast<uint8_t>((real + 8) & 0x0F);
+    uint8_t i_nibble = static_cast<uint8_t>((imag + 8) & 0x0F);
+    return (r_nibble << 4) | i_nibble;
 }
 } // namespace
 
