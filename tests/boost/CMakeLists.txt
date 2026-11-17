@@ -482,3 +482,10 @@ add_executable(test_ProcessPacketMask test_ProcessPacketMask.cpp
                                       ${KOTEKAN_SOURCE_DIR}/lib/stages/ProcessPacketMask.cpp)
 target_link_libraries(test_ProcessPacketMask PRIVATE kotekan_core kotekan_metadata kotekan_utils
                                                      libexternal)
+
+add_executable(test_chartsAccumulate test_chartsAccumulate.cpp
+                                     ${KOTEKAN_SOURCE_DIR}/lib/stages/chartsAccumulate.cpp)
+target_link_libraries(test_chartsAccumulate PRIVATE kotekan_core kotekan_metadata kotekan_utils
+                                                    libexternal)
+target_include_directories(test_chartsAccumulate PRIVATE ${KOTEKAN_SOURCE_DIR}/lib/stages
+                                                         ${KOTEKAN_SOURCE_DIR}/lib/metadata)

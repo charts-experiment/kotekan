@@ -249,6 +249,9 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
 
     {
         std::lock_guard<std::mutex> lock(group->group_mutex);
+        if (group->gains_file.empty() && !_gains_file.empty()) {
+            group->gains_file = _gains_file;
+        }
         group->config.ensure_beam_capacity(static_cast<std::size_t>(_max_beams));
         group->config.site = DirectSiteLocation{site_lat_deg, site_lon_deg, site_alt_m};
 
@@ -733,6 +736,8 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                 reply["spacing_m"] = group->config.spacing_m;
                 reply["active_elements"] = group->config.num_active_antennas;
                 reply["active_antennas"] = group->config.num_active_antennas;
+                reply["gains_file"] = group->gains_file;
+                reply["gains_generation"] = group->gains_generation;
 
                 reply["site"] = {{"lat_deg", group->config.site.lat_deg},
                                  {"lon_deg", group->config.site.lon_deg},
@@ -974,6 +979,69 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
             rest.register_get_callback(group->rest_prefix + "/targets", targets_cb);
             rest.register_get_callback("/beam_tracker/targets", targets_cb);
 
+            // 11. Hot-reload Calibration Gains Endpoint
+            auto reload_gains_cb = [group](connectionInstance& conn, nlohmann::json& j) {
+                try {
+                    struct GainsCheckSpec {
+                        int32_t first_chan;
+                        int32_t n_freq;
+                        int32_t n_ant;
+                        std::vector<int> subset;
+                        bool conj;
+                    };
+                    std::string target_file;
+                    std::vector<GainsCheckSpec> specs;
+                    {
+                        std::lock_guard<std::mutex> lk(group->group_mutex);
+                        target_file = (j.contains("gains_file") && j["gains_file"].is_string())
+                                          ? j["gains_file"].get<std::string>()
+                                          : group->gains_file;
+                        for (auto* inst : group->instances) {
+                            specs.push_back({inst->get_gains_first_channel(),
+                                             inst->get_num_local_freq(), inst->get_num_antennas(),
+                                             inst->get_gains_antennas(),
+                                             inst->get_conjugate_gains()});
+                        }
+                    }
+
+                    if (target_file.empty()) {
+                        conn.send_error("No gains_file configured or supplied\n",
+                                        HTTP_RESPONSE::BAD_REQUEST);
+                        return;
+                    }
+
+                    // Validate path, shape, and slice coverage off-lock before advancing generation
+                    for (const auto& s : specs) {
+                        (void)charts_mvdr::load_gains_npy(target_file, s.first_chan, s.n_freq,
+                                                          s.n_ant, s.subset, s.conj);
+                    }
+
+                    std::uint64_t new_gen = 0;
+                    std::size_t n_inst = 0;
+                    {
+                        std::lock_guard<std::mutex> lk(group->group_mutex);
+                        group->gains_file = target_file;
+                        group->gains_generation++;
+                        new_gen = group->gains_generation;
+                        n_inst = group->instances.size();
+                    }
+
+                    nlohmann::json reply;
+                    reply["status"] = "ok";
+                    reply["gains_file"] = target_file;
+                    reply["gains_generation"] = new_gen;
+                    reply["instances"] = n_inst;
+                    conn.send_json_reply(reply);
+                } catch (const std::exception& e) {
+                    conn.send_error(fmt::format("Failed to reload gains: {:s}\n", e.what()),
+                                    HTTP_RESPONSE::BAD_REQUEST);
+                }
+            };
+            rest.register_post_callback(group->rest_prefix + "/reload_gains", reload_gains_cb);
+            if (group->rest_prefix == "/direct_tracker") {
+                rest.register_post_callback("/beam_tracker/reload_gains", reload_gains_cb);
+            }
+
             group->endpoints_registered = true;
         }
     }
@@ -1209,12 +1277,14 @@ void cudaDirectBeamTrackerCommand::allocate_device_buffers() {
     upload_wavenumbers(nullptr);
 
     DirectBeamTrackerConfig cfg;
+    std::uint64_t init_gains_gen = 1;
     {
         std::lock_guard<std::mutex> reg_lock(_registry_mutex);
         auto it = _tracker_groups.find(_rest_prefix);
         if (it != _tracker_groups.end()) {
             std::lock_guard<std::mutex> glock(it->second->group_mutex);
             cfg = it->second->config;
+            init_gains_gen = it->second->gains_generation;
         } else {
             cfg = get_shared_config();
         }
@@ -1225,8 +1295,10 @@ void cudaDirectBeamTrackerCommand::allocate_device_buffers() {
     CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(_d_norm_taper, cfg.normalized_taper_weights.data(),
                                        _num_elements * sizeof(float), cudaMemcpyHostToDevice));
 
-    if (!_gains_file.empty())
+    if (!_gains_file.empty()) {
         upload_calibration_gains(cfg);
+        _applied_gains_generation = init_gains_gen;
+    }
 
     if (_grid_mode_enabled) {
         _h_grid_lms = generate_sky_grid_directions(_grid_step);
@@ -1459,9 +1531,15 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
     }
 
     DirectBeamTrackerConfig current_config;
+    std::string group_gains_file = _gains_file;
+    std::uint64_t group_gains_gen = _applied_gains_generation;
     if (group) {
         std::lock_guard<std::mutex> glock(group->group_mutex);
         current_config = group->config;
+        if (!group->gains_file.empty()) {
+            group_gains_file = group->gains_file;
+        }
+        group_gains_gen = group->gains_generation;
     } else {
         current_config = get_shared_config();
     }
@@ -1554,8 +1632,12 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
         upload_wavenumbers(stream);
         subband_reloaded = true;
     }
-    if (!_gains_file.empty() && _loaded_gains_first_channel != _gains_first_channel) {
+    if (!group_gains_file.empty()
+        && (_applied_gains_generation != group_gains_gen
+            || _loaded_gains_first_channel != _gains_first_channel)) {
+        _gains_file = group_gains_file;
         upload_calibration_gains(current_config, stream);
+        _applied_gains_generation = group_gains_gen;
         subband_reloaded = true;
     }
     if (subband_reloaded) {

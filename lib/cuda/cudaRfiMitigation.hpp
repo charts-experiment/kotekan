@@ -75,7 +75,9 @@ struct RfiMitigationConfig {
     float saturation_fraction_threshold = 0.02f;  ///< Fraction of samples saturated at +-7 to trigger flag (2%)
 
     bool enable_morphology_sir = true;            ///< Morphological dilation to cover pulse edges & skirts
-    int edge_channels_to_ignore = 16;             ///< Exclude PFB roll-off channels from passband baseline
+    int edge_channels_to_ignore = 0;              ///< Exclude PFB roll-off channels from passband baseline
+    bool enable_persistent_ema = true;            ///< Track slow cross-frame temporal median baseline (EMA)
+    float ema_alpha = 0.02f;                      ///< Exponential moving average update factor per clean frame
 
     /// Optional static frequency notch intervals [start_mhz, end_mhz]
     std::vector<std::pair<double, double>> static_notch_bands_mhz;
@@ -146,7 +148,9 @@ void launch_evaluate_rfi_flags(const float* __restrict__ d_chunk_power,
                                std::size_t n_freq, int num_active_antennas,
                                std::size_t eff_samples_per_chunk, const RfiMitigationConfig& cfg,
                                cudaStream_t stream,
-                               const std::uint8_t* __restrict__ d_exempt_channels = nullptr);
+                               const std::uint8_t* __restrict__ d_exempt_channels = nullptr,
+                               float* __restrict__ d_ema_power = nullptr,
+                               float* __restrict__ d_ema_mad = nullptr);
 
 inline void launch_evaluate_rfi_flags(const float* __restrict__ d_chunk_power,
                                       const float* __restrict__ d_chunk_sk,
