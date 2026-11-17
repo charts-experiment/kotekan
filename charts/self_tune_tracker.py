@@ -996,23 +996,18 @@ def _import_charts_sefd_quantization() -> Any:
             return None
 
 
-def _import_charts_utils_cal() -> Tuple[Any, Any]:
+def _import_charts_utils_cal() -> Any:
     try:
         from charts_utils.cal.gains import load_gains  # type: ignore[import-not-found]
+        return load_gains
     except ImportError:
         _ensure_sibling_on_path("charts-constants")
         _ensure_sibling_on_path("charts-utils")
         try:
             from charts_utils.cal.gains import load_gains  # type: ignore[import-not-found]
+            return load_gains
         except ImportError:
-            return None, None
-    try:
-        from charts_utils.cal.kotekan_calibration import (  # type: ignore[import-not-found]
-            gains_to_tracker_calibration,
-        )
-    except ImportError:
-        gains_to_tracker_calibration = None
-    return load_gains, gains_to_tracker_calibration
+            return None
 
 
 def quantizer_diagnostics_from_power(mean_power_lsb2: Any) -> Dict[str, Any]:
@@ -1057,7 +1052,7 @@ def _expand_gain_array_and_flags(
     flag_masks: Optional[Dict[str, Any]] = None,
     zero_flagged: bool = False,
 ) -> Tuple[np.ndarray, List[int], int]:
-    """Fallback expansion matching charts_utils.cal.kotekan_calibration.gains_to_tracker_calibration."""
+    """Expand solved gains to (n_freq, n_ant) complex64 with 0+0j for uncalibrated/flagged entries."""
     if n_ant <= 0:
         raise ValueError("n_ant must be positive.")
     arr = np.asarray(gains)
@@ -1107,32 +1102,13 @@ def expand_npz_gains_to_npy(
     if not src.is_file():
         raise FileNotFoundError(f"Calibration gain file not found: {npz_path}")
 
-    load_gains_fn, to_tracker_fn = _import_charts_utils_cal()
-    source_tag = "numpy_fallback"
-    zeroed_channels = 0
-
-    if load_gains_fn is not None and to_tracker_fn is not None:
-        sol = load_gains_fn(src)
-        table = np.asarray(
-            to_tracker_fn(sol, n_ant=n_ant, zero_flagged=zero_flagged), dtype=np.complex64
-        )
-        antennas = (
-            list(sol.antennas) if sol.antennas is not None else list(range(sol.gains.shape[1]))
-        )
-        if zero_flagged:
-            bad = np.zeros(table.shape[0], dtype=bool)
-            for key in _FLAG_MASK_KEYS:
-                raw = sol.meta.get(key)
-                if raw is not None:
-                    bad |= np.asarray(raw, dtype=bool)
-            zeroed_channels = int(np.count_nonzero(bad))
-        source_tag = "charts_utils.cal"
-    elif load_gains_fn is not None:
+    load_gains_fn = _import_charts_utils_cal()
+    if load_gains_fn is not None:
         sol = load_gains_fn(src)
         table, antennas, zeroed_channels = _expand_gain_array_and_flags(
             sol.gains, sol.antennas, n_ant, flag_masks=sol.meta, zero_flagged=zero_flagged
         )
-        source_tag = "charts_utils.cal.gains_fallback"
+        source_tag = "charts_utils.cal.gains"
     else:
         with np.load(src, allow_pickle=False) as data:
             if "gains" not in data.files:
@@ -1154,6 +1130,7 @@ def expand_npz_gains_to_npy(
         table, antennas, zeroed_channels = _expand_gain_array_and_flags(
             gains, antennas_raw, n_ant, flag_masks=flag_masks, zero_flagged=zero_flagged
         )
+        source_tag = "numpy_fallback"
 
     n_freq, n_cols = table.shape
     if out_npy_path is not None:

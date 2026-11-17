@@ -407,14 +407,14 @@ class TestSelfTuneTrackerSefdUtilsIntegration(unittest.TestCase):
             )
             arr_lib = np.load(npy_lib)
 
-            with mock.patch.object(stt, "_import_charts_utils_cal", return_value=(None, None)):
+            with mock.patch.object(stt, "_import_charts_utils_cal", return_value=None):
                 out_fb = Path(tmp) / "out_fb.npy"
                 npy_fb, info_fb = stt.expand_npz_gains_to_npy(
                     str(npz_path), out_npy_path=str(out_fb), zero_flagged=False
                 )
                 arr_fb = np.load(npy_fb)
 
-            self.assertEqual(info_lib["source"], "charts_utils.cal")
+            self.assertEqual(info_lib["source"], "charts_utils.cal.gains")
             self.assertEqual(info_fb["source"], "numpy_fallback")
             self.assertEqual(arr_lib.shape, (stt.N_CHAN_TOTAL, 64))
             self.assertEqual(arr_lib.dtype, np.complex64)
@@ -440,7 +440,7 @@ class TestSelfTuneTrackerSefdUtilsIntegration(unittest.TestCase):
             np.testing.assert_allclose(arr_zf[~expected_bad, :], arr_lib[~expected_bad, :])
 
             # Fallback zero_flagged=True must also match
-            with mock.patch.object(stt, "_import_charts_utils_cal", return_value=(None, None)):
+            with mock.patch.object(stt, "_import_charts_utils_cal", return_value=None):
                 out_zf_fb = Path(tmp) / "out_zf_fb.npy"
                 npy_zf_fb, _ = stt.expand_npz_gains_to_npy(
                     str(npz_path), out_npy_path=str(out_zf_fb), zero_flagged=True
@@ -456,7 +456,7 @@ class TestSelfTuneTrackerSefdUtilsIntegration(unittest.TestCase):
                 npy_lib, _ = stt.expand_npz_gains_to_npy(
                     str(npz_path), out_npy_path=str(Path(tmp) / "v1_lib.npy")
                 )
-            with mock.patch.object(stt, "_import_charts_utils_cal", return_value=(None, None)):
+            with mock.patch.object(stt, "_import_charts_utils_cal", return_value=None):
                 npy_fb, _ = stt.expand_npz_gains_to_npy(
                     str(npz_path), out_npy_path=str(Path(tmp) / "v1_fb.npy")
                 )
