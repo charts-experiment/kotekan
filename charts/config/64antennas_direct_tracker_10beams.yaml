@@ -7,6 +7,7 @@
 # - Retains rfsocHandlerShuffle and zeroSamples stages for lost-packet mitigation.
 # - Replaces correlation / baseband disk recording with real-time GPU Direct Beamformer:
 #     * cudaAntennaMaskCommand: Dynamic dead/saturated/clipped antenna blanking
+#     * cudaRfiMitigationCommand: Multi-statistic GPU RFI detection & blanking
 #     * cudaDirectBeamTrackerCommand: Zero-window precalculated steering weights
 #       with fused 4-beam warp tiling (beam_tile_size=4) and CUDA Graph execution.
 # - Outputs complex voltages (float2) for up to max_beams concurrent sky directions.
@@ -281,10 +282,41 @@ gpu:
           clip_fraction_threshold: 0.15
           revival_frames: 5
 
+    # Real-Time GPU RFI Detection & Voltage Blanking
+        - name: cudaRfiMitigationCommand
+          gpu_mem_voltage: voltage_0
+          gpu_mem_rfi_mask: rfi_mask_0
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          buffer_depth: 3
+          antenna_order: "descending"
+          active_antennas: [0, 4, 5, 6, 32]
+          freq_start_hz: 300000000.0
+          freq_step_hz: 300000.0
+          enabled: true
+          blank_voltages_enabled: true
+          time_chunk_size: 256
+          sample_stride: 1
+          enable_sk_check: true
+          sk_sigma_threshold: 4.5
+          enable_time_burst_check: true
+          burst_sigma_threshold: 5.0
+          enable_freq_mad_check: true
+          freq_window_half_width: 8
+          mad_sigma_threshold: 6.0
+          enable_saturation_check: true
+          saturation_fraction_threshold: 0.02
+          enable_morphology_sir: true
+          edge_channels_to_ignore: 0
+          enable_persistent_ema: true
+          ema_alpha: 0.02
+
     # Direct Fused Multi-Beam Tracker Kernel
         - name: cudaDirectBeamTrackerCommand
           gpu_mem_voltage: voltage_0
           gpu_mem_formed_beams: formed_beams_0
+          gpu_mem_rfi_mask: rfi_mask_0
           num_elements: 64
           num_local_freq: 336
           samples_per_data_set: 15360
@@ -379,10 +411,41 @@ gpu:
           clip_fraction_threshold: 0.15
           revival_frames: 5
 
+    # Real-Time GPU RFI Detection & Voltage Blanking
+        - name: cudaRfiMitigationCommand
+          gpu_mem_voltage: voltage_1
+          gpu_mem_rfi_mask: rfi_mask_1
+          num_elements: 64
+          num_local_freq: 336
+          samples_per_data_set: 15360
+          buffer_depth: 3
+          antenna_order: "descending"
+          active_antennas: [0, 4, 5, 6, 32]
+          freq_start_hz: 400800000.0
+          freq_step_hz: 300000.0
+          enabled: true
+          blank_voltages_enabled: true
+          time_chunk_size: 256
+          sample_stride: 1
+          enable_sk_check: true
+          sk_sigma_threshold: 4.5
+          enable_time_burst_check: true
+          burst_sigma_threshold: 5.0
+          enable_freq_mad_check: true
+          freq_window_half_width: 8
+          mad_sigma_threshold: 6.0
+          enable_saturation_check: true
+          saturation_fraction_threshold: 0.02
+          enable_morphology_sir: true
+          edge_channels_to_ignore: 0
+          enable_persistent_ema: true
+          ema_alpha: 0.02
+
     # Direct Fused Multi-Beam Tracker Kernel
         - name: cudaDirectBeamTrackerCommand
           gpu_mem_voltage: voltage_1
           gpu_mem_formed_beams: formed_beams_1
+          gpu_mem_rfi_mask: rfi_mask_1
           num_elements: 64
           num_local_freq: 336
           samples_per_data_set: 15360
