@@ -120,6 +120,12 @@ cudaRfiMitigationCommand::cudaRfiMitigationCommand(Config& config, const std::st
         config.get_default<float>(unique_name, "saturation_fraction_threshold", 0.02f);
     init_cfg.enable_morphology_sir =
         config.get_default<bool>(unique_name, "enable_morphology_sir", true);
+    init_cfg.enable_freq_shoulder_check =
+        config.get_default<bool>(unique_name, "enable_freq_shoulder_check", true);
+    init_cfg.freq_shoulder_half_width = std::max<int>(
+        0, std::min<int>(8, config.get_default<int>(unique_name, "freq_shoulder_half_width", 2)));
+    init_cfg.shoulder_sigma_threshold =
+        std::max<float>(0.5f, config.get_default<float>(unique_name, "shoulder_sigma_threshold", 2.5f));
     init_cfg.edge_channels_to_ignore = std::max<int>(
         0, config.get_default<int>(unique_name, "edge_channels_to_ignore", 0));
     init_cfg.enable_persistent_ema =
@@ -184,6 +190,9 @@ cudaRfiMitigationCommand::cudaRfiMitigationCommand(Config& config, const std::st
                 reply["enable_saturation_check"] = cfg.enable_saturation_check;
                 reply["saturation_fraction_threshold"] = cfg.saturation_fraction_threshold;
                 reply["enable_morphology_sir"] = cfg.enable_morphology_sir;
+                reply["enable_freq_shoulder_check"] = cfg.enable_freq_shoulder_check;
+                reply["freq_shoulder_half_width"] = cfg.freq_shoulder_half_width;
+                reply["shoulder_sigma_threshold"] = cfg.shoulder_sigma_threshold;
                 reply["edge_channels_to_ignore"] = cfg.edge_channels_to_ignore;
                 reply["enable_persistent_ema"] = cfg.enable_persistent_ema;
                 reply["ema_alpha"] = cfg.ema_alpha;
@@ -334,6 +343,15 @@ cudaRfiMitigationCommand::cudaRfiMitigationCommand(Config& config, const std::st
                         if (j.contains("enable_morphology_sir"))
                             _shared_config.enable_morphology_sir =
                                 j["enable_morphology_sir"].get<bool>();
+                        if (j.contains("enable_freq_shoulder_check"))
+                            _shared_config.enable_freq_shoulder_check =
+                                j["enable_freq_shoulder_check"].get<bool>();
+                        if (j.contains("freq_shoulder_half_width"))
+                            _shared_config.freq_shoulder_half_width = std::max<int>(
+                                0, std::min<int>(8, j["freq_shoulder_half_width"].get<int>()));
+                        if (j.contains("shoulder_sigma_threshold"))
+                            _shared_config.shoulder_sigma_threshold = std::max<float>(
+                                0.5f, j["shoulder_sigma_threshold"].get<float>());
                         if (j.contains("edge_channels_to_ignore"))
                             _shared_config.edge_channels_to_ignore =
                                 std::max<int>(0, j["edge_channels_to_ignore"].get<int>());
@@ -852,7 +870,7 @@ cudaEvent_t cudaRfiMitigationCommand::execute(cudaPipelineState& /*pipestate*/,
 }
 
 void cudaRfiMitigationCommand::finalize_frame() {
-    gpuCommand::finalize_frame();
+    cudaCommand::finalize_frame();
     if (!_last_frame_enabled || !_h_channel_stats) {
         return;
     }

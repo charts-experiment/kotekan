@@ -34,7 +34,8 @@ enum RfiFlagReason : std::uint8_t {
     RFI_FREQ_MAD = 1 << 3,        ///< Narrowband frequency power outlier relative to sliding passband
     RFI_STATIC_NOTCH = 1 << 4,    ///< Inside a configured static notch band (e.g. MUOS)
     RFI_SATURATION_CLIP = 1 << 5, ///< Excessive fraction of samples saturated at [-7, +7] limits
-    RFI_MORPHOLOGY_SIR = 1 << 6   ///< Flagged by Scale-Invariant Rank / morphological burst expansion
+    RFI_MORPHOLOGY_SIR = 1 << 6,  ///< Flagged by Scale-Invariant Rank / morphological burst expansion
+    RFI_FREQ_SHOULDER = 1 << 7    ///< Flagged by conditional frequency-shoulder dilation around RFI
 };
 
 /**
@@ -75,6 +76,9 @@ struct RfiMitigationConfig {
     float saturation_fraction_threshold = 0.02f;  ///< Fraction of samples saturated at +-7 to trigger flag (2%)
 
     bool enable_morphology_sir = true;            ///< Morphological dilation to cover pulse edges & skirts
+    bool enable_freq_shoulder_check = true;       ///< Conditional frequency-shoulder dilation around RFI
+    int freq_shoulder_half_width = 2;             ///< Neighbor frequency radius (channels) for shoulder checks
+    float shoulder_sigma_threshold = 2.5f;        ///< Elevation Z-score required to flag a neighbor shoulder
     int edge_channels_to_ignore = 0;              ///< Exclude PFB roll-off channels from passband baseline
     bool enable_persistent_ema = true;            ///< Track slow cross-frame temporal median baseline (EMA)
     float ema_alpha = 0.02f;                      ///< Exponential moving average update factor per clean frame

@@ -191,6 +191,17 @@ constexpr int MAX_STACK_CHUNKS = 128;
 constexpr int MAX_SHARED_FREQ = 1024;
 constexpr int MAX_FREQ_WINDOW = 65;
 
+__device__ __forceinline__ float prewhite_power(float p_val, const float* __restrict__ gains,
+                                              int idx) {
+    if (gains != nullptr) {
+        const float g = gains[idx];
+        if (g > 0.0f) {
+            return p_val / (g * g);
+        }
+    }
+    return p_val;
+}
+
 __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
     const float* __restrict__ d_chunk_power, const float* __restrict__ d_chunk_sk,
     const float* __restrict__ d_chunk_sat_fraction, const std::uint8_t* __restrict__ d_static_notch,
@@ -199,6 +210,7 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
     float sk_sigma_unit, bool enable_sk, float sk_sigma_thresh, bool enable_burst,
     float burst_sigma_thresh, bool enable_freq_mad, int freq_win_half, float mad_sigma_thresh,
     bool enable_saturation_check, float sat_fraction_thresh, bool enable_morphology_sir,
+    bool enable_freq_shoulder, int freq_shoulder_half_width, float shoulder_sigma_thresh,
     int edge_channels_to_ignore, const std::uint8_t* __restrict__ d_exempt_channels,
     bool enable_persistent_ema, float ema_alpha, float* __restrict__ d_ema_power,
     float* __restrict__ d_ema_mad) {
@@ -207,6 +219,12 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
     __shared__ float s_chan_mad[MAX_SHARED_FREQ];
     __shared__ float s_chan_med_sk[MAX_SHARED_FREQ];
     __shared__ float s_chan_mad_sk[MAX_SHARED_FREQ];
+    __shared__ float s_chan_local_med[MAX_SHARED_FREQ];
+    __shared__ float s_chan_local_mad[MAX_SHARED_FREQ];
+    __shared__ float s_chan_ref_med[MAX_SHARED_FREQ];
+    __shared__ float s_chan_burst_sigma[MAX_SHARED_FREQ];
+    __shared__ float s_chan_freq_z[MAX_SHARED_FREQ];
+    __shared__ std::uint8_t s_chan_exempt[MAX_SHARED_FREQ];
 
     const int n_f = static_cast<int>((n_freq < MAX_SHARED_FREQ) ? n_freq : MAX_SHARED_FREQ);
     const int nc = static_cast<int>((n_chunks < MAX_STACK_CHUNKS) ? n_chunks : MAX_STACK_CHUNKS);
@@ -244,7 +262,7 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
     }
     __syncthreads();
 
-    // Phase B: Frequency baseline and chunk flag evaluation
+    // Phase B: Frequency baseline and primary per-channel chunk flag evaluation
     for (int f = static_cast<int>(threadIdx.x); f < n_f; f += static_cast<int>(blockDim.x)) {
         const float chan_med_p = s_chan_med[f];
         const float chan_mad_p = s_chan_mad[f];
@@ -252,95 +270,87 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
         float freq_z = 0.0f;
         bool is_freq_mad_outlier = false;
         float local_sk_center = 1.0f;
+        float local_med = 0.0f;
+        float local_mad = 0.0f;
 
         // Skip edge channels near PFB roll-off from triggering passband false alarms
         const bool is_edge = (f < edge_channels_to_ignore) || (f >= n_f - edge_channels_to_ignore);
 
         if (n_f >= 5 && !is_edge) {
             float win_buf[MAX_FREQ_WINDOW];
+            float p_orig[MAX_FREQ_WINDOW];
             float sk_win_buf[MAX_FREQ_WINDOW];
             int half_w = freq_win_half;
             if (2 * half_w + 1 > MAX_FREQ_WINDOW)
                 half_w = (MAX_FREQ_WINDOW - 1) / 2;
+            const int target_n = min(2 * half_w + 1, MAX_FREQ_WINDOW);
 
-            int f_lo = f - half_w;
-            int f_hi = f + half_w;
-            if (f_lo < 0) {
-                f_hi = min(n_f - 1, f_hi - f_lo);
-                f_lo = 0;
-            }
-            if (f_hi >= n_f) {
-                f_lo = max(0, f_lo - (f_hi - (n_f - 1)));
-                f_hi = n_f - 1;
-            }
-
+            // Prefer unnotched channels expanded symmetrically around f so dense static notches
+            // (e.g. 424-430 MHz) neither shrink nor bias the passband reference.
+            bool skip_notched = (d_static_notch != nullptr);
             int count = 0;
-            for (int idx = f_lo; idx <= f_hi && count < MAX_FREQ_WINDOW; ++idx) {
-                // If digital gains provided, evaluate pre-quantizer spectra P_pre = P / g^2
-                float p_val = s_chan_med[idx];
-                if (d_channel_gains != nullptr) {
-                    const float g = d_channel_gains[idx];
-                    if (g > 0.0f) {
-                        p_val /= (g * g);
+            for (int pass = 0; pass < 2; ++pass) {
+                count = 0;
+                for (int d = 0; count < target_n && (f - d >= 0 || f + d < n_f); ++d) {
+                    const int offsets[2] = {-d, d};
+                    const int n_off = (d == 0) ? 1 : 2;
+                    for (int k = 0; k < n_off && count < target_n; ++k) {
+                        const int idx = f + offsets[k];
+                        if (idx < 0 || idx >= n_f)
+                            continue;
+                        if (skip_notched && d_static_notch[idx] != 0)
+                            continue;
+                        const float pw = prewhite_power(s_chan_med[idx], d_channel_gains, idx);
+                        p_orig[count] = pw;
+                        win_buf[count] = pw;
+                        sk_win_buf[count] = s_chan_med_sk[idx];
+                        count++;
                     }
                 }
-                win_buf[count] = p_val;
-                sk_win_buf[count] = s_chan_med_sk[idx];
-                count++;
+                if (count >= 3 || !skip_notched)
+                    break;
+                skip_notched = false;
             }
-            const float local_med = device_median_small(win_buf, count);
+            const float prelim_med = device_median_small(win_buf, count);
             const float raw_sk_med = device_median_small(sk_win_buf, count);
             if (raw_sk_med > 0.70f && raw_sk_med < 1.30f) {
                 local_sk_center = raw_sk_med;
             }
 
-            if (enable_freq_mad) {
-                int count_dev = 0;
-                for (int idx = f_lo; idx <= f_hi && count_dev < MAX_FREQ_WINDOW; ++idx) {
-                    float p_val = s_chan_med[idx];
-                    if (d_channel_gains != nullptr) {
-                        const float g = d_channel_gains[idx];
-                        if (g > 0.0f) {
-                            p_val /= (g * g);
-                        }
-                    }
-                    win_buf[count_dev++] = fabsf(p_val - local_med);
-                }
-                const float prelim_mad = 1.4826f * device_median_small(win_buf, count_dev);
+            for (int i = 0; i < count; ++i) {
+                win_buf[i] = fabsf(p_orig[i] - prelim_med);
+            }
+            const float prelim_mad = 1.4826f * device_median_small(win_buf, count);
 
-                // Iterative outlier-rejection (f-engine smooth_bandpass):
-                // exclude channels with dev >= 4.0 * max(prelim_mad, 0.05 * local_med)
-                const float mad_cutoff = 4.0f * fmaxf(prelim_mad, 0.05f * local_med);
-                int inlier_count = 0;
-                for (int idx = f_lo; idx <= f_hi && inlier_count < MAX_FREQ_WINDOW; ++idx) {
-                    float p_val = s_chan_med[idx];
-                    if (d_channel_gains != nullptr) {
-                        const float g = d_channel_gains[idx];
-                        if (g > 0.0f) {
-                            p_val /= (g * g);
-                        }
-                    }
-                    const float dev = fabsf(p_val - local_med);
-                    if (dev < mad_cutoff) {
-                        win_buf[inlier_count++] = dev;
-                    }
+            // Iterative outlier-rejection (f-engine smooth_bandpass):
+            // exclude RFI-contaminated neighbors before computing the clean passband median & MAD
+            // so wide burst edges (e.g. 10-channel 431.7-434.4 MHz) do not pull local_med onto f.
+            const float mad_cutoff = 4.0f * fmaxf(prelim_mad, 0.05f * prelim_med);
+            int inlier_count = 0;
+            for (int i = 0; i < count; ++i) {
+                if (fabsf(p_orig[i] - prelim_med) < mad_cutoff) {
+                    const float p_inlier = p_orig[i];
+                    p_orig[inlier_count] = p_inlier;
+                    win_buf[inlier_count] = p_inlier;
+                    inlier_count++;
                 }
-                const float local_mad = (inlier_count >= 3)
-                                            ? (1.4826f * device_median_small(win_buf, inlier_count))
-                                            : prelim_mad;
-                const float eff_sigma = fmaxf(local_mad, 0.05f * fmaxf(local_med, 1.0e-3f));
+            }
+            if (inlier_count >= 3) {
+                local_med = device_median_small(win_buf, inlier_count);
+                for (int i = 0; i < inlier_count; ++i) {
+                    win_buf[i] = fabsf(p_orig[i] - local_med);
+                }
+                local_mad = 1.4826f * device_median_small(win_buf, inlier_count);
+            } else {
+                local_med = prelim_med;
+                local_mad = prelim_mad;
+            }
+            const float eff_sigma = fmaxf(local_mad, 0.05f * fmaxf(local_med, 1.0e-3f));
 
-                float p_target = chan_med_p;
-                if (d_channel_gains != nullptr) {
-                    const float g = d_channel_gains[f];
-                    if (g > 0.0f) {
-                        p_target /= (g * g);
-                    }
-                }
-                freq_z = (p_target - local_med) / eff_sigma;
-                if (freq_z >= mad_sigma_thresh) {
-                    is_freq_mad_outlier = true;
-                }
+            const float p_target = prewhite_power(chan_med_p, d_channel_gains, f);
+            freq_z = (p_target - local_med) / eff_sigma;
+            if (enable_freq_mad && freq_z >= mad_sigma_thresh) {
+                is_freq_mad_outlier = true;
             }
         }
 
@@ -364,21 +374,17 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
             (use_ema && ema_mad > 0.0f) ? fminf(chan_mad_p, ema_mad) : chan_mad_p;
         const float burst_eff_sigma = fmaxf(ref_mad_p, 0.025f * fmaxf(ref_med_p, 1.0e-3f));
 
-        float sum_p = 0.0f;
-        float sum_sk = 0.0f;
-        float max_sk = 0.0f;
-        std::uint32_t flagged_chunks = 0U;
-        std::uint32_t chan_flag_bits = 0U;
+        s_chan_local_med[f] = local_med;
+        s_chan_local_mad[f] = local_mad;
+        s_chan_ref_med[f] = ref_med_p;
+        s_chan_burst_sigma[f] = burst_eff_sigma;
+        s_chan_freq_z[f] = freq_z;
+        s_chan_exempt[f] = is_exempt ? 1U : 0U;
 
         for (std::size_t c = 0; c < n_chunks; ++c) {
             const std::size_t idx = c * n_freq + static_cast<std::size_t>(f);
             const float p = d_chunk_power[idx];
             const float sk = d_chunk_sk[idx];
-
-            sum_p += p;
-            sum_sk += sk;
-            if (c == 0 || sk > max_sk)
-                max_sk = sk;
 
             std::uint8_t mask_bits = RFI_CLEAN;
             if (is_static_notch) {
@@ -408,10 +414,6 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
             }
 
             d_chunk_rfi_mask[idx] = is_exempt ? RFI_CLEAN : mask_bits;
-            if (mask_bits != RFI_CLEAN) {
-                flagged_chunks++;
-                chan_flag_bits |= static_cast<std::uint32_t>(mask_bits);
-            }
         }
 
         // 1D Temporal SIR / Morphology Dilation: expand flags to neighboring chunks with elevated power
@@ -426,8 +428,6 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
                             const float prev_z = (prev_p - ref_med_p) / burst_eff_sigma;
                             if (prev_z >= 0.5f * burst_sigma_thresh) {
                                 d_chunk_rfi_mask[prev_idx] |= RFI_MORPHOLOGY_SIR;
-                                flagged_chunks++;
-                                chan_flag_bits |= static_cast<std::uint32_t>(RFI_MORPHOLOGY_SIR);
                             }
                         }
                     }
@@ -438,16 +438,107 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
                             const float next_z = (next_p - ref_med_p) / burst_eff_sigma;
                             if (next_z >= 0.5f * burst_sigma_thresh) {
                                 d_chunk_rfi_mask[next_idx] |= RFI_MORPHOLOGY_SIR;
-                                flagged_chunks++;
-                                chan_flag_bits |= static_cast<std::uint32_t>(RFI_MORPHOLOGY_SIR);
                             }
                         }
                     }
                 }
             }
         }
+    }
+    __syncthreads();
+
+    // Phase C: Conditional frequency-shoulder dilation around core RFI, EMA update, and telemetry
+    constexpr std::uint8_t kCoreRfiFlags = RFI_SK_IMPULSIVE | RFI_SK_CW_TONE | RFI_TIME_BURST
+                                           | RFI_FREQ_MAD | RFI_STATIC_NOTCH | RFI_SATURATION_CLIP;
+    constexpr std::uint8_t kBurstRfiFlags =
+        RFI_SK_IMPULSIVE | RFI_TIME_BURST | RFI_SATURATION_CLIP;
+    for (int f = static_cast<int>(threadIdx.x); f < n_f; f += static_cast<int>(blockDim.x)) {
+        const bool is_exempt = (s_chan_exempt[f] != 0U);
+        const float chan_med_p = s_chan_med[f];
+        const float chan_mad_p = s_chan_mad[f];
+        const float local_med = s_chan_local_med[f];
+        const float local_mad = s_chan_local_mad[f];
+        const float ref_med_p = s_chan_ref_med[f];
+        const float burst_eff_sigma = s_chan_burst_sigma[f];
+        const float freq_z = s_chan_freq_z[f];
+        const float shoulder_freq_sigma = fmaxf(local_mad, 0.04f * fmaxf(local_med, 1.0e-3f));
+        const float p_med_corr = prewhite_power(chan_med_p, d_channel_gains, f);
+        const float chan_shoulder_freq_z =
+            (local_med > 0.0f) ? ((p_med_corr - local_med) / shoulder_freq_sigma) : 0.0f;
+
+        if (!is_exempt && enable_freq_shoulder && freq_shoulder_half_width > 0) {
+            const int nb_lo = max(0, f - freq_shoulder_half_width);
+            const int nb_hi = min(n_f - 1, f + freq_shoulder_half_width);
+            for (std::size_t c = 0; c < n_chunks; ++c) {
+                const std::size_t idx = c * n_freq + static_cast<std::size_t>(f);
+                if (d_chunk_rfi_mask[idx] != RFI_CLEAN)
+                    continue;
+                bool neighbor_core = false;
+                bool neighbor_burst = false;
+                for (int nb = nb_lo; nb <= nb_hi; ++nb) {
+                    if (nb == f)
+                        continue;
+                    const std::uint8_t nb_mask =
+                        d_chunk_rfi_mask[c * n_freq + static_cast<std::size_t>(nb)];
+                    if ((nb_mask & kCoreRfiFlags) != 0U) {
+                        neighbor_core = true;
+                    }
+                    if ((nb_mask & kBurstRfiFlags) != 0U) {
+                        neighbor_burst = true;
+                    }
+                }
+                if (!neighbor_core)
+                    continue;
+
+                const float p = d_chunk_power[idx];
+                const float burst_z_chunk =
+                    (burst_eff_sigma > 0.0f) ? ((p - ref_med_p) / burst_eff_sigma) : 0.0f;
+                const float p_corr = prewhite_power(p, d_channel_gains, f);
+                const float chunk_shoulder_freq_z =
+                    (local_med > 0.0f) ? ((p_corr - local_med) / shoulder_freq_sigma) : 0.0f;
+                const bool spectral_shoulder =
+                    (chan_shoulder_freq_z >= shoulder_sigma_thresh)
+                    && (chunk_shoulder_freq_z >= 0.5f * shoulder_sigma_thresh);
+                const bool burst_shoulder =
+                    neighbor_burst && (burst_z_chunk >= shoulder_sigma_thresh);
+                if (spectral_shoulder || burst_shoulder) {
+                    d_chunk_rfi_mask[idx] |= RFI_FREQ_SHOULDER;
+                }
+            }
+        }
+
+        float sum_p = 0.0f;
+        float sum_sk = 0.0f;
+        float max_sk = 0.0f;
+        std::uint32_t flagged_chunks = 0U;
+        std::uint32_t chan_flag_bits = 0U;
+        for (std::size_t c = 0; c < n_chunks; ++c) {
+            const std::size_t idx = c * n_freq + static_cast<std::size_t>(f);
+            const float p = d_chunk_power[idx];
+            const float sk = d_chunk_sk[idx];
+            sum_p += p;
+            sum_sk += sk;
+            if (c == 0 || sk > max_sk)
+                max_sk = sk;
+            const std::uint8_t mask_bits = d_chunk_rfi_mask[idx];
+            if (mask_bits != RFI_CLEAN) {
+                flagged_chunks++;
+                chan_flag_bits |= static_cast<std::uint32_t>(mask_bits);
+            } else if (is_exempt) {
+                // Exempt channels still report diagnostic flag bits in channel stats.
+                if (enable_burst && n_chunks >= 4
+                    && ((p - ref_med_p) / burst_eff_sigma) >= burst_sigma_thresh) {
+                    chan_flag_bits |= static_cast<std::uint32_t>(RFI_TIME_BURST);
+                }
+                if (enable_freq_mad && freq_z >= mad_sigma_thresh) {
+                    chan_flag_bits |= static_cast<std::uint32_t>(RFI_FREQ_MAD);
+                }
+            }
+        }
 
         if (enable_persistent_ema && d_ema_power != nullptr && !is_exempt && chan_med_p > 0.0f) {
+            const float ema_p = d_ema_power[f];
+            const float ema_mad = (d_ema_mad != nullptr) ? d_ema_mad[f] : 0.0f;
             const float alpha = fminf(fmaxf(ema_alpha, 1.0e-4f), 1.0f);
             if (ema_p <= 0.0f) {
                 if (flagged_chunks == 0U) {
@@ -577,6 +668,7 @@ void launch_evaluate_rfi_flags(const float* __restrict__ d_chunk_power,
         cfg.sk_sigma_threshold, cfg.enable_time_burst_check, cfg.burst_sigma_threshold,
         cfg.enable_freq_mad_check, cfg.freq_window_half_width, cfg.mad_sigma_threshold,
         cfg.enable_saturation_check, cfg.saturation_fraction_threshold, cfg.enable_morphology_sir,
+        cfg.enable_freq_shoulder_check, cfg.freq_shoulder_half_width, cfg.shoulder_sigma_threshold,
         cfg.edge_channels_to_ignore, d_exempt_channels, cfg.enable_persistent_ema, cfg.ema_alpha,
         d_ema_power, d_ema_mad);
 }
