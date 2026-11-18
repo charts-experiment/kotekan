@@ -303,7 +303,7 @@ zero_samples_1:
 # GPU Tri-Engine Processing Stages (NVIDIA RTX 5090 GPU 0)
 # ------------------------------------------------------------------------------
 gpu:
-    profiling: false
+    profiling: true
     kernel_path: "lib/cuda/kernels"
     frame_arrival_period: 0.0512
 

@@ -348,7 +348,6 @@ gpu:
           gpu_mem: formed_beams_1
           out_buf: host_formed_beams
 
-stages:
     gpu_0:
         kotekan_stage: cudaProcess
         gpu_id: 0

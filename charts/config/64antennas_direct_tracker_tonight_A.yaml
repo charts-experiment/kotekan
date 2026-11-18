@@ -160,7 +160,7 @@ zero_samples_1:
 # GPU Direct Multi-Beam Tracker & Antenna Health Stages
 # ------------------------------------------------------------------------------
 gpu:
-    profiling: false
+    profiling: true
 
   # Command Pipeline for Stream 0 (Frequencies 0..335, 300.0 - 400.5 MHz)
     commands_0: &command_list_0

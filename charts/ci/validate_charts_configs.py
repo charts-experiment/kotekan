@@ -6,6 +6,8 @@ built binary and checks stage types, duplicate buffers and metadata pools, but
 not what is looked up by name at construction time. This script needs no build:
 
 - every ``kotekan_stage`` is registered with REGISTER_KOTEKAN_STAGE in lib/;
+- every ``cudaProcess`` stage lives at ``/gpu/gpu_<N>`` so REST
+  ``/gpu_profile/gpu/gpu_<N>`` and ``/trackers`` paths stay uniform across nodes;
 - every command of a ``cudaProcess`` stage is registered with
   REGISTER_CUDA_COMMAND[_WITH_STATE] in lib/;
 - every ``dpdk_handler`` of a ``dpdkCore`` stage is one dpdkCore.cpp dispatches;
@@ -33,6 +35,7 @@ STAGE_RE = re.compile(r"REGISTER_KOTEKAN_STAGE\(\s*(\w+)")
 CUDA_RE = re.compile(r"REGISTER_CUDA_COMMAND(?:_WITH_STATE)?\(\s*(\w+)")
 HANDLER_RE = re.compile(r'handler_name\s*==\s*"(\w+)"')
 FULL_BAND_RE = re.compile(r"charts_full_band_channels\s*=\s*(\d+)")
+CUDA_STAGE_PATH_RE = re.compile(r"^/gpu/gpu_\d+$")
 
 
 def scan_source(repo=REPO):
@@ -67,6 +70,11 @@ def check_config(cfg, src):
             problems.append(f"{path}: unknown stage '{stage}'")
 
         if stage == "cudaProcess":
+            if not CUDA_STAGE_PATH_RE.match(path):
+                problems.append(
+                    f"{path}: cudaProcess stage must live at /gpu/gpu_<N> "
+                    f"so /gpu_profile/gpu/gpu_<N> stays uniform across nodes"
+                )
             for i, cmd in enumerate(block.get("commands") or []):
                 name = cmd.get("name") if isinstance(cmd, dict) else None
                 if name not in src["cuda"]:
@@ -132,12 +140,17 @@ def _cfg(handlers=None, commands=None, extra=None):
             {"dpdk_handler": "rfsocHandlerShuffle", "coarse_freq_start": 0, "num_local_freq": 336},
             {"dpdk_handler": "rfsocHandlerShuffle", "coarse_freq_start": 336, "num_local_freq": 336},
         ]},
-        "gpu": {"kotekan_stage": "cudaProcess", "commands": commands if commands is not None else [
-            {"name": "cudaInputData"},
-            {"name": "cudaAntennaMaskCommand"},
-            {"name": "cudaDirectBeamTrackerCommand"},
-            {"name": "cudaCorrelatorAstron", "freq_offset": 336},
-        ]},
+        "gpu": {
+            "gpu_0": {
+                "kotekan_stage": "cudaProcess",
+                "commands": commands if commands is not None else [
+                    {"name": "cudaInputData"},
+                    {"name": "cudaAntennaMaskCommand"},
+                    {"name": "cudaDirectBeamTrackerCommand"},
+                    {"name": "cudaCorrelatorAstron", "freq_offset": 336},
+                ],
+            }
+        },
     }
     cfg.update(extra or {})
     return cfg
@@ -147,6 +160,9 @@ def _cfg(handlers=None, commands=None, extra=None):
 SELF_TEST_CASES = [
     ("valid config", _cfg(), None),
     ("unknown stage", _cfg(extra={"w": {"kotekan_stage": "noSuchStage"}}), "unknown stage 'noSuchStage'"),
+    ("non-canonical cudaProcess path",
+     _cfg(extra={"stages": {"gpu_0": {"kotekan_stage": "cudaProcess", "commands": []}}}),
+     "must live at /gpu/gpu_<N>"),
     ("unknown GPU command", _cfg(commands=[{"name": "cudaFoo"}]), "unknown GPU command 'cudaFoo'"),
     ("unknown dpdk handler", _cfg(handlers=[{"dpdk_handler": "rfsocHandlerFoo"}]),
      "unknown dpdk_handler 'rfsocHandlerFoo'"),

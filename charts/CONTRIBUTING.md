@@ -83,6 +83,7 @@ from someone who knows that part, and a test on the node before release.
 - **Visibility convention:** `V_ab = x_a · conj(x_b)`, lower triangle, baseline index `a(a+1)/2 + b` with `a >= b`.
 - **Frequency shards:** 672 channels split into 2 × 336 (`freq_offset` / `coarse_freq_start` = 0 and 336).
 - **Voltages:** 4+4 bit complex. Correlator output int32, accumulated in int64.
+- **GPU stage & REST paths:** Declare every `cudaProcess` stage as `gpu_<N>` directly under `gpu:` (`/gpu/gpu_0`, `/gpu/gpu_1`), with `gpu.profiling: true` on production configs, so `/gpu_profile/gpu/gpu_<N>` and `/trackers` paths stay uniform across nodes and sites (`charts/ci/validate_charts_configs.py` enforces `/gpu/gpu_<N>`).
 
 If your change alters any of these, it also needs a matching change in charts-utils and a note in the PR.
 

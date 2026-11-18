@@ -239,7 +239,7 @@ zero_samples_1:
     sample_size: num_local_freq * num_elements
 
 gpu:
-    profiling: false
+    profiling: true
 
     commands_0: &command_list_0
         - name: cudaInputData
