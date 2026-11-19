@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Unit tests for closed-loop telemetry and daemon helpers in self_tune_tracker.py."""
 
+import json
 import os
+import socket
 import struct
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -132,8 +135,9 @@ class TestSelfTuneTrackerClosedLoop(unittest.TestCase):
         clean_streaks: dict[float, int] = {}
         managed: set[float] = set()
 
-        # Make 26 severe persistent RFI channels (more than MAX_AUTO_NOTCH_CHANNELS=24)
-        bad_indices = list(range(500, 526))
+        # Make MAX_AUTO_NOTCH_CHANNELS + 4 severe persistent RFI channels to verify cap & clean margin
+        n_bad = stt.MAX_AUTO_NOTCH_CHANNELS + 4
+        bad_indices = list(range(500, 500 + n_bad))
         for idx in bad_indices:
             channels[idx].update(
                 {
@@ -335,11 +339,17 @@ class TestSelfTuneTrackerClosedLoop(unittest.TestCase):
                 status = daemon.step()
 
             status_file = run_dir / "self_tune_status.json"
+            telemetry_file = run_dir / "telemetry_log.jsonl"
             self.assertTrue(status_file.is_file())
+            self.assertTrue(telemetry_file.is_file())
+            json.loads(status_file.read_text(encoding="utf-8"))
+            rows = stt.load_telemetry_records(str(telemetry_file))
+            self.assertEqual(len(rows), 1)
             self.assertTrue(status["rfi"]["raw_channels_api"])
             self.assertEqual(status["rfi"]["rfi_gains"]["source"], "rfi_mitigation/channels")
             self.assertAlmostEqual(status["rfi"]["overall_flagged_pct"], 2.0, places=2)
             self.assertEqual(status["pipeline"]["active_antennas"], stt.DEFAULT_SIGNAL_ANTS)
+            self.assertIn("environment", status)
             self.assertTrue(any(p == "/rfi_mitigation/set_gains" for p, _ in posted))
 
     def test_daemon_restores_managed_notches_from_status_json(self) -> None:
@@ -353,6 +363,377 @@ class TestSelfTuneTrackerClosedLoop(unittest.TestCase):
                 run_dir=str(run_dir),
             )
             self.assertEqual(daemon.managed_notch_freqs, {424.2, 469.2})
+
+    def test_detrend_dynamic_spectrum_removes_differential_subband_tilts(self) -> None:
+        rng = np.random.default_rng(42)
+        n_t, n_f = 40, stt.N_CHAN_TOTAL
+        freqs = stt._channel_freqs_mhz(n_f)
+        f0 = freqs[: stt.N_CHAN_SUBBAND]
+        f1 = freqs[stt.N_CHAN_SUBBAND :]
+        u0 = (f0 - np.mean(f0)) / 100.0
+        u1 = (f1 - np.mean(f1)) / 100.0
+
+        drift = np.linspace(-1.0, 1.0, n_t)
+        rel = rng.normal(0.0, 0.004, size=(n_t, n_f))
+        rel[:, : stt.N_CHAN_SUBBAND] += 0.03 * drift[:, None] + (-0.06 * drift[:, None]) * u0[None, :]
+        rel[:, stt.N_CHAN_SUBBAND :] += -0.02 * drift[:, None] + (0.05 * drift[:, None]) * u1[None, :]
+        # Inject RFI outliers and NaN blanks that robust IRLS must ignore
+        rel[20, 40:44] = 0.85
+        rel[:, 420:425] = np.nan
+
+        det_scalar, diag_s = stt.detrend_dynamic_spectrum(rel, freqs, mode="scalar")
+        det_lin, diag_l = stt.detrend_dynamic_spectrum(rel, freqs, mode="subband_linear")
+        det_quad, diag_q = stt.detrend_dynamic_spectrum(rel, freqs, mode="subband_quad")
+
+        self.assertLess(diag_l["detrended_rms_pct"], diag_s["detrended_rms_pct"])
+        self.assertLess(diag_q["sat_2pct"], diag_s["sat_2pct"])
+        # Peak tilt at t=-1 (+6 %/100MHz) -> t=+1 (-6 %/100MHz) for SB0
+        self.assertAlmostEqual(diag_l["sb0_tilt_pct_per_100mhz"][-1], -6.0, delta=0.6)
+        self.assertAlmostEqual(diag_l["sb1_tilt_pct_per_100mhz"][-1], 5.0, delta=0.6)
+        self.assertAlmostEqual(diag_l["sb0_common_pct"][-1], 3.0, delta=0.4)
+        self.assertAlmostEqual(diag_l["sb1_common_pct"][-1], -2.0, delta=0.4)
+        fin = np.isfinite(det_lin)
+        self.assertTrue(np.allclose(det_lin[fin] + diag_l["fitted_baseline"][fin], rel[fin], atol=1e-10))
+        self.assertTrue(np.isnan(det_scalar[:, 420]).all())
+
+    def test_simulate_improved_rfi_excision_catches_wide_burst_shoulders_only(self) -> None:
+        rng = np.random.default_rng(7)
+        n_t, n_f = 60, stt.N_CHAN_TOTAL
+        wf = rng.normal(100.0, 1.5, size=(n_t, n_f))
+        # Wide 10-channel burst (431.7-434.4 analog: ch 439..448) + +18% shoulders (437,438,449,450)
+        wf[20:, 439:449] *= 3.5
+        wf[20:, [437, 438, 449, 450]] *= 1.18
+        # Isolated single-channel CW tone at ch=100 must NOT drag clean neighbors 99, 101
+        wf[:, 100] *= 3.0
+
+        _, mask_sh = stt.simulate_improved_rfi_excision(wf, enable_freq_shoulder=True)
+        for sh in (437, 438, 449, 450):
+            self.assertGreater(float(np.mean(mask_sh[20:, sh])), 0.85)
+        self.assertLess(float(np.mean(mask_sh[:, 99])), 0.05)
+        self.assertLess(float(np.mean(mask_sh[:, 101])), 0.05)
+
+    def test_detect_latched_ema_guards_against_real_shoulders_and_escalates_cooldown(self) -> None:
+        channels = _make_clean_channels()
+        # Real +30% neighbor of a bursting channel with low |mad_z| must NOT be reset
+        sh_f = channels[430]["freq_mhz"]
+        channels[431].update({"flagged_chunk_fraction": 0.99, "flag_bits": stt.RFI_TIME_BURST})
+        channels[430].update(
+            {
+                "mean_power": 130.0,
+                "flagged_chunk_fraction": 0.96,
+                "flag_bits": stt.RFI_TIME_BURST | stt.RFI_MORPHOLOGY_SIR,
+                "mean_sk": 1.0,
+                "freq_mad_z": 1.8,
+            }
+        )
+        # Isolated channel with unflagged +20% real power excess above neighbors must NOT reset
+        channels[480].update(
+            {
+                "mean_power": 120.0,
+                "flagged_chunk_fraction": 0.95,
+                "flag_bits": stt.RFI_TIME_BURST,
+                "mean_sk": 1.0,
+                "freq_mad_z": 2.0,
+            }
+        )
+        # Genuine false EMA latch with clean neighbors and normal power SHOULD reset & escalate cooldown
+        latch_f = channels[390]["freq_mhz"]
+        channels[390].update(
+            {
+                "mean_power": 100.0,
+                "flagged_chunk_fraction": 1.0,
+                "flag_bits": stt.RFI_TIME_BURST | stt.RFI_MORPHOLOGY_SIR,
+                "mean_sk": 0.98,
+                "freq_mad_z": 0.3,
+            }
+        )
+
+        streaks: dict[float, int] = {}
+        last_reset: dict[float, float] = {}
+        counts: dict[float, int] = {}
+        for t in (1000.0, 1030.0):
+            res = stt.detect_latched_ema_channels(channels, streaks, last_reset, t, reset_counts=counts)
+        self.assertEqual(res, [latch_f])
+        self.assertEqual(counts[latch_f], 1)
+        self.assertNotIn(sh_f, res)
+
+        # Second reset allowed after base 180s cooldown -> escalates reset_count to 2
+        stt.detect_latched_ema_channels(channels, streaks, last_reset, 1200.0, reset_counts=counts)
+        res2 = stt.detect_latched_ema_channels(channels, streaks, last_reset, 1230.0, reset_counts=counts)
+        self.assertEqual(res2, [latch_f])
+        self.assertEqual(counts[latch_f], 2)
+
+        # Third reset now requires 360s cooldown, so at +200s (1430s) it stays throttled
+        stt.detect_latched_ema_channels(channels, streaks, last_reset, 1400.0, reset_counts=counts)
+        res3 = stt.detect_latched_ema_channels(channels, streaks, last_reset, 1430.0, reset_counts=counts)
+        self.assertEqual(res3, [])
+        res4 = stt.detect_latched_ema_channels(channels, streaks, last_reset, 1600.0, reset_counts=counts)
+        self.assertEqual(res4, [latch_f])
+
+    def test_update_managed_notches_70pct_core_and_shoulder_hysteresis(self) -> None:
+        channels = _make_clean_channels()
+        slow_occ = np.zeros(stt.N_CHAN_TOTAL, dtype=np.float64)
+        # 432.0 core at 78% occ (would fail old 90% gate) + adjacent +-2 shoulder at mad_z=3.4
+        core_idx = 440
+        sh_idx = 442
+        clean_nbr_idx = 441
+        channels[core_idx].update(
+            {"flagged_chunk_fraction": 0.78, "flag_bits": stt.RFI_FREQ_MAD, "freq_mad_z": 9.5}
+        )
+        channels[sh_idx].update(
+            {
+                "flagged_chunk_fraction": 0.72,
+                "flag_bits": stt.RFI_FREQ_SHOULDER,
+                "freq_mad_z": 3.4,
+            }
+        )
+        slow_occ[core_idx] = 0.70
+        slow_occ[sh_idx] = 0.65
+
+        bad_streaks: dict[float, int] = {}
+        clean_streaks: dict[float, int] = {}
+        managed: set[float] = set()
+        combined: list[list[float]] = []
+        for _ in range(5):
+            combined, changed, info = stt.update_managed_notches(
+                channels, slow_occ, combined, bad_streaks, clean_streaks, managed
+            )
+        self.assertTrue(changed)
+        self.assertIn(channels[core_idx]["freq_mhz"], managed)
+        self.assertIn(channels[sh_idx]["freq_mhz"], managed)
+        self.assertNotIn(channels[clean_nbr_idx]["freq_mhz"], managed)
+
+    def test_check_antennas_parses_rest(self) -> None:
+        def fake_get(_url: str, path: str, timeout: float = 5.0):
+            if path == "/antenna_mask/status":
+                return {
+                    "active_physical_antennas": [0, 4, 32, 36],
+                    "dead_antennas": 0,
+                    "saturated_antennas": 0,
+                    "antennas": [{"antenna_id": 0, "active": True, "consecutive_healthy": 10, "clip_fraction": 0.0}],
+                }
+            return {"channels": [{"freq_mhz": 350.0, "power": 1.0}]}
+
+        with mock.patch.object(stt, "http_get_json", side_effect=fake_get):
+            res = stt.check_antennas("http://127.0.0.1:12048", verbose=False)
+        self.assertEqual(res["status"]["active_physical_antennas"], [0, 4, 32, 36])
+        self.assertEqual(len(res["channel_power"]["channels"]), 1)
+
+    def test_environment_collector_rigol_prometheus_grafana_csv_and_offline_fallback(self) -> None:
+        # Local ephemeral TCP server mocking Rigol DP8xx SCPI responder
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(2)
+        port = srv.getsockname()[1]
+
+        def handle_rigol() -> None:
+            conn, _ = srv.accept()
+            with conn:
+                buf = b""
+                while True:
+                    chunk = conn.recv(256)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        cmd = line.decode("ascii").strip()
+                        if cmd.endswith("CH1"):
+                            conn.sendall(b"12.012,0.4512,5.420\n")
+                        else:
+                            conn.sendall(b"5.001,0.1200,0.600\n")
+
+        th = threading.Thread(target=handle_rigol, daemon=True)
+        th.start()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                csv_path = Path(tmp) / "pequen_aht10.csv"
+                csv_path.write_text(
+                    "Series,Time,Value\n"
+                    "pequen-aht10 temp,2026-11-15T00:05:00Z,18.45 °C\n"
+                    "pequen-aht10 humidity,2026-11-15T00:05:00Z,61.2 %\n",
+                    encoding="utf-8",
+                )
+                col = stt.EnvironmentTelemetryCollector(
+                    rigol_host=f"127.0.0.1:{port}",
+                    telemetry_csv=str(csv_path),
+                    prometheus_url="http://127.0.0.1:9/unreachable",
+                    include_local_hwmon=True,
+                    timeout_s=0.4,
+                )
+                snap = col.sample()
+                self.assertAlmostEqual(snap["metrics"]["lna_v"], 12.012, places=3)
+                self.assertAlmostEqual(snap["metrics"]["lna_i"], 0.4512, places=4)
+                self.assertAlmostEqual(snap["metrics"]["pequen_aht10_temp"], 18.45, places=2)
+                self.assertTrue(snap["sources"]["prometheus"].startswith("offline:"))
+                self.assertEqual(snap["sources"]["rigol_dp8xx"], "ok")
+        finally:
+            srv.close()
+
+    def test_detect_gain_steps_and_correlate_telemetry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tlog = Path(tmp) / "telemetry_log.jsonl"
+            env_csv = Path(tmp) / "outdoor_bias.csv"
+            base_t = 1_794_680_000.0
+            lines = []
+            csv_rows = ["timestamp_unix,ambient_temp_c,lna_i\n"]
+            for k in range(200):
+                t = base_t + k * 2.0
+                step = 1.6 if k >= 100 else 0.0
+                sb0 = step + 0.03 * np.sin(k * 0.2)
+                sb1 = 0.8 * step + 0.02 * np.cos(k * 0.2)
+                temp = 15.0 + 0.01 * k + (1.2 if k >= 100 else 0.0)
+                lna_i = 0.450 + (0.018 if k >= 100 else 0.0)
+                lines.append(
+                    json.dumps(
+                        {
+                            "timestamp_unix": t,
+                            "sb0_common_pct": float(sb0),
+                            "sb1_common_pct": float(sb1),
+                        }
+                    )
+                )
+                csv_rows.append(f"{t},{temp:.3f},{lna_i:.5f}\n")
+            tlog.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            env_csv.write_text("".join(csv_rows), encoding="utf-8")
+
+            report = stt.correlate_environment_telemetry(
+                str(tlog), telemetry_path=str(env_csv), step_window_frames=25, min_step_pct=0.4
+            )
+            self.assertEqual(len(report["detected_steps_sb0"]), 1)
+            self.assertAlmostEqual(report["detected_steps_sb0"][0]["step_pct"], 1.6, delta=0.15)
+            corr_i = report["sensor_correlations"]["lna_i"]
+            self.assertGreater(corr_i["r_level_sb0"], 0.90)
+            self.assertEqual(len(corr_i["step_alignments"]), 2)
+            self.assertAlmostEqual(corr_i["step_alignments"][0]["sensor_delta"], 0.018, delta=0.002)
+
+    def test_find_active_transits_graceful_fallback(self) -> None:
+        self.assertEqual(stt.find_active_transits(100.0, 200.0), [])
+        self.assertEqual(stt.find_active_transits(1_794_680_000.0, 1_794_680_000.0), [])
+        # When astropy is unavailable or returns empty, no exception is raised.
+        with mock.patch.dict(sys.modules, {"astropy": None, "astropy.coordinates": None}):
+            self.assertEqual(stt.find_active_transits(1_794_680_000.0, 1_794_690_000.0), [])
+
+    def test_fetch_gpu_util_discovers_canonical_and_legacy_endpoints(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            daemon = stt.ClosedLoopDaemon(base_url="http://127.0.0.1:12048", run_dir=tmp)
+
+            # Canonical discovery via /endpoints (handles null kernel time safely).
+            def fake_canonical(_base: str, path: str, timeout: float = 3.0):
+                if path == "/endpoints":
+                    return {"GET": ["/metrics", "/gpu_profile/gpu/gpu_0", "/gpu_profile/gpu/gpu_1"]}
+                if path == "/gpu_profile/gpu/gpu_0":
+                    return {
+                        "copy_in": [{"time": 0.002}],
+                        "copy_out": [{"time": 0.001}],
+                        "kernel": [{"time": 0.003}, {"time": None}],
+                    }
+                if path == "/gpu_profile/gpu/gpu_1":
+                    return {
+                        "copy_in": [{"time": 0.004}],
+                        "copy_out": [{"time": 0.002}],
+                        "kernel": [{"time": 0.005}],
+                    }
+                raise AssertionError(f"unexpected path: {path}")
+
+            with mock.patch.object(stt, "http_get_json", side_effect=fake_canonical):
+                util = daemon._fetch_gpu_util()
+            self.assertEqual(
+                util,
+                {
+                    "gpu_0": {"copy_in_ms": 2.0, "copy_out_ms": 1.0, "kernel_ms": 3.0},
+                    "gpu_1": {"copy_in_ms": 4.0, "copy_out_ms": 2.0, "kernel_ms": 5.0},
+                },
+            )
+
+            # Fallback when /endpoints is unavailable and server uses legacy /stages/.
+            def fake_legacy_fallback(_base: str, path: str, timeout: float = 3.0):
+                if path == "/gpu_profile/stages/gpu_0":
+                    return {"copy_in": [{"time": 0.001}], "copy_out": [{"time": 0.002}], "kernel": []}
+                raise RuntimeError("404")
+
+            with mock.patch.object(stt, "http_get_json", side_effect=fake_legacy_fallback):
+                util_fb = daemon._fetch_gpu_util()
+            self.assertEqual(
+                util_fb,
+                {"gpu_0": {"copy_in_ms": 1.0, "copy_out_ms": 2.0, "kernel_ms": 0.0}},
+            )
+
+    def test_read_local_hwmon_skips_alarmed_faulted_and_zero_sensors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hw = Path(tmp) / "hwmon0"
+            hw.mkdir()
+            (hw / "name").write_text("nct6798\n", encoding="utf-8")
+            (hw / "temp1_label").write_text("SYSTIN\n", encoding="utf-8")
+            (hw / "temp1_input").write_text("21500\n", encoding="utf-8")
+            (hw / "temp1_alarm").write_text("0\n", encoding="utf-8")
+            (hw / "temp2_label").write_text("CPUTIN\n", encoding="utf-8")
+            (hw / "temp2_input").write_text("36000\n", encoding="utf-8")
+            (hw / "temp2_alarm").write_text("0\n", encoding="utf-8")
+            (hw / "temp7_label").write_text("AUXTIN4\n", encoding="utf-8")
+            (hw / "temp7_input").write_text("98000\n", encoding="utf-8")
+            (hw / "temp7_alarm").write_text("1\n", encoding="utf-8")
+            (hw / "temp8_label").write_text("PCH_CHIP_TEMP\n", encoding="utf-8")
+            (hw / "temp8_input").write_text("0\n", encoding="utf-8")
+            (hw / "temp9_label").write_text("BROKEN\n", encoding="utf-8")
+            (hw / "temp9_input").write_text("88000\n", encoding="utf-8")
+            (hw / "temp9_fault").write_text("1\n", encoding="utf-8")
+
+            temps = stt._read_local_hwmon_temps(base_path=Path(tmp))
+            self.assertEqual(temps["hwmon_nct6798_systin_c"], 21.5)
+            self.assertEqual(temps["hwmon_nct6798_cputin_c"], 36.0)
+            self.assertEqual(temps["host_max_temp_c"], 36.0)
+            self.assertNotIn("hwmon_nct6798_auxtin4_c", temps)
+            self.assertNotIn("hwmon_nct6798_pch_chip_temp_c", temps)
+            self.assertNotIn("hwmon_nct6798_broken_c", temps)
+
+    def test_daemon_flags_stale_stream_and_skips_redundant_waterfall_renders(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            wf_png = str(Path(tmp) / "live.png")
+            daemon = stt.ClosedLoopDaemon(
+                base_url="http://127.0.0.1:12048",
+                run_dir=tmp,
+                live_waterfall_png=wf_png,
+                env_collector=stt.EnvironmentTelemetryCollector(include_local_hwmon=False),
+            )
+            fake_qa = {
+                "total_frames": 200,
+                "window_frames": 200,
+                "seq_gaps": 0,
+                "last_frame_age_s": 420.0,
+                "last_frame_utc": "2026-11-18T03:45:37Z",
+                "_recent_clean_waterfall": np.ones((4, 16), dtype=np.float64),
+                "_recent_freqs_mhz": np.linspace(300.0, 500.0, 16),
+                "_recent_times": np.arange(4, dtype=np.float64),
+            }
+
+            def fake_get(_base: str, path: str, timeout: float = 5.0):
+                if path == "/rfi_mitigation/status":
+                    return {"enabled": True, "flagged_channels": 0, "total_channels": 672, "static_notch_bands_mhz": []}
+                if path == "/direct_tracker/status":
+                    return {"gains_generation": 1, "apply_calibration_gains": True}
+                if path == "/antenna_mask/status":
+                    return {"active_physical_antennas": [0, 4, 32, 36], "dead_antennas": 0, "saturated_antennas": 0, "antennas": []}
+                if path == "/rfi_mitigation/channels":
+                    return {"channels": []}
+                if path == "/endpoints":
+                    return {"GET": []}
+                raise AssertionError(path)
+
+            render_mock = mock.MagicMock(return_value=wf_png)
+            with (
+                mock.patch.object(stt, "http_get_json", side_effect=fake_get),
+                mock.patch.object(stt, "push_rfi_gains", return_value=(False, None, {"source": "none"})),
+                mock.patch.object(daemon.tailer, "poll", return_value=0),
+                mock.patch.object(daemon.tailer, "compute_qa", side_effect=lambda **_kw: dict(fake_qa)),
+                mock.patch.object(stt, "render_waterfall_figure", render_mock),
+            ):
+                st1 = daemon.step()
+                st2 = daemon.step()
+            self.assertTrue(st1["waterfall_qa"]["stale"])
+            self.assertTrue(any("stale_stream" in a for a in st1["cycle_actions"]))
+            self.assertEqual(render_mock.call_count, 1)
+            self.assertEqual(st2["cycle"], 2)
 
 
 if __name__ == "__main__":

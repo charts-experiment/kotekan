@@ -658,6 +658,196 @@ int main() {
     std::printf("  Result: [PASSED] Flagged dips no longer ratchet persistent EMA downward!\n\n");
     std::fflush(stdout);
 
+    // >>> TEST 6: Conditional Frequency Shoulder & Clean-Window Passband MAD <<<
+    std::printf(">>> TEST 6: Conditional Frequency Shoulder & Clean-Window Passband MAD <<<\n");
+
+    cudaMemset(d_channel_gains, 0, n_freq * sizeof(float));
+    cudaMemset(d_static_notch, 0, n_freq * sizeof(std::uint8_t));
+
+    // Add gentle 2.5% deterministic ripple across mid-band so passband MAD is physically realistic
+    // (~1.5-2.0%), allowing a sub-6-sigma shoulder to sit cleanly in [2.5, 6.0) sigma.
+    std::vector<int4x2_t> h_ripple_base(frame_elems);
+    std::memset(h_ripple_base.data(), 0, frame_elems * sizeof(int4x2_t));
+    for (std::size_t t = 0; t < n_time; ++t) {
+        for (std::size_t f = 0; f < n_freq; ++f) {
+            const float ripple = 1.0f + 0.020f * std::sin(2.0f * 3.14159265f * float(f) / 7.0f);
+            const float pb_scale = passband_scale[f] * ripple;
+            const std::size_t base = (t * n_freq + f) * n_elem;
+            for (int a = 0; a < num_active; ++a) {
+                const int raw_e = active_raw[a];
+                const float sig = ant_sigmas[a] * pb_scale;
+                const int re = static_cast<int>(std::round(norm(rng) * sig));
+                const int im = static_cast<int>(std::round(norm(rng) * sig));
+                h_ripple_base[base + raw_e] = pack_int4x2_signed(re, im);
+            }
+        }
+    }
+
+    // 6A: Isolated CW tone must NOT bloat clean immediate neighbors
+    const std::size_t f_iso = 100;
+    std::vector<int4x2_t> h_iso_frame = h_ripple_base;
+    for (std::size_t t = 0; t < n_time; ++t) {
+        const float phase = 0.41f * static_cast<float>(t);
+        const int re = static_cast<int>(std::round(5.5f * std::cos(phase)));
+        const int im = static_cast<int>(std::round(5.5f * std::sin(phase)));
+        const std::size_t base = (t * n_freq + f_iso) * n_elem;
+        for (int a = 0; a < num_active; ++a) {
+            h_iso_frame[base + active_raw[a]] = pack_int4x2_signed(re, im);
+        }
+    }
+
+    RfiMitigationConfig cfg_sh_on = cfg_bench;
+    cfg_sh_on.enable_persistent_ema = false;
+    cfg_sh_on.enable_freq_shoulder_check = true;
+    cfg_sh_on.freq_shoulder_half_width = 2;
+    cfg_sh_on.shoulder_sigma_threshold = 2.5f;
+
+    cudaMemcpy(d_voltages, h_iso_frame.data(), frame_elems * sizeof(int4x2_t),
+               cudaMemcpyHostToDevice);
+    launch_inspect_rfi_chunks(d_voltages, d_active_antennas, num_active, d_chunk_power, d_chunk_sk,
+                              d_chunk_sat_frac, n_time, n_freq, n_elem, chunk_size, 1, nullptr,
+                              false);
+    launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_chunk_sat_frac, d_static_notch,
+                              d_channel_gains, d_chunk_rfi_mask, d_channel_stats, n_chunks, n_freq,
+                              num_active, chunk_size, cfg_sh_on, nullptr);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h_stats.data(), d_channel_stats, n_freq * sizeof(RfiChannelStats),
+               cudaMemcpyDeviceToHost);
+
+    const float iso_core_frac = h_stats[f_iso].flagged_chunk_fraction;
+    const float iso_left_frac = h_stats[f_iso - 1].flagged_chunk_fraction;
+    const float iso_right_frac = h_stats[f_iso + 1].flagged_chunk_fraction;
+    std::printf("  1. Isolated CW ch=%zu: core_frac=%.2f, clean neighbors=[%.3f, %.3f]\n", f_iso,
+                iso_core_frac, iso_left_frac, iso_right_frac);
+    if (iso_core_frac < 0.90f || iso_left_frac > 0.05f || iso_right_frac > 0.05f) {
+        std::printf("  Result: [FAILED] Clean neighbor next to isolated CW was over-blanked!\n");
+        std::fflush(stdout);
+        return 1;
+    }
+
+    // 6B: Contiguous 10-channel burst (155..164) with ~3.5-sigma shoulders at +-1/+-2 (153,154,165,166)
+    std::vector<int4x2_t> h_wide_burst = h_ripple_base;
+    for (std::size_t f = 155; f <= 164; ++f) {
+        for (std::size_t t = 0; t < n_time; ++t) {
+            const std::size_t base = (t * n_freq + f) * n_elem;
+            for (int a = 0; a < num_active; ++a) {
+                const int raw_e = active_raw[a];
+                const float sig = ant_sigmas[a] * passband_scale[f] * 3.0f;
+                const int re = static_cast<int>(std::round(norm(rng) * sig));
+                const int im = static_cast<int>(std::round(norm(rng) * sig));
+                h_wide_burst[base + raw_e] = pack_int4x2_signed(re, im);
+            }
+        }
+    }
+    const std::size_t shoulder_chs[4] = {153, 154, 165, 166};
+    for (int i = 0; i < 4; ++i) {
+        const std::size_t f = shoulder_chs[i];
+        const float boost = (f == 154 || f == 165) ? 1.07f : 1.055f;
+        for (std::size_t t = 0; t < n_time; ++t) {
+            const std::size_t base = (t * n_freq + f) * n_elem;
+            for (int a = 0; a < num_active; ++a) {
+                const int raw_e = active_raw[a];
+                const float sig = ant_sigmas[a] * passband_scale[f] * boost;
+                const int re = static_cast<int>(std::round(norm(rng) * sig));
+                const int im = static_cast<int>(std::round(norm(rng) * sig));
+                h_wide_burst[base + raw_e] = pack_int4x2_signed(re, im);
+            }
+        }
+    }
+
+    RfiMitigationConfig cfg_sh_off = cfg_sh_on;
+    cfg_sh_off.enable_freq_shoulder_check = false;
+
+    cudaMemcpy(d_voltages, h_wide_burst.data(), frame_elems * sizeof(int4x2_t),
+               cudaMemcpyHostToDevice);
+    launch_inspect_rfi_chunks(d_voltages, d_active_antennas, num_active, d_chunk_power, d_chunk_sk,
+                              d_chunk_sat_frac, n_time, n_freq, n_elem, chunk_size, 1, nullptr,
+                              false);
+    launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_chunk_sat_frac, d_static_notch,
+                              d_channel_gains, d_chunk_rfi_mask, d_channel_stats, n_chunks, n_freq,
+                              num_active, chunk_size, cfg_sh_off, nullptr);
+    cudaDeviceSynchronize();
+    std::vector<RfiChannelStats> h_stats_sh_off(n_freq);
+    cudaMemcpy(h_stats_sh_off.data(), d_channel_stats, n_freq * sizeof(RfiChannelStats),
+               cudaMemcpyDeviceToHost);
+
+    launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_chunk_sat_frac, d_static_notch,
+                              d_channel_gains, d_chunk_rfi_mask, d_channel_stats, n_chunks, n_freq,
+                              num_active, chunk_size, cfg_sh_on, nullptr);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h_stats.data(), d_channel_stats, n_freq * sizeof(RfiChannelStats),
+               cudaMemcpyDeviceToHost);
+
+    std::printf("  2. Wide burst [155..164] shoulder ch=154: off(z=%.2f, frac=%.2f, flags=0x%02x) -> on(z=%.2f, frac=%.2f, flags=0x%02x)\n",
+                h_stats_sh_off[154].freq_mad_z, h_stats_sh_off[154].flagged_chunk_fraction,
+                h_stats_sh_off[154].flag_bits, h_stats[154].freq_mad_z,
+                h_stats[154].flagged_chunk_fraction, h_stats[154].flag_bits);
+    if ((h_stats[154].flag_bits & RFI_FREQ_SHOULDER) == 0
+        || (h_stats[165].flag_bits & RFI_FREQ_SHOULDER) == 0
+        || h_stats[154].flagged_chunk_fraction <= h_stats_sh_off[154].flagged_chunk_fraction) {
+        std::printf("  Result: [FAILED] Frequency shoulder dilation did not catch burst shoulders!\n");
+        std::fflush(stdout);
+        return 1;
+    }
+
+    // 6C: Heavy RFI inside 10 static-notched neighbors must NOT blind an unnotched +30% neighbor
+    const std::size_t f_unnotched = 240;
+    std::vector<std::uint8_t> h_dense_notch(n_freq, 0);
+    std::vector<int4x2_t> h_notch_leak = h_ripple_base;
+    for (std::size_t f = 232; f <= 246; ++f) {
+        if (f == f_unnotched || f == 241) {
+            continue;
+        }
+        if (f <= 239 || f >= 243) {
+            h_dense_notch[f] = 1;
+            for (std::size_t t = 0; t < n_time; ++t) {
+                const std::size_t base = (t * n_freq + f) * n_elem;
+                for (int a = 0; a < num_active; ++a) {
+                    const int raw_e = active_raw[a];
+                    const int re = static_cast<int>(std::round(norm(rng) * 5.5f));
+                    const int im = static_cast<int>(std::round(norm(rng) * 5.5f));
+                    h_notch_leak[base + raw_e] = pack_int4x2_signed(re, im);
+                }
+            }
+        }
+    }
+    for (std::size_t t = 0; t < n_time; ++t) {
+        const std::size_t base = (t * n_freq + f_unnotched) * n_elem;
+        for (int a = 0; a < num_active; ++a) {
+            const int raw_e = active_raw[a];
+            const float sig = ant_sigmas[a] * passband_scale[f_unnotched] * 1.25f;
+            const int re = static_cast<int>(std::round(norm(rng) * sig));
+            const int im = static_cast<int>(std::round(norm(rng) * sig));
+            h_notch_leak[base + raw_e] = pack_int4x2_signed(re, im);
+        }
+    }
+
+    cudaMemcpy(d_static_notch, h_dense_notch.data(), n_freq * sizeof(std::uint8_t),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(d_voltages, h_notch_leak.data(), frame_elems * sizeof(int4x2_t),
+               cudaMemcpyHostToDevice);
+    launch_inspect_rfi_chunks(d_voltages, d_active_antennas, num_active, d_chunk_power, d_chunk_sk,
+                              d_chunk_sat_frac, n_time, n_freq, n_elem, chunk_size, 1, nullptr,
+                              false);
+    launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_chunk_sat_frac, d_static_notch,
+                              d_channel_gains, d_chunk_rfi_mask, d_channel_stats, n_chunks, n_freq,
+                              num_active, chunk_size, cfg_sh_on, nullptr);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h_stats.data(), d_channel_stats, n_freq * sizeof(RfiChannelStats),
+               cudaMemcpyDeviceToHost);
+
+    std::printf("  3. Dense-notch neighbor ch=%zu: MAD_Z=%.1f, frac=%.2f, flags=0x%02x\n",
+                f_unnotched, h_stats[f_unnotched].freq_mad_z,
+                h_stats[f_unnotched].flagged_chunk_fraction, h_stats[f_unnotched].flag_bits);
+    if ((h_stats[f_unnotched].flag_bits & RFI_FREQ_MAD) == 0
+        || h_stats[f_unnotched].flagged_chunk_fraction < 0.90f) {
+        std::printf("  Result: [FAILED] Dense static notches poisoned passband MAD!\n");
+        std::fflush(stdout);
+        return 1;
+    }
+    std::printf("  Result: [PASSED] Conditional frequency shoulders and clean-window MAD verified!\n\n");
+    std::fflush(stdout);
+
     cudaFree(d_ema_power);
     cudaFree(d_ema_mad);
 

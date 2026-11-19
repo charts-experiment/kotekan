@@ -1756,7 +1756,7 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
 }
 
 void cudaDirectBeamTrackerCommand::finalize_frame() {
-    gpuCommand::finalize_frame();
+    cudaCommand::finalize_frame();
     const double exec_s = get_last_gpu_execution_time();
     if (_tracker_kernel_time && exec_s > 0.0) {
         _tracker_kernel_time->add_sample(exec_s * 1e3);

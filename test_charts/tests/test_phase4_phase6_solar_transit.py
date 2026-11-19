@@ -296,7 +296,6 @@ gpu:
 """
 
     cfg += """
-stages:
     gpu_0:
         kotekan_stage: cudaProcess
         gpu_id: 0

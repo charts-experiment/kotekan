@@ -247,7 +247,7 @@ zero_samples_1:
 # GPU Direct 4-Beam Tracker & Antenna Health Stages
 # ------------------------------------------------------------------------------
 gpu:
-    profiling: false
+    profiling: true
 
     # Command Pipeline for Stream 0 (Frequencies 0..335, 300.0 - 400.5 MHz)
     commands_0: &command_list_0
@@ -397,7 +397,6 @@ gpu:
           gpu_mem: beam_power_1
           out_buf: host_beam_power
 
-stages:
     gpu_0:
         kotekan_stage: cudaProcess
         gpu_id: 0

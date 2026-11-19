@@ -1002,7 +1002,7 @@ cudaEvent_t cudaAntennaMaskCommand::execute(cudaPipelineState& /*pipestate*/,
 }
 
 void cudaAntennaMaskCommand::finalize_frame() {
-    gpuCommand::finalize_frame();
+    cudaCommand::finalize_frame();
     if (!_last_frame_executed) {
         return;
     }

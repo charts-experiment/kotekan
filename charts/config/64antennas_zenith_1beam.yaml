@@ -311,6 +311,9 @@ gpu:
           enable_saturation_check: true
           saturation_fraction_threshold: 0.02
           enable_morphology_sir: true
+          enable_freq_shoulder_check: true
+          freq_shoulder_half_width: 2
+          shoulder_sigma_threshold: 2.5
           edge_channels_to_ignore: 0
           enable_persistent_ema: true
           ema_alpha: 0.02
@@ -407,6 +410,9 @@ gpu:
           enable_saturation_check: true
           saturation_fraction_threshold: 0.02
           enable_morphology_sir: true
+          enable_freq_shoulder_check: true
+          freq_shoulder_half_width: 2
+          shoulder_sigma_threshold: 2.5
           edge_channels_to_ignore: 0
           enable_persistent_ema: true
           ema_alpha: 0.02
@@ -455,7 +461,6 @@ gpu:
           gpu_mem: beam_power_1
           out_buf: host_beam_power
 
-stages:
     gpu_0:
         kotekan_stage: cudaProcess
         gpu_id: 0
