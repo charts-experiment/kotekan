@@ -659,6 +659,82 @@ class TestSelfTuneTrackerClosedLoop(unittest.TestCase):
                 {"gpu_0": {"copy_in_ms": 1.0, "copy_out_ms": 2.0, "kernel_ms": 0.0}},
             )
 
+    def test_read_local_hwmon_skips_alarmed_faulted_and_zero_sensors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hw = Path(tmp) / "hwmon0"
+            hw.mkdir()
+            (hw / "name").write_text("nct6798\n", encoding="utf-8")
+            (hw / "temp1_label").write_text("SYSTIN\n", encoding="utf-8")
+            (hw / "temp1_input").write_text("21500\n", encoding="utf-8")
+            (hw / "temp1_alarm").write_text("0\n", encoding="utf-8")
+            (hw / "temp2_label").write_text("CPUTIN\n", encoding="utf-8")
+            (hw / "temp2_input").write_text("36000\n", encoding="utf-8")
+            (hw / "temp2_alarm").write_text("0\n", encoding="utf-8")
+            (hw / "temp7_label").write_text("AUXTIN4\n", encoding="utf-8")
+            (hw / "temp7_input").write_text("98000\n", encoding="utf-8")
+            (hw / "temp7_alarm").write_text("1\n", encoding="utf-8")
+            (hw / "temp8_label").write_text("PCH_CHIP_TEMP\n", encoding="utf-8")
+            (hw / "temp8_input").write_text("0\n", encoding="utf-8")
+            (hw / "temp9_label").write_text("BROKEN\n", encoding="utf-8")
+            (hw / "temp9_input").write_text("88000\n", encoding="utf-8")
+            (hw / "temp9_fault").write_text("1\n", encoding="utf-8")
+
+            temps = stt._read_local_hwmon_temps(base_path=Path(tmp))
+            self.assertEqual(temps["hwmon_nct6798_systin_c"], 21.5)
+            self.assertEqual(temps["hwmon_nct6798_cputin_c"], 36.0)
+            self.assertEqual(temps["host_max_temp_c"], 36.0)
+            self.assertNotIn("hwmon_nct6798_auxtin4_c", temps)
+            self.assertNotIn("hwmon_nct6798_pch_chip_temp_c", temps)
+            self.assertNotIn("hwmon_nct6798_broken_c", temps)
+
+    def test_daemon_flags_stale_stream_and_skips_redundant_waterfall_renders(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            wf_png = str(Path(tmp) / "live.png")
+            daemon = stt.ClosedLoopDaemon(
+                base_url="http://127.0.0.1:12048",
+                run_dir=tmp,
+                live_waterfall_png=wf_png,
+                env_collector=stt.EnvironmentTelemetryCollector(include_local_hwmon=False),
+            )
+            fake_qa = {
+                "total_frames": 200,
+                "window_frames": 200,
+                "seq_gaps": 0,
+                "last_frame_age_s": 420.0,
+                "last_frame_utc": "2026-11-18T03:45:37Z",
+                "_recent_clean_waterfall": np.ones((4, 16), dtype=np.float64),
+                "_recent_freqs_mhz": np.linspace(300.0, 500.0, 16),
+                "_recent_times": np.arange(4, dtype=np.float64),
+            }
+
+            def fake_get(_base: str, path: str, timeout: float = 5.0):
+                if path == "/rfi_mitigation/status":
+                    return {"enabled": True, "flagged_channels": 0, "total_channels": 672, "static_notch_bands_mhz": []}
+                if path == "/direct_tracker/status":
+                    return {"gains_generation": 1, "apply_calibration_gains": True}
+                if path == "/antenna_mask/status":
+                    return {"active_physical_antennas": [0, 4, 32, 36], "dead_antennas": 0, "saturated_antennas": 0, "antennas": []}
+                if path == "/rfi_mitigation/channels":
+                    return {"channels": []}
+                if path == "/endpoints":
+                    return {"GET": []}
+                raise AssertionError(path)
+
+            render_mock = mock.MagicMock(return_value=wf_png)
+            with (
+                mock.patch.object(stt, "http_get_json", side_effect=fake_get),
+                mock.patch.object(stt, "push_rfi_gains", return_value=(False, None, {"source": "none"})),
+                mock.patch.object(daemon.tailer, "poll", return_value=0),
+                mock.patch.object(daemon.tailer, "compute_qa", side_effect=lambda **_kw: dict(fake_qa)),
+                mock.patch.object(stt, "render_waterfall_figure", render_mock),
+            ):
+                st1 = daemon.step()
+                st2 = daemon.step()
+            self.assertTrue(st1["waterfall_qa"]["stale"])
+            self.assertTrue(any("stale_stream" in a for a in st1["cycle_actions"]))
+            self.assertEqual(render_mock.call_count, 1)
+            self.assertEqual(st2["cycle"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

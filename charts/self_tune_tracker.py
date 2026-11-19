@@ -563,7 +563,8 @@ def render_waterfall_figure(
 
     plt.rcParams.update({"font.size": 9, "axes.titlesize": 10.5, "axes.labelsize": 9.5})
     fig = plt.figure(figsize=(13.5, 10.5), dpi=112, facecolor="white")
-    top_margin = 0.842 if transits else 0.905
+    dense_transits = len(transits) > 5
+    top_margin = 0.824 if dense_transits else (0.842 if transits else 0.905)
     gs = fig.add_gridspec(
         3,
         2,
@@ -606,7 +607,7 @@ def render_waterfall_figure(
         interpolation="nearest",
     )
     ax0.axhline(400.65, color="white", linestyle=":", linewidth=0.8, alpha=0.65)
-    title_pad = 46 if transits else 8
+    title_pad = 58 if dense_transits else (46 if transits else 8)
     ax0.set_title(
         "Recorded Beam Power $10\\log_{10} P$ [dB]  (gray = GPU RFI-blanked)",
         fontweight="bold",
@@ -699,8 +700,9 @@ def render_waterfall_figure(
     plt.setp(ax2r.get_yticklabels(), visible=False)
 
     # Vertical dashed target transit lines across all 3 waterfalls + staggered top pills
-    placed_rows: List[List[float]] = [[], [], []]
-    row_offsets = [1.012, 1.072, 1.132]
+    row_offsets = [1.010, 1.064, 1.118, 1.172] if dense_transits else [1.012, 1.072, 1.132]
+    placed_rows: List[List[float]] = [[] for _ in row_offsets]
+    pill_fontsize = 6.9 if dense_transits else 7.3
     for item in transits:
         t_pk, label, alt_deg = item[0], str(item[1]), float(item[2])
         if isinstance(t_pk, datetime.datetime):
@@ -724,11 +726,16 @@ def render_waterfall_figure(
 
         rel_x = (tx - t0_num) / (t1_num - t0_num)
         ha = "left" if rel_x < 0.06 else ("right" if rel_x > 0.94 else "center")
-        chosen_row = 0
+        chosen_row = None
         for r_idx in range(len(row_offsets)):
             if all(abs(rel_x - px) >= 0.22 for px in placed_rows[r_idx]):
                 chosen_row = r_idx
                 break
+        if chosen_row is None:
+            chosen_row = max(
+                range(len(row_offsets)),
+                key=lambda r_idx: min((abs(rel_x - px) for px in placed_rows[r_idx]), default=1.0),
+            )
         placed_rows[chosen_row].append(rel_x)
         ax0.text(
             tx,
@@ -737,7 +744,7 @@ def render_waterfall_figure(
             transform=ax0.get_xaxis_transform(),
             ha=ha,
             va="bottom",
-            fontsize=7.3,
+            fontsize=pill_fontsize,
             fontweight="bold",
             color="#0b3c5d",
             bbox=dict(boxstyle="round,pad=0.14", fc="#e8f6ff", ec="#38bdf8", lw=0.6, alpha=0.92),
@@ -1104,22 +1111,23 @@ def analyze_run(
     raw_spec = np.median(waterfall_raw, axis=0)
     valid_raw_ch = np.isfinite(raw_spec) & (raw_spec > 0.0)
     bp_spec = np.full(n_f, np.nan, dtype=np.float64)
+    min_bp_frames = max(10, n_t // 2)
     for f in range(n_f):
         col = waterfall_clean[:, f]
         fin = col[np.isfinite(col) & (col > 0.0)]
-        if len(fin) >= 10:
+        if len(fin) >= min_bp_frames:
             bp_spec[f] = float(np.median(fin))
     valid_bp_ch = np.isfinite(bp_spec) & (bp_spec > 0.0)
+    common_ch = valid_raw_ch & valid_bp_ch
 
-    raw_vals = raw_spec[valid_raw_ch]
-    bp_vals = bp_spec[valid_bp_ch]
+    raw_vals = raw_spec[common_ch] if np.any(common_ch) else raw_spec[valid_raw_ch]
+    bp_vals = bp_spec[common_ch] if np.any(common_ch) else bp_spec[valid_bp_ch]
     raw_flat_std_pct = 100.0 * float(np.std(raw_vals) / np.median(raw_vals))
     bp_flat_std_pct = 100.0 * float(np.std(bp_vals) / np.median(bp_vals))
     raw_p90_p10 = float(np.percentile(raw_vals, 90) / np.percentile(raw_vals, 10))
     bp_p90_p10 = float(np.percentile(bp_vals, 90) / np.percentile(bp_vals, 10))
 
     # Residual dynamic spectrum RMS on identical active non-blanked channels
-    common_ch = valid_raw_ch & valid_bp_ch
     with warnings.catch_warnings(), np.errstate(all="ignore"):
         warnings.simplefilter("ignore", category=RuntimeWarning)
         raw_nz = np.where(waterfall_raw[:, common_ch] > 0.0, waterfall_raw[:, common_ch], np.nan)
@@ -2148,19 +2156,28 @@ def load_telemetry_records(path_or_glob: str) -> List[Dict[str, Any]]:
     return merged
 
 
-def _read_local_hwmon_temps() -> Dict[str, float]:
-    """Read Linux sysfs hwmon temperature sensors in Celsius without external tools."""
+def _read_local_hwmon_temps(base_path: Path = Path("/sys/class/hwmon")) -> Dict[str, float]:
+    """Read Linux sysfs hwmon temperature sensors in Celsius, skipping alarmed/unpopulated channels."""
     out: Dict[str, float] = {}
-    base = Path("/sys/class/hwmon")
-    if not base.is_dir():
+    if not base_path.is_dir():
         return out
     temps: List[float] = []
-    for hw in sorted(base.iterdir()):
+    for hw in sorted(base_path.iterdir()):
         name_p = hw / "name"
         hw_name = name_p.read_text(encoding="utf-8", errors="ignore").strip() if name_p.is_file() else hw.name
         for tp in sorted(hw.glob("temp*_input")):
+            # Skip disconnected/faulted headers (e.g. unpopulated NCT6798 AUXTIN4 reading 98-100C with alarm=1).
+            alarm_p = hw / tp.name.replace("_input", "_alarm")
+            fault_p = hw / tp.name.replace("_input", "_fault")
             try:
-                val_c = float(tp.read_text(encoding="utf-8").strip()) / 1000.0
+                if alarm_p.is_file() and alarm_p.read_text(encoding="utf-8").strip() == "1":
+                    continue
+                if fault_p.is_file() and fault_p.read_text(encoding="utf-8").strip() == "1":
+                    continue
+                raw_mc = int(tp.read_text(encoding="utf-8").strip())
+                if raw_mc == 0:
+                    continue
+                val_c = float(raw_mc) / 1000.0
             except Exception:
                 continue
             if -50.0 < val_c < 150.0:
@@ -2615,6 +2632,7 @@ class ClosedLoopDaemon:
         self.last_good_gains_file: Optional[str] = None
         self.last_gains_sig: Optional[Tuple[str, int, int]] = None
         self.cycle_count = 0
+        self._last_live_wf_frames = -1
         self.action_log: Deque[str] = deque(maxlen=25)
         self.last_status: Dict[str, Any] = {}
 
@@ -2750,6 +2768,11 @@ class ClosedLoopDaemon:
         recent_freqs = qa.pop("_recent_freqs_mhz", None)
         recent_times = qa.pop("_recent_times", None)
         qa.pop("_recent_detrended_rel", None)
+        age_s = qa.get("last_frame_age_s")
+        is_stale = age_s is not None and float(age_s) > 120.0
+        qa["stale"] = is_stale
+        if is_stale:
+            cycle_actions.append(f"stale_stream(age={float(age_s):.0f}s)")
 
         # 2. Loop A: Pre-whitening RFI gain update (raw channel power domain when exposed)
         min_delta = 0.0 if self.prev_rfi_gains is None else 0.005
@@ -2857,7 +2880,13 @@ class ClosedLoopDaemon:
         except Exception as exc:
             self._record_action(f"telemetry_log write error: {exc}")
 
-        if self.live_waterfall_png and recent_wf is not None and recent_freqs is not None:
+        cur_total_frames = int(qa.get("total_frames") or 0)
+        if (
+            self.live_waterfall_png
+            and recent_wf is not None
+            and recent_freqs is not None
+            and cur_total_frames > self._last_live_wf_frames
+        ):
             try:
                 trows = load_telemetry_records(self.telemetry_jsonl) if os.path.isfile(self.telemetry_jsonl) else None
                 render_waterfall_figure(
@@ -2870,6 +2899,7 @@ class ClosedLoopDaemon:
                     title=f"CHARTS Live ({qa.get('last_frame_utc') or 'now'}) — {self.detrend_mode}",
                     telemetry_rows=trows,
                 )
+                self._last_live_wf_frames = cur_total_frames
             except Exception as exc:
                 self._record_action(f"live_waterfall error: {exc}")
 
