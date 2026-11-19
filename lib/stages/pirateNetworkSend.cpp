@@ -6,8 +6,10 @@
 #include "Telescope.hpp"         // for Telescope
 #include "buffer.hpp"            // for Buffer
 #include "bufferContainer.hpp"   // for bufferContainer
-#include "chordMetadata.hpp"     // for chordMetadata, get_chord_metadata
+#include "chartsMetadata.hpp"    // for chartsMetadata
+#include "chordMetadata.hpp"     // for chordMetadata
 #include "kotekanLogging.hpp"    // for FATAL_ERROR, ERROR, WARN, INFO, DEBUG
+#include "metadata.hpp"          // for metadataObject
 #include "prometheusMetrics.hpp" // for Counter, Metrics
 
 #include "fmt.hpp" // for format
@@ -61,6 +63,15 @@ static bool send_all(int fd, iovec* iov, int iovcnt) {
         }
     }
     return true;
+}
+
+// fpga_seq_num of a frame with chordMetadata or chartsMetadata, or -1 if it has none
+static int64_t frame_fpga_seq_num(const std::shared_ptr<metadataObject>& meta) {
+    if (const auto chord = std::dynamic_pointer_cast<chordMetadata>(meta))
+        return chord->has_fpga_seq_num() ? chord->get_fpga_seq_num() : -1;
+    if (const auto charts = std::dynamic_pointer_cast<chartsMetadata>(meta))
+        return charts->has_fpga_seq_num() ? charts->get_fpga_seq_num() : -1;
+    return -1;
 }
 
 pirateNetworkSend::pirateNetworkSend(Config& config, const std::string& unique_name,
@@ -173,19 +184,19 @@ void pirateNetworkSend::main_thread() {
         if (frame == nullptr)
             break;
 
-        const auto meta = get_chord_metadata(in_buf, frame_id);
+        const int64_t fpga_seq_num = frame_fpga_seq_num(in_buf->get_metadata(frame_id));
         std::string error;
         int64_t seq = -1;
-        if (!meta) {
-            error =
-                fmt::format("Frame {:s}[{:d}] has no chordMetadata", in_buf->buffer_name, frame_id);
-        } else if (meta->get_fpga_seq_num() < 0 || meta->get_fpga_seq_num() % seq_divisor != 0) {
-            error =
-                fmt::format("Frame {:s}[{:d}]: fpga_seq_num {:d} is not a non-negative "
-                            "multiple of seq_divisor {:d}",
-                            in_buf->buffer_name, frame_id, meta->get_fpga_seq_num(), seq_divisor);
+        if (fpga_seq_num < 0) {
+            error = fmt::format("Frame {:s}[{:d}] has no fpga_seq_num in a chordMetadata or "
+                                "chartsMetadata",
+                                in_buf->buffer_name, frame_id);
+        } else if (fpga_seq_num % seq_divisor != 0) {
+            error = fmt::format("Frame {:s}[{:d}]: fpga_seq_num {:d} is not a multiple of "
+                                "seq_divisor {:d}",
+                                in_buf->buffer_name, frame_id, fpga_seq_num, seq_divisor);
         } else {
-            seq = meta->get_fpga_seq_num() / seq_divisor;
+            seq = fpga_seq_num / seq_divisor;
             if (seq % seq_per_minichunk != 0 || seq <= last_seq)
                 error =
                     fmt::format("Frame {:s}[{:d}]: seq {:d} must be a multiple of {:d} and "

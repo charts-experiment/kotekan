@@ -3,7 +3,8 @@
 #include "Config.hpp"            // for Config
 #include "buffer.hpp"            // for Buffer
 #include "bufferContainer.hpp"   // for bufferContainer
-#include "chordMetadata.hpp"     // for chordMetadata, get_chord_metadata
+#include "chartsMetadata.hpp"    // for chartsMetadata
+#include "chordMetadata.hpp"     // for chordMetadata
 #include "errors.h"              // for get_exit_code, ReturnCode
 #include "kotekanLogging.hpp"    // for kotekanLogging, FatalError
 #include "metadata.hpp"          // for metadataPool
@@ -155,7 +156,11 @@ static void produce(Buffer& buf, int frame_id, int64_t fpga_seq_num, int index) 
     uint8_t* frame = buf.wait_for_empty_frame("test", frame_id);
     BOOST_REQUIRE(frame != nullptr);
     buf.allocate_new_metadata_object(frame_id);
-    get_chord_metadata(&buf, frame_id)->set_fpga_seq_num(fpga_seq_num);
+    const auto meta = buf.get_metadata(frame_id);
+    if (const auto chord = std::dynamic_pointer_cast<chordMetadata>(meta))
+        chord->set_fpga_seq_num(fpga_seq_num);
+    else
+        std::dynamic_pointer_cast<chartsMetadata>(meta)->set_fpga_seq_num(fpga_seq_num);
     const std::vector<uint8_t> contents = frame_contents(index);
     std::memcpy(frame, contents.data(), frame_size);
     buf.mark_frame_full("test", frame_id);
@@ -273,6 +278,37 @@ BOOST_AUTO_TEST_CASE(test_ack_and_seq_divisor, *boost::unit_test::timeout(20)) {
     BOOST_REQUIRE_EQUAL(::send(conn, &assembled, 1, 0), 1);
     check_minichunk(conn, 2 * seq_per_minichunk, 1);
     BOOST_REQUIRE_EQUAL(::send(conn, &assembled, 1, 0), 1);
+
+    send.stop();
+    buf.send_shutdown_signal();
+    send.join();
+    close(conn);
+    close(listener);
+}
+
+BOOST_AUTO_TEST_CASE(test_charts_metadata, *boost::unit_test::timeout(20)) {
+    uint16_t port = 0;
+    const int listener = listen_localhost(port);
+
+    json cfg = sender_config("send_charts", port);
+    cfg["send_charts"]["drop_frames"] = false;
+    Config config;
+    config.update_config(cfg);
+
+    Buffer buf(4, frame_size,
+               metadataPool::create(8, sizeof(chartsMetadata), "charts_pool", "chartsMetadata"),
+               "pirate_buf", "standard", 0, false, false, std::vector<int>{}, true);
+    buf.register_producer("test");
+    bufferContainer bc;
+    bc.add_buffer("pirate_buf", &buf);
+    pirateNetworkSend send(config, "/send_charts", bc);
+    send.start();
+
+    const int conn = accept_connection(listener);
+    produce(buf, 0, 2 * seq_per_minichunk, 0);
+
+    recv_header(conn, 0);
+    check_minichunk(conn, 2 * seq_per_minichunk, 0);
 
     send.stop();
     buf.send_shutdown_signal();

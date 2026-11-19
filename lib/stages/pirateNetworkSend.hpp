@@ -61,7 +61,7 @@
  * @buffer in_buf The minichunks to send, one per frame.
  *     @buffer_format float16 scales/offsets followed by int4 data, as above; the frame size must be
  *                    num_beams * num_freq * 132 bytes.
- *     @buffer_metadata chordMetadata
+ *     @buffer_metadata chordMetadata or chartsMetadata, with `fpga_seq_num` set
  *
  * @conf server_ip           String. IP address of the pirate receiver.
  * @conf server_port         Int. TCP port of the pirate receiver.
