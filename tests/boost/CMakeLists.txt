@@ -147,6 +147,14 @@ target_link_libraries(test_bufferSend PRIVATE libexternal kotekan_stages kotekan
                                               kotekan_core)
 target_include_directories(test_bufferSend PRIVATE ${KOTEKAN_SOURCE_DIR}/lib/stages)
 
+# test_pirateNetworkSend - tests for the pirateNetworkSend stage
+add_executable(test_pirateNetworkSend test_pirateNetworkSend.cpp)
+target_link_libraries(test_pirateNetworkSend PRIVATE libexternal kotekan_stages kotekan_libs
+                                                     kotekan_utils kotekan_core)
+target_include_directories(test_pirateNetworkSend PRIVATE ${KOTEKAN_SOURCE_DIR}/lib/stages)
+target_compile_definitions(test_pirateNetworkSend
+                           PRIVATE TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/testdata")
+
 # test_prometheus_metrics needs fmt and prometheusMetrics
 add_executable(test_prometheus_metrics test_prometheus_metrics.cpp)
 target_link_libraries(test_prometheus_metrics PRIVATE libexternal kotekan_libs kotekan_core)
