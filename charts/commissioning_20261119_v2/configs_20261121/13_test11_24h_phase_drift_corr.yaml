@@ -1,0 +1,225 @@
+---
+# Auto-generated ms-x01 4-antenna v2 config: 13_test11_24h_phase_drift_corr.yaml
+type: config
+log_level: info
+cpu_affinity:
+- 6
+- 7
+- 8
+- 9
+num_elements: 64
+n_channels_per_packet: 168
+local_subbands_per_packet: 2
+num_local_freq: 336
+buffer_depth: 20
+samples_per_data_set: 153600
+sample_period_s: 3.333333333333e-06
+frame_arrival_period: 0.5119999999999488
+bytes_per_dataset: 51609600
+num_data_sets: 1
+block_size: 2
+num_blocks: 528
+sizeof_int: 4
+data_format: cuda_wmma
+integration_frames: 20
+capture_n_frames: 0
+main_pool:
+  kotekan_metadata_pool: chartsMetadata
+  num_metadata_objects: 400
+dpdk:
+  kotekan_stage: dpdkCore
+  lcore_start_delay: 1
+  lcore_cpu_map:
+  - 3
+  - 5
+  main_lcore_cpu: 4
+  lcore_port_map:
+  - - 0
+  - - 1
+  pcie_block_list:
+  - 0000:70:00.0
+  max_rx_pkt_len: 9000
+  rx_ring_size: 4096
+  num_mbufs: 65536
+  mbuf_data_size: 9216
+  handlers:
+  - dpdk_handler: rfsocHandlerShuffle
+    out_buffer: network_capture_buf_0
+    alignment: 15360
+    mask_buf: mask_buffer_zeros_0
+    first_subband: 0
+    coarse_freq_start: 0
+    num_local_freq: 336
+  - dpdk_handler: rfsocHandlerShuffle
+    out_buffer: network_capture_buf_1
+    alignment: 15360
+    mask_buf: mask_buffer_zeros_1
+    first_subband: 2
+    coarse_freq_start: 336
+    num_local_freq: 336
+run_metadata:
+  kotekan_stage: runMetadataWriter
+  base_dir: /data/corr/corr_1121_drift
+  num_antennas: 64
+  signal_antennas:
+  - 0
+  - 4
+  - 32
+  - 36
+  position_outliers:
+  - 4
+  - 32
+  - 36
+network_capture_buf_0:
+  kotekan_buffer: standard
+  num_frames: 20
+  frame_size: 3303014400
+  numa_node: 0
+  metadata_pool: main_pool
+  zero_new_frames: true
+  mlock_frames: false
+mask_buffer_zeros_0:
+  kotekan_buffer: standard
+  num_frames: 20
+  frame_size: 153600
+  numa_node: 0
+  metadata_pool: main_pool
+host_correlation_buffer_0:
+  kotekan_buffer: standard
+  num_frames: 20
+  frame_size: 5677056
+  metadata_pool: main_pool
+integrated_correlation_buffer_0:
+  kotekan_buffer: standard
+  num_frames: 20
+  frame_size: 5677056
+  metadata_pool: main_pool
+network_capture_buf_1:
+  kotekan_buffer: standard
+  num_frames: 20
+  frame_size: 3303014400
+  numa_node: 0
+  metadata_pool: main_pool
+  zero_new_frames: true
+  mlock_frames: false
+mask_buffer_zeros_1:
+  kotekan_buffer: standard
+  num_frames: 20
+  frame_size: 153600
+  numa_node: 0
+  metadata_pool: main_pool
+host_correlation_buffer_1:
+  kotekan_buffer: standard
+  num_frames: 20
+  frame_size: 5677056
+  metadata_pool: main_pool
+integrated_correlation_buffer_1:
+  kotekan_buffer: standard
+  num_frames: 20
+  frame_size: 5677056
+  metadata_pool: main_pool
+zero_samples:
+  kotekan_stage: zeroSamples
+  out_buf: network_capture_buf_0
+  lost_samples_buf: mask_buffer_zeros_0
+  zero_value: 0
+  sample_size: 21504
+zero_samples_1:
+  kotekan_stage: zeroSamples
+  out_buf: network_capture_buf_1
+  lost_samples_buf: mask_buffer_zeros_1
+  zero_value: 0
+  sample_size: 21504
+gpu:
+  profiling: true
+  kernel_path: lib/cuda/kernels
+  commands_0: &id001
+  - name: cudaInputData
+    in_buf: host_voltage
+    gpu_mem: voltage_0
+  - name: cudaSyncInput
+  - name: cudaShuffleAstron
+    gpu_mem_voltage: voltage_0
+    gpu_mem_ordered_voltage: ordered_voltage_0
+  - name: cudaCorrelatorAstron
+    gpu_mem_voltage: ordered_voltage_0
+    gpu_mem_correlation_matrix: correlation_matrix_0
+  - name: cudaSyncOutput
+  - name: cudaOutputData
+    in_buf: host_voltage
+    gpu_mem: correlation_matrix_0
+    out_buf: host_correlation
+  gpu_0:
+    kotekan_stage: cudaProcess
+    gpu_id: 0
+    cuda_stream_base: 0
+    num_cuda_streams: 6
+    buffer_depth: 3
+    commands: *id001
+    in_buffers:
+      host_voltage: network_capture_buf_0
+    out_buffers:
+      host_correlation: host_correlation_buffer_0
+  commands_1: &id002
+  - name: cudaInputData
+    in_buf: host_voltage
+    gpu_mem: voltage_1
+  - name: cudaSyncInput
+  - name: cudaShuffleAstron
+    gpu_mem_voltage: voltage_1
+    gpu_mem_ordered_voltage: ordered_voltage_1
+  - name: cudaCorrelatorAstron
+    gpu_mem_voltage: ordered_voltage_1
+    gpu_mem_correlation_matrix: correlation_matrix_1
+  - name: cudaSyncOutput
+  - name: cudaOutputData
+    in_buf: host_voltage
+    gpu_mem: correlation_matrix_1
+    out_buf: host_correlation
+  gpu_1:
+    kotekan_stage: cudaProcess
+    gpu_id: 0
+    cuda_stream_base: 1
+    num_cuda_streams: 6
+    buffer_depth: 3
+    commands: *id002
+    in_buffers:
+      host_voltage: network_capture_buf_1
+    out_buffers:
+      host_correlation: host_correlation_buffer_1
+charts_accumulate_0:
+  kotekan_stage: chartsAccumulate
+  in_buf: host_correlation_buffer_0
+  out_buf: integrated_correlation_buffer_0
+  num_frames_to_accumulate: 20
+inspect_frame_0:
+  kotekan_stage: restInspectFrame
+  in_buf: host_correlation_buffer_0
+raw_file_write_0:
+  kotekan_stage: rawFileWrite
+  in_buf: integrated_correlation_buffer_0
+  base_dir: /data/corr/corr_1121_drift
+  create_base_dir: true
+  file_name: corr_freq_0
+  file_ext: bin
+  prefix_hostname: false
+  num_frames_per_file: 1
+  exit_after_n_files: 120
+charts_accumulate_1:
+  kotekan_stage: chartsAccumulate
+  in_buf: host_correlation_buffer_1
+  out_buf: integrated_correlation_buffer_1
+  num_frames_to_accumulate: 20
+inspect_frame_1:
+  kotekan_stage: restInspectFrame
+  in_buf: host_correlation_buffer_1
+raw_file_write_1:
+  kotekan_stage: rawFileWrite
+  in_buf: integrated_correlation_buffer_1
+  base_dir: /data/corr/corr_1121_drift
+  create_base_dir: true
+  file_name: corr_freq_1
+  file_ext: bin
+  prefix_hostname: false
+  num_frames_per_file: 1
+  exit_after_n_files: 120

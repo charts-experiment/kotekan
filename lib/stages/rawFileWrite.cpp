@@ -255,13 +255,13 @@ void rawFileWrite::main_thread() {
         }
         DEBUG("Wrote {:d} data bytes to {:s}.", bytes_writen, full_path);
 
-        INFO("Data file write done for {:s}", full_path);
-
         frame_ctr++;
 
         if (frame_ctr == _num_frames_per_file) {
             if (close(fd) == -1) {
                 ERROR("Cannot close file {:s}", full_path);
+            } else {
+                INFO("Data file write done for {:s}", full_path);
             }
             isFileOpen = false;
             frame_ctr = 0;
@@ -289,6 +289,16 @@ void rawFileWrite::main_thread() {
         }
 
         frame_id = (frame_id + 1) % buf->num_frames;
+    }
+
+    if (isFileOpen) {
+        if (close(fd) == -1) {
+            ERROR("Cannot close file {:s}", full_path);
+        } else {
+            INFO("Data file write done for {:s} ({:d}/{:d} frames)", full_path, frame_ctr,
+                 _num_frames_per_file);
+        }
+        isFileOpen = false;
     }
 
     DEBUG("Exiting");

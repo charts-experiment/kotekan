@@ -1,0 +1,766 @@
+---
+# Auto-generated ms-x01 4-antenna v2 config: 05_test05_psr_b0950_transit.yaml
+type: config
+log_level: info
+cpu_affinity:
+- 6
+- 7
+- 8
+- 9
+num_elements: 64
+n_channels_per_packet: 168
+local_subbands_per_packet: 2
+num_local_freq: 336
+sample_period_s: 3.333333333333e-06
+samples_per_data_set: 768
+frame_arrival_period: 0.002559999999999744
+bytes_per_dataset: 258048
+capture_n_frames: 0
+buffer_depth: 256
+gpu_buffer_depth: 4
+spacing_m: 0.6
+max_beams: 3
+initial_active_beams: 3
+sizeof_complex_float: 8
+sizeof_float: 4
+main_pool:
+  kotekan_metadata_pool: chartsMetadata
+  num_metadata_objects: 5120
+dpdk:
+  kotekan_stage: dpdkCore
+  lcore_start_delay: 1
+  lcore_cpu_map:
+  - 3
+  - 5
+  main_lcore_cpu: 4
+  lcore_port_map:
+  - - 0
+  - - 1
+  pcie_block_list:
+  - 0000:70:00.0
+  max_rx_pkt_len: 9000
+  rx_ring_size: 4096
+  num_mbufs: 65536
+  mbuf_data_size: 9216
+  handlers:
+  - dpdk_handler: rfsocHandlerShuffle
+    out_buffer: network_capture_buf_0
+    alignment: 15360
+    mask_buf: mask_buffer_zeros_0
+    first_subband: 0
+    coarse_freq_start: 0
+    num_local_freq: 336
+  - dpdk_handler: rfsocHandlerShuffle
+    out_buffer: network_capture_buf_1
+    alignment: 15360
+    mask_buf: mask_buffer_zeros_1
+    first_subband: 2
+    coarse_freq_start: 336
+    num_local_freq: 336
+run_metadata:
+  kotekan_stage: runMetadataWriter
+  base_dir: /data/commissioning_20261119_v2/test05_psr_b0950_transit
+  num_antennas: 64
+  signal_antennas:
+  - 0
+  - 4
+  - 32
+  - 36
+network_capture_buf_0:
+  kotekan_buffer: standard
+  num_frames: 256
+  frame_size: 16515072
+  numa_node: 0
+  metadata_pool: main_pool
+  zero_new_frames: true
+  mlock_frames: false
+mask_buffer_zeros_0:
+  kotekan_buffer: standard
+  num_frames: 256
+  frame_size: 768
+  numa_node: 0
+  metadata_pool: main_pool
+host_beam_power_buffer_0:
+  kotekan_buffer: standard
+  num_frames: 256
+  frame_size: 4032
+  numa_node: 0
+  metadata_pool: main_pool
+  zero_new_frames: true
+  mlock_frames: false
+zero_samples_0:
+  kotekan_stage: zeroSamples
+  out_buf: network_capture_buf_0
+  lost_samples_buf: mask_buffer_zeros_0
+  zero_value: 0
+  sample_size: 21504
+network_capture_buf_1:
+  kotekan_buffer: standard
+  num_frames: 256
+  frame_size: 16515072
+  numa_node: 0
+  metadata_pool: main_pool
+  zero_new_frames: true
+  mlock_frames: false
+mask_buffer_zeros_1:
+  kotekan_buffer: standard
+  num_frames: 256
+  frame_size: 768
+  numa_node: 0
+  metadata_pool: main_pool
+host_beam_power_buffer_1:
+  kotekan_buffer: standard
+  num_frames: 256
+  frame_size: 4032
+  numa_node: 0
+  metadata_pool: main_pool
+  zero_new_frames: true
+  mlock_frames: false
+zero_samples_1:
+  kotekan_stage: zeroSamples
+  out_buf: network_capture_buf_1
+  lost_samples_buf: mask_buffer_zeros_1
+  zero_value: 0
+  sample_size: 21504
+gpu:
+  profiling: true
+  commands_0: &id001
+  - name: cudaInputData
+    in_buf: host_voltage
+    gpu_mem: voltage_0
+  - name: cudaSyncInput
+  - name: cudaAntennaMaskCommand
+    gpu_mem_voltage: voltage_0
+    num_elements: 64
+    num_local_freq: 336
+    samples_per_data_set: 768
+    buffer_depth: 4
+    sample_stride: 4
+    antenna_order: descending
+    active_antennas:
+    - 0
+    - 4
+    - 32
+    - 36
+    auto_detect_enabled: true
+    blank_voltages_enabled: false
+    dead_power_threshold: 1.0
+    sat_power_threshold: 80.0
+    clip_fraction_threshold: 0.15
+    revival_frames: 5
+  - name: cudaRfiMitigationCommand
+    gpu_mem_voltage: voltage_0
+    gpu_mem_rfi_mask: rfi_mask_0
+    num_elements: 64
+    num_local_freq: 336
+    samples_per_data_set: 768
+    buffer_depth: 4
+    antenna_order: descending
+    active_antennas:
+    - 0
+    - 4
+    - 32
+    - 36
+    freq_start_hz: 300000000.0
+    freq_step_hz: 300000.0
+    enabled: true
+    blank_voltages_enabled: true
+    time_chunk_size: 256
+    sample_stride: 1
+    enable_sk_check: true
+    sk_sigma_threshold: 4.5
+    enable_time_burst_check: true
+    burst_sigma_threshold: 5.0
+    enable_freq_mad_check: true
+    freq_window_half_width: 8
+    mad_sigma_threshold: 6.0
+    enable_saturation_check: true
+    saturation_fraction_threshold: 0.02
+    enable_morphology_sir: true
+    enable_freq_shoulder_check: true
+    freq_shoulder_half_width: 2
+    shoulder_sigma_threshold: 2.5
+    edge_channels_to_ignore: 0
+    enable_persistent_ema: true
+    ema_alpha: 0.02
+  - name: cudaDirectBeamTrackerCommand
+    gpu_mem_voltage: voltage_0
+    gpu_mem_formed_beams: formed_beams_0
+    gpu_mem_beam_power: beam_power_0
+    num_elements: 64
+    num_local_freq: 336
+    samples_per_data_set: 768
+    spacing_m: 0.6
+    antenna_order: descending
+    active_antennas:
+    - 0
+    - 4
+    - 32
+    - 36
+    custom_antenna_positions:
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - -4.24775
+      - 0.0275
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.15
+      - 4.30625
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - -4.12725
+      - 4.42725
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    max_beams: 3
+    initial_active_beams: 3
+    buffer_depth: 4
+    time_chunk_size: 256
+    time_unroll: 4
+    taper_type: none
+    normalize_weights: true
+    beam_tile_size: 4
+    enable_cuda_graph: false
+    gains_file: /data/calibration/corr_1119/gains_corr_1119_0_4_32_36_fringehp_672x64.npy
+    conjugate_gains: true
+    enable_grid_mode: false
+    grid_step: 0.02
+    site_lat_deg: -33.4211146
+    site_lon_deg: -70.863471
+    site_alt_m: 458.0
+    freq_start_hz: 300000000.0
+    freq_step_hz: 300000.0
+    gpu_mem_rfi_mask: rfi_mask_0
+    uncalibrated_beams:
+    - 1
+    source_ra_deg: 148.2888
+    source_dec_deg: 7.9266
+    source_ra_deg_1: 148.2888
+    source_dec_deg_1: 7.9266
+    source_ra_deg_2: 118.2888
+    source_dec_deg_2: 7.9266
+  - name: cudaSyncOutput
+  - name: cudaOutputData
+    in_buf: host_voltage
+    gpu_mem: beam_power_0
+    out_buf: host_beam_power
+  gpu_0:
+    kotekan_stage: cudaProcess
+    gpu_id: 0
+    cuda_stream_base: 0
+    num_cuda_streams: 6
+    buffer_depth: 4
+    commands: *id001
+    in_buffers:
+      host_voltage: network_capture_buf_0
+    out_buffers:
+      host_beam_power: host_beam_power_buffer_0
+  commands_1: &id002
+  - name: cudaInputData
+    in_buf: host_voltage
+    gpu_mem: voltage_1
+  - name: cudaSyncInput
+  - name: cudaAntennaMaskCommand
+    gpu_mem_voltage: voltage_1
+    num_elements: 64
+    num_local_freq: 336
+    samples_per_data_set: 768
+    buffer_depth: 4
+    sample_stride: 4
+    antenna_order: descending
+    active_antennas:
+    - 0
+    - 4
+    - 32
+    - 36
+    auto_detect_enabled: true
+    blank_voltages_enabled: false
+    dead_power_threshold: 1.0
+    sat_power_threshold: 80.0
+    clip_fraction_threshold: 0.15
+    revival_frames: 5
+  - name: cudaRfiMitigationCommand
+    gpu_mem_voltage: voltage_1
+    gpu_mem_rfi_mask: rfi_mask_1
+    num_elements: 64
+    num_local_freq: 336
+    samples_per_data_set: 768
+    buffer_depth: 4
+    antenna_order: descending
+    active_antennas:
+    - 0
+    - 4
+    - 32
+    - 36
+    freq_start_hz: 400800000.0
+    freq_step_hz: 300000.0
+    enabled: true
+    blank_voltages_enabled: true
+    time_chunk_size: 256
+    sample_stride: 1
+    enable_sk_check: true
+    sk_sigma_threshold: 4.5
+    enable_time_burst_check: true
+    burst_sigma_threshold: 5.0
+    enable_freq_mad_check: true
+    freq_window_half_width: 8
+    mad_sigma_threshold: 6.0
+    enable_saturation_check: true
+    saturation_fraction_threshold: 0.02
+    enable_morphology_sir: true
+    enable_freq_shoulder_check: true
+    freq_shoulder_half_width: 2
+    shoulder_sigma_threshold: 2.5
+    edge_channels_to_ignore: 0
+    enable_persistent_ema: true
+    ema_alpha: 0.02
+  - name: cudaDirectBeamTrackerCommand
+    gpu_mem_voltage: voltage_1
+    gpu_mem_formed_beams: formed_beams_1
+    gpu_mem_beam_power: beam_power_1
+    num_elements: 64
+    num_local_freq: 336
+    samples_per_data_set: 768
+    spacing_m: 0.6
+    antenna_order: descending
+    active_antennas:
+    - 0
+    - 4
+    - 32
+    - 36
+    custom_antenna_positions:
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - -4.24775
+      - 0.0275
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.15
+      - 4.30625
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - -4.12725
+      - 4.42725
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 0.0
+    max_beams: 3
+    initial_active_beams: 3
+    buffer_depth: 4
+    time_chunk_size: 256
+    time_unroll: 4
+    taper_type: none
+    normalize_weights: true
+    beam_tile_size: 4
+    enable_cuda_graph: false
+    gains_file: /data/calibration/corr_1119/gains_corr_1119_0_4_32_36_fringehp_672x64.npy
+    conjugate_gains: true
+    enable_grid_mode: false
+    grid_step: 0.02
+    site_lat_deg: -33.4211146
+    site_lon_deg: -70.863471
+    site_alt_m: 458.0
+    freq_start_hz: 400800000.0
+    freq_step_hz: 300000.0
+    gpu_mem_rfi_mask: rfi_mask_1
+    uncalibrated_beams:
+    - 1
+    source_ra_deg: 148.2888
+    source_dec_deg: 7.9266
+    source_ra_deg_1: 148.2888
+    source_dec_deg_1: 7.9266
+    source_ra_deg_2: 118.2888
+    source_dec_deg_2: 7.9266
+  - name: cudaSyncOutput
+  - name: cudaOutputData
+    in_buf: host_voltage
+    gpu_mem: beam_power_1
+    out_buf: host_beam_power
+  gpu_1:
+    kotekan_stage: cudaProcess
+    gpu_id: 0
+    cuda_stream_base: 1
+    num_cuda_streams: 6
+    buffer_depth: 4
+    commands: *id002
+    in_buffers:
+      host_voltage: network_capture_buf_1
+    out_buffers:
+      host_beam_power: host_beam_power_buffer_1
+raw_file_write_power_0:
+  kotekan_stage: rawFileWrite
+  in_buf: host_beam_power_buffer_0
+  base_dir: /data/commissioning_20261119_v2/test05_psr_b0950_transit
+  create_base_dir: true
+  file_name: beam_power_freq0
+  file_ext: bin
+  prefix_hostname: false
+  skip_frames: 200
+  num_frames_per_file: 30000
+  exit_after_n_files: 16
+raw_file_write_power_1:
+  kotekan_stage: rawFileWrite
+  in_buf: host_beam_power_buffer_1
+  base_dir: /data/commissioning_20261119_v2/test05_psr_b0950_transit
+  create_base_dir: true
+  file_name: beam_power_freq1
+  file_ext: bin
+  prefix_hostname: false
+  skip_frames: 200
+  num_frames_per_file: 30000
+  exit_after_n_files: 16
