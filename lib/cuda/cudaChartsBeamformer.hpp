@@ -162,6 +162,29 @@ void launch_tiled_fp16_integrated_beamformer(cudaStream_t stream, const __half2*
                                              float* integrated_intensity, const Dimensions& dims,
                                              std::size_t integration_spectra);
 
+// Production beamformer (FP16_TC_ARCHITECTURE.md WP3): same inputs, output and power
+// convention as the scalar reference, computed with fp16 tensor-core MMA (WMMA m16n16k16)
+// and fp32 accumulation; one block per fine channel, one K = 10 window per 16-wide tile.
+// Requires E = 32 or 64, B a multiple of 16 up to 128, K = 10, sm_70 or newer, 32-byte
+// aligned weights and 16-byte aligned fine voltages. Accumulation order and rounding inside
+// the MMA are hardware-defined: not bit-identical to the scalar reference.
+void launch_tensor_core_fp16_integrated_beamformer(cudaStream_t stream,
+                                                   const __half2* fine_voltage,
+                                                   const __half* weights_fp16,
+                                                   const float* weight_scale,
+                                                   float* integrated_intensity,
+                                                   const Dimensions& dims,
+                                                   std::size_t integration_spectra);
+
+// Compiled resources of the tensor-core kernel on the current device, for the startup log.
+struct TensorCoreKernelResources {
+    int registers_per_thread = 0;
+    std::size_t static_shared_bytes = 0;
+    int threads_per_block = 0;
+    int blocks_per_sm = 0; // resident blocks per SM (cudaOccupancyMaxActiveBlocksPerMultiprocessor)
+};
+TensorCoreKernelResources tensor_core_beamformer_resources(std::size_t n_ant);
+
 void launch_quantize_integrated_intensity(cudaStream_t stream, const float* integrated_intensity,
                                           std::int8_t* quantized_intensity,
                                           Int8QuantizationParameters* parameters,

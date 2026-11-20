@@ -56,6 +56,9 @@ public:
     double freq_zero_hz = 300e6;
     double freq_step_hz = 300e3;
     std::size_t quant_param_bytes = 0;
+    // "tensor_core" (production) or "scalar_reference" (fp32 scalar kernel, for tests only).
+    std::string beamformer_kernel = "tensor_core";
+    std::string beamformer_resources_summary; // logged by the command
 
     __half* device_weights_fp16 = nullptr; // [f][re,im][b][e], immutable after init
     float* device_weight_scale = nullptr;  // [f][b] power-of-two scales, immutable after init
@@ -107,6 +110,22 @@ public:
         require(!cfg.exists(name, "quantize_clamp"),
                 "quantize_clamp was removed: fine voltages are fp16 with no clamp or int4 "
                 "re-quantization");
+
+        beamformer_kernel =
+            cfg.get_default<std::string>(name, "beamformer_kernel", "tensor_core");
+        require(beamformer_kernel == "tensor_core" || beamformer_kernel == "scalar_reference",
+                "beamformer_kernel must be 'tensor_core' or 'scalar_reference' (the scalar "
+                "fp32 kernel is a test reference)");
+        if (beamformer_kernel == "tensor_core") {
+            const TensorCoreKernelResources r = tensor_core_beamformer_resources(n_ant);
+            beamformer_resources_summary =
+                fmt::format("{} registers/thread, {} B static shared, {} threads/block, "
+                            "{} resident blocks/SM",
+                            r.registers_per_thread, r.static_shared_bytes, r.threads_per_block,
+                            r.blocks_per_sm);
+        } else {
+            beamformer_resources_summary = "test reference, not for production timing";
+        }
 
         upchan_gain = cfg.get_default<std::vector<float>>(name, "upchan_gain", upchan_gain);
         require(upchan_gain.size() == upchannelization_factor,
@@ -338,6 +357,9 @@ public:
             INFO("CHARTS weights loaded from .npy: {:s}", state->weights_summary);
         if (inst == 0)
             INFO("CHARTS shard {:d} {:s}", state->shard_id, state->device_weights_summary);
+        if (inst == 0)
+            INFO("CHARTS shard {:d} beamformer kernel {:s}: {:s}", state->shard_id,
+                 state->beamformer_kernel, state->beamformer_resources_summary);
         if (inst == 0 && !state->upchan_gain_unity)
             INFO("CHARTS fine upchan_gain source={:s} reference='{:s}' G[0]={:g} G[15]={:g} "
                  "sha256={:s}",
@@ -458,6 +480,7 @@ public:
             product.upchan_gain_reference = state->upchan_gain_reference;
             product.upchan_gain_sha256 = state->upchan_gain_sha256;
             product.weights = state->weights_identity;
+            product.beamformer_kernel = state->beamformer_kernel;
             product.intensity_buffer = out_buf_name;
             product.exposure_buffer = state->packet_loss_enabled
                                           ? cfg.get<std::string>(name, "out_buf_exposure")
@@ -573,11 +596,18 @@ public:
 
         float* fp32_target =
             state->quantize_int8 ? state->device_fp32_scratch : static_cast<float*>(d_output);
-        launch_tiled_fp16_integrated_beamformer(stream, state->device_fine_fp16,
-                                                state->device_weights_fp16,
-                                                state->device_weight_scale,
-                                                fp32_target, state->beamform_dims,
-                                                state->integration_spectra);
+        if (state->beamformer_kernel == "tensor_core") {
+            launch_tensor_core_fp16_integrated_beamformer(
+                stream, state->device_fine_fp16, state->device_weights_fp16,
+                state->device_weight_scale, fp32_target, state->beamform_dims,
+                state->integration_spectra);
+        } else {
+            launch_tiled_fp16_integrated_beamformer(stream, state->device_fine_fp16,
+                                                    state->device_weights_fp16,
+                                                    state->device_weight_scale,
+                                                    fp32_target, state->beamform_dims,
+                                                    state->integration_spectra);
+        }
 
         if (state->quantize_int8) {
             launch_quantize_integrated_intensity(

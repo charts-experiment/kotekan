@@ -21,6 +21,8 @@ namespace beamformer {
 // v2 (2026-11-02): history.upchan_gain describes the fine-channel gain G(u).
 // v3 (2026-11-14, branch beamform-64-fp16-tc): fp16 fine voltages without clamp or int4
 // re-quantization (history.fine_format), CHORD PFB window; no fine_quantization block.
+// weights.device (fp16 + power-of-two scale) and beamformer.{kernel, arithmetic} were added
+// to v3 on the same unreleased branch (2026-11-20).
 inline constexpr const char* product_schema = "charts-intensity-product-v3";
 
 struct ProductDescription {
@@ -41,6 +43,7 @@ struct ProductDescription {
     std::string upchan_gain_reference;
     std::string upchan_gain_sha256;  // of the applied float32 [336*32] array
     nlohmann::json weights;
+    std::string beamformer_kernel = "tensor_core"; // or "scalar_reference" (tests only)
     std::string intensity_buffer;
     std::string exposure_buffer;   // empty when packet loss is not enabled
     std::size_t exposure_bytes = 0;
@@ -124,6 +127,17 @@ inline nlohmann::json product_descriptor(const ProductDescription& p) {
           {"rule", "intensity, exposure and int8 parameter records of one frame carry the "
                    "same raw metadata; pair by key, never by ring slot or file index"}}},
         {"weights", p.weights},
+        {"beamformer",
+         {{"kernel", p.beamformer_kernel},
+          {"arithmetic",
+           p.beamformer_kernel == "tensor_core"
+               ? "fp16 tensor-core MMA (WMMA m16n16k16): exact fp16 x fp16 products, fp32 "
+                 "accumulation whose order and rounding are hardware-defined, so results are "
+                 "not bit-reproducible across GPU models; (s*Yr)^2 + (s*Yi)^2 and the window sum "
+                 "in fp32, spectra in time order"
+               : "scalar fp32 test reference: fp16 inputs converted exactly to fp32, products "
+                 "and sums in element order with fp32 FMA; (s*Yr)^2 + (s*Yi)^2 and the window "
+                 "sum in fp32, spectra in time order"}}},
         {"exposure", nullptr},
         {"int8", nullptr},
     };
