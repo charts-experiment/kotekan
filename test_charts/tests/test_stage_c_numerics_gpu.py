@@ -59,7 +59,11 @@ EPS32 = 2.0 ** -24
 WINDOW_DENOMINATOR = 256
 OLD_WINDOW_DENOMINATOR = 258
 # |X_fp32 - X_float64| <= FP32_FINE_ERROR * G * sum_s |h_s| (|Re x_s| + |Im x_s|).
-FP32_FINE_ERROR = 64 * EPS32
+# Float32 emulations of the FIR + FFT reach 3.8-4.4 * EPS32; 16 keeps a >= 3.6x margin. Validated on
+# the GPU (RTX 5090, 2026-11-20) with 0 bound violations in Stage C and the gain numerics.
+# Most ambiguity is structural, not margin: fine sidelobes ~1e-3 of the input have an fp16
+# spacing far below the absolute float32 error (factor 64 -> 16 only lowers it 84 % -> 70 %).
+FP32_FINE_ERROR = 16 * EPS32
 N_ONEHOT = 48
 
 

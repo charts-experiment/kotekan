@@ -186,7 +186,13 @@ class ProductGpu(unittest.TestCase):
             self.assertEqual(m["decoder_violations"], 0, m)
             self.assertEqual(m["invalid_codes"], 0, m)
             self.assertTrue(m["chunk_extremes_at_endpoints"], m)
-            self.assertGreater(m["constant_chunks"], 0, m)     # late-start channels, window 0
+            # Only frame 0 has zero input over a whole support: the late-start channels
+            # (f % 12 == 10) are zero for n < 320, i.e. window 0 of frame 0, which gives
+            # all-zero 1x16x16 chunks (2 frequency tiles per channel, every beam tile). From
+            # frame 1 on they carry the tone; with fp16 fine voltages no other chunk is
+            # constant (the int4 path rounded weak sidelobes to 0 and made more).
+            n_late = sum(1 for f in range(F) if f % 12 == 10)
+            self.assertEqual(m["constant_chunks"], n_late * 2 * (B // 16) if i == 0 else 0, m)
             self.assertTrue(m["constant_chunks_exact"], m)
             self.assertGreaterEqual(m["finite_code_range"][0], -127)
 
