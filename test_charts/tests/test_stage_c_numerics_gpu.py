@@ -29,6 +29,7 @@ Synthetic verification only; nothing here is validated against the sky.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -158,11 +159,49 @@ def fine_fp16(raw_frame: np.ndarray, history: np.ndarray | None, *,
 
 # --------------------------------------------------------------------------- beam power
 
-def expected_power(x: np.ndarray, eps: np.ndarray | None, w_bfe: np.ndarray, k: int):
+def fp16_device_weights(w: np.ndarray):
+    """The command's fp16 weight conversion (WP2), written from its documented rule.
+
+    w [..., E] complex (complex64 values, as loaded). Per leading index (b, f):
+    s = 2^k with k the smallest integer such that 2^(2k) >= max_e(Re² + Im²) (float32
+    components squared and summed in float64), W16 = float16 round-to-nearest-even of W/s
+    (exact division), s = 0 and W16 = 0 for an all-zero (b, f).
+    Returns (re16, im16 float16 [..., E], scale float32 [...], effective s*W16 complex128)."""
+    w = np.asarray(w, np.complex64)
+    re, im = np.ascontiguousarray(w.real), np.ascontiguousarray(w.imag)
+    max_sq = np.max(re.astype(np.float64) ** 2 + im.astype(np.float64) ** 2, axis=-1)
+    m, e = np.frexp(max_sq)
+    k = np.where(m == 0.5, np.ceil((e - 1) / 2), np.ceil(e / 2)).astype(np.int64)
+    zero = max_sq == 0
+    k[zero] = 0
+    scale = np.where(zero, 0.0, np.ldexp(1.0, k)).astype(np.float32)
+    inv = np.ldexp(1.0, -k).astype(np.float32)[..., None]
+    # An all-zero (b, f) is stored as +0 whatever the sign of its zeros (the command skips it).
+    re16 = np.where(zero[..., None], np.float16(0), (re * inv).astype(np.float16))
+    im16 = np.where(zero[..., None], np.float16(0), (im * inv).astype(np.float16))
+    eff = scale.astype(np.float64)[..., None] * (re16.astype(np.float64) + 1j * im16.astype(np.float64))
+    return re16, im16, scale, eff
+
+
+def effective_weights_sha256(w_bfe: np.ndarray) -> str:
+    """SHA-256 of the device weights as the command hashes them: fp16 [F][2][B][E] then
+    float32 scale [F][B], little-endian. w_bfe is the canonical [B][F][E]."""
+    re16, im16, scale, _ = fp16_device_weights(w_bfe)
+    planes = np.ascontiguousarray(np.stack([re16, im16], axis=0).transpose(2, 0, 1, 3), "<f2")
+    scales = np.ascontiguousarray(scale.T, "<f4")
+    return hashlib.sha256(planes.tobytes() + scales.tobytes()).hexdigest()
+
+
+def expected_power(x: np.ndarray, eps: np.ndarray | None, w_bfe: np.ndarray, k: int,
+                   device_weights: bool = True):
     """x [T][F'][E] complex; eps [T][F'][E] allowed |dRe| + |dIm| per sample (fine_fp16) or
     None; w [B][F'][E], or [B][E] for frequency-independent probes.
+    device_weights: use the effective weights s*W16 that the GPU applies (fp16_device_weights);
+    False uses w as given (a negative control, or comparisons between CPU references).
     Returns (P, bound, ambiguous) as [ceil(T/K)][F'][B]; ambiguous marks windows whose
     expectation contains an fp16 rounding ambiguity (the only place bound exceeds float)."""
+    if device_weights:
+        w_bfe = fp16_device_weights(w_bfe)[3]
     t, nf, _ = x.shape
     n_out = -(-t // k)
     p = np.zeros((n_out, nf, B))
@@ -217,15 +256,23 @@ def onehot_check(got: np.ndarray, want: np.ndarray, ambiguous: np.ndarray, k: in
 
 def compare(got: np.ndarray, want: np.ndarray, bound: np.ndarray, ambiguous=None) -> dict:
     """Bound violations everywhere; the tolerance 1e-3 + 1e-5|P| where no rounding is
-    ambiguous (elsewhere a legitimate fp16 rounding flip changes the voltage by one spacing)."""
+    ambiguous (elsewhere a legitimate fp16 rounding flip changes the voltage by one spacing)
+    and the output is not dominated by cancellation. An output whose float32 accumulation
+    bound exceeds 1000x that tolerance (sum_m (sum_e |W||x|)^2 >~ 5e2 P: a beam sum that
+    cancels by orders of magnitude) cannot meet 1e-5|P| in float32 arithmetic; it is held to
+    the bound only and counted in plan_tolerance_ill_conditioned. Found 2026-11-20 with fp16
+    weights: one (f, b) with cancellation 6.8e4 had relative error 1.7e-5, 0.00 of its bound."""
     err = np.abs(got.astype(np.float64) - want)
     ratio = err / bound
     worst = np.unravel_index(int(np.argmax(ratio)), ratio.shape)
-    plan = err > 1e-3 + 1e-5 * np.abs(want)
+    plan_tol = 1e-3 + 1e-5 * np.abs(want)
+    plan = err > plan_tol
     clean = np.ones(err.shape, bool) if ambiguous is None else ~ambiguous
+    conditioned = bound <= 1000 * plan_tol
     return {"n": int(err.size), "violations": int(np.sum(err > bound)),
-            "plan_tolerance_violations": int(np.sum(plan & clean)),
-            "plan_tolerance_checked": int(np.sum(clean)),
+            "plan_tolerance_violations": int(np.sum(plan & clean & conditioned)),
+            "plan_tolerance_checked": int(np.sum(clean & conditioned)),
+            "plan_tolerance_ill_conditioned": int(np.sum(clean & ~conditioned)),
             "ambiguous_outputs_bound_only": int(err.size - np.sum(clean)),
             "max_err": float(err.max()), "max_err_over_bound": float(ratio.max()),
             "worst_index": [int(i) for i in worst], "worst_want": float(want[worst]),

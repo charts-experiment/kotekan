@@ -333,7 +333,9 @@ class TestChartsSimulationSuite(unittest.TestCase):
         self.assertEqual(default_vram["input_mode"], "fine")
         self.assertEqual(default_vram["output_format"], "int8")
         self.assertGreater(default_vram["total_vram_gb"], 1.0)
-        self.assertLess(default_vram["total_vram_gb"], 6.0)
+        # fp16 fine voltages (1.23 GiB per shard) since the fp16 fine path; the plan budget
+        # (FP16_TC_ARCHITECTURE.md section 3) is well under 8 GiB for two shards.
+        self.assertLess(default_vram["total_vram_gb"], 8.0)
 
     def test_beamformer_gpu_end_to_end_parity(self):
         """Run unified cudaChartsBeamformerCommand (default fine+K=10+int8 and analytical float32 reference) in Kotekan."""
@@ -434,9 +436,14 @@ class TestChartsSimulationSuite(unittest.TestCase):
         metrics = sc.compare(info_f32["intensities"], want, bound, ambiguous)
         self.assertEqual(metrics["violations"], 0, metrics)
         self.assertEqual(metrics["plan_tolerance_violations"], 0, metrics)
-        # The plain reference agrees with the bounded one wherever no rounding is ambiguous.
+        # The plain reference (as-given weights) agrees with the bounded one evaluated with the
+        # same weights wherever no rounding is ambiguous; the GPU check above uses the fp16
+        # device weights.
         ref = compute_reference_beamformer_intensity(q, shard_id=0, num_beams=n_beams)
-        np.testing.assert_allclose(ref[~ambiguous], want[~ambiguous], rtol=1e-5, atol=1e-3)
+        want_plain, _, _ = sc.expected_power(
+            q, eps, default_geometry_weights(shard_id=0, num_beams=n_beams), 10,
+            device_weights=False)
+        np.testing.assert_allclose(ref[~ambiguous], want_plain[~ambiguous], rtol=1e-5, atol=1e-3)
 
 
 if __name__ == "__main__":

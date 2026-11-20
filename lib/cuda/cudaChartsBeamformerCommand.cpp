@@ -50,13 +50,15 @@ public:
     bool packet_loss_enabled = false;
     std::size_t exposure_bytes = 0;
     std::string weights_summary; // set for .npy weights, logged by the command
+    std::string device_weights_summary; // fp16 conversion statistics, logged by the command
     bool legacy_bin_weights = false;
     nlohmann::json weights_identity; // recorded in the product descriptor
     double freq_zero_hz = 300e6;
     double freq_step_hz = 300e3;
     std::size_t quant_param_bytes = 0;
 
-    ComplexFloat* device_weights = nullptr;
+    __half* device_weights_fp16 = nullptr; // [f][re,im][b][e], immutable after init
+    float* device_weight_scale = nullptr;  // [f][b] power-of-two scales, immutable after init
     float* device_upchan_gain = nullptr; // [336*32], immutable after init
     std::uint8_t* device_history_samples = nullptr;
     __half2* device_fine_fp16 = nullptr; // [T_raw/32][10752][64] fine voltages
@@ -216,7 +218,6 @@ public:
                                     {"note", "no descriptor: conventions and calibration "
                                              "are not declared"}};
             }
-            host_weights = repack_weights_to_tiled(host_weights, beamform_dims);
         } else {
             const auto positions = default_positions(n_ant, spacing_m);
             const auto directions = default_beam_grid(n_beams, beam_l_step, 0.0F);
@@ -226,15 +227,58 @@ public:
                                 {"spacing_m", spacing_m},
                                 {"beam_l_step", beam_l_step},
                                 {"note", "diagnostic only; never use for sky pointing"}};
-            host_weights = generate_tiled_weights(beamform_dims, positions, freqs, directions);
+            host_weights = generate_weights(beamform_dims, positions, freqs, directions);
         }
 
-        const std::size_t weight_bytes = host_weights.size() * sizeof(ComplexFloat);
-        device_weights =
-            static_cast<ComplexFloat*>(device.get_gpu_memory(name + "/weights", weight_bytes));
-        (void)cudaGetLastError();
-        CHECK_CUDA_ERROR(cudaMemcpy(device_weights, host_weights.data(), weight_bytes,
-                                    cudaMemcpyHostToDevice));
+        // fp16 device weights with a power-of-two scale per (beam, fine channel), converted
+        // once here from the canonical complex64 [B][F][E] (FP16_TC_ARCHITECTURE.md WP2).
+        {
+            const Fp16Weights w16 = convert_weights_fp16(host_weights, beamform_dims);
+            Weights().swap(host_weights);
+            const std::size_t value_bytes = w16.values.size() * sizeof(__half);
+            const std::size_t scale_bytes = w16.scale.size() * sizeof(float);
+            // Identity of what the GPU applies: fp16 planes then float32 scales, little-endian.
+            std::string effective_sha256;
+            {
+                std::vector<char> effective(value_bytes + scale_bytes);
+                std::memcpy(effective.data(), w16.values.data(), value_bytes);
+                std::memcpy(effective.data() + value_bytes, w16.scale.data(), scale_bytes);
+                effective_sha256 = detail::sha256_hex(effective.data(), effective.size());
+            }
+            weights_identity["device"] = {
+                {"precision", "fp16"},
+                {"layout", "fp16 [F][2][B][E] (plane 0 real, 1 imaginary), then float32 scale "
+                           "[F][B]; little-endian"},
+                {"scale_rule", "s[b,f] = 2^k, smallest integer k with 2^(2k) >= "
+                               "max_e(Re W^2 + Im W^2) (float32 components squared and summed in "
+                               "float64); W16 = fp16 round-to-nearest-even of W / s; s = 0 and "
+                               "W16 = 0 when every weight of (b, f) is zero"},
+                {"power", "P = sum over the window of (s*Yr)^2 + (s*Yi)^2, "
+                          "Y = sum_e W16[b,f,e] x[f,e]"},
+                {"effective_sha256", effective_sha256},
+                {"effective_sha256_of", "fp16 value bytes followed by float32 scale bytes"},
+                {"max_relative_error", w16.max_relative_error},
+                {"rms_relative_error", w16.rms_relative_error},
+                {"relative_error_definition", "|s*W16 - W| / max_e |W[b,f,e]| over the elements "
+                                              "of (b, f) with nonzero weights"},
+                {"zero_beam_channels", w16.zero_beam_channels},
+                {"fp16_subnormal_components", w16.subnormal_components},
+                {"fp16_flushed_components", w16.flushed_components}};
+            device_weights_summary = fmt::format(
+                "fp16 weights: max rel error {:.3e}, rms {:.3e}, zero (b,f) {}, subnormal {}, "
+                "flushed {}, effective sha256 {}",
+                w16.max_relative_error, w16.rms_relative_error, w16.zero_beam_channels,
+                w16.subnormal_components, w16.flushed_components, effective_sha256);
+            device_weights_fp16 = static_cast<__half*>(
+                device.get_gpu_memory(name + "/weights_fp16", value_bytes));
+            device_weight_scale = static_cast<float*>(
+                device.get_gpu_memory(name + "/weight_scale", scale_bytes));
+            (void)cudaGetLastError();
+            CHECK_CUDA_ERROR(cudaMemcpy(device_weights_fp16, w16.values.data(), value_bytes,
+                                        cudaMemcpyHostToDevice));
+            CHECK_CUDA_ERROR(cudaMemcpy(device_weight_scale, w16.scale.data(), scale_bytes,
+                                        cudaMemcpyHostToDevice));
+        }
 
         {
             const std::size_t history_bytes =
@@ -292,6 +336,8 @@ public:
         require(bool(state), "missing chartsBeamformerState");
         if (inst == 0 && !state->weights_summary.empty())
             INFO("CHARTS weights loaded from .npy: {:s}", state->weights_summary);
+        if (inst == 0)
+            INFO("CHARTS shard {:d} {:s}", state->shard_id, state->device_weights_summary);
         if (inst == 0 && !state->upchan_gain_unity)
             INFO("CHARTS fine upchan_gain source={:s} reference='{:s}' G[0]={:g} G[15]={:g} "
                  "sha256={:s}",
@@ -528,7 +574,8 @@ public:
         float* fp32_target =
             state->quantize_int8 ? state->device_fp32_scratch : static_cast<float*>(d_output);
         launch_tiled_fp16_integrated_beamformer(stream, state->device_fine_fp16,
-                                                state->device_weights,
+                                                state->device_weights_fp16,
+                                                state->device_weight_scale,
                                                 fp32_target, state->beamform_dims,
                                                 state->integration_spectra);
 

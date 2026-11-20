@@ -252,7 +252,6 @@ def calculate_beamformer_vram(
     local_freq = 336
     input_frame_bytes = n_time * local_freq * n_ant
 
-    beam_tiles = (n_beams + 31) // 32
     n_time_bf = n_time // 32
     n_freq_bf = local_freq * 32
     fine_fp16_bytes = n_time_bf * n_freq_bf * n_ant * 4      # __half2 fine voltages
@@ -273,7 +272,8 @@ def calculate_beamformer_vram(
         quant_params_bytes = 0
         fp32_scratch_bytes = 0
 
-    weights_bytes = n_freq_bf * beam_tiles * n_ant * 32 * 8
+    # fp16 device weights [F][re,im][B][E] plus float32 scale [F][B] (FP16 plan WP2).
+    weights_bytes = n_freq_bf * 2 * n_beams * n_ant * 2 + n_freq_bf * n_beams * 4
 
     per_shard_bytes = (
         (input_frame_bytes + output_frame_bytes) * buffer_depth

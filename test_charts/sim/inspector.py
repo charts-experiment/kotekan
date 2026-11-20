@@ -229,12 +229,16 @@ def default_geometry_weights(
 ) -> np.ndarray:
     """Analytical counterpart of the command's diagnostic generated weights (no weights_file):
     W[b, f, a] = exp(+i 2 pi nu_f / c * x_a * l_b), x_a = (a % 8) * spacing,
-    l_b = (b - B/2) * beam_l_step, m = 0. Returns complex64 [B][10752][E]."""
+    l_b = (b - B/2) * beam_l_step, m = 0. Returns complex64 [B][10752][E].
+    x_a and l_b are formed in float32 as the command does (float c * spacing_m, float
+    (b - B/2) * l_step), so the complex64 values, and hence the fp16 device weights, match it."""
     rows = 4 if n_ant == 32 else 8
     cols = 8
-    pos_x = np.array([float(c) * spacing_m for _ in range(rows) for c in range(cols)], dtype=np.float64)
+    pos_x = np.array([np.float32(c) * np.float32(spacing_m) for _ in range(rows) for c in range(cols)],
+                     dtype=np.float32).astype(np.float64)
     center = num_beams // 2
-    l_vals = np.array([(b - center) * beam_l_step for b in range(num_beams)], dtype=np.float64)
+    l_vals = np.array([np.float32(b - center) * np.float32(beam_l_step) for b in range(num_beams)],
+                      dtype=np.float32).astype(np.float64)
     wave_numbers = (2.0 * math.pi * fine_frequencies_hz(shard_id, freq_zero_hz, freq_step_hz)) / 299792458.0
     phases = wave_numbers[None, :, None] * (l_vals[:, None, None] * pos_x[None, None, :])
     return (np.cos(phases).astype(np.float32) + 1j * np.sin(phases).astype(np.float32)).astype(np.complex64)

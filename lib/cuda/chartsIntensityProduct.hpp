@@ -73,7 +73,9 @@ inline nlohmann::json product_descriptor(const ProductDescription& p) {
           {"layout", "C-order, beam fastest"},
           {"power_convention",
            "sum over the window of |sum_e W[b,f,e] x[f,e]|^2 for every supplied spectrum, "
-           "where x is the fp16 fine voltage after the gain G(u) (history.upchan_gain); no "
+           "where W is the effective weight s*W16 applied on the GPU (weights.device: fp16 "
+           "with a power-of-two scale per beam and channel) and x is the fp16 fine voltage "
+           "after the gain G(u) (history.upchan_gain); no "
            "averaging, exposure normalization or rejection; arbitrary units of "
            "(weight * fine voltage)^2, the fine voltage being the PFB output of int4 input "
            "codes"},

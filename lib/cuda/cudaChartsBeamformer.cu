@@ -1,6 +1,8 @@
 #include "cudaChartsBeamformer.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -17,6 +19,9 @@ constexpr unsigned int tiled_beam_tile = 32;
 constexpr unsigned int tiled_time_tile = 8;
 constexpr unsigned int tiled_threads = tiled_beam_tile * tiled_time_tile;
 constexpr unsigned int tiled_max_antennas = 64;
+// fp16-weight kernel: shared weights [antenna][beam] padded to 33 beams so the staging
+// writes (consecutive threads = consecutive antennas) do not all hit one bank.
+constexpr unsigned int fp16_weight_stride = tiled_beam_tile + 1;
 
 // =============================================================================
 // 1. Tiled Packed int4x2 Beamformer Kernels (Unintegrated & Fused Integrated)
@@ -91,17 +96,18 @@ __global__ void tiled_packed_voltage_beamformer_kernel(
         sum_real * sum_real + sum_imag * sum_imag;
 }
 
-// Scalar fp32 reference: reads fp16 fine voltages, fp32 weights and arithmetic. Kept as the
-// test reference for the tensor-core kernel (FP16_TC_ARCHITECTURE.md, WP1/WP3).
+// Scalar fp32 reference: reads fp16 fine voltages and fp16 weights with a power-of-two scale
+// per (b, f), fp32 arithmetic. Kept as the test reference for the tensor-core kernel
+// (FP16_TC_ARCHITECTURE.md, WP1-WP3).
 __global__ void tiled_fp16_integrated_voltage_beamformer_kernel(
-    const __half2* fine_voltage, const ComplexFloat* weights,
+    const __half2* fine_voltage, const __half* weights_fp16, const float* weight_scale,
     float* integrated_intensity, const std::size_t n_time,
     const std::size_t n_freq, const std::size_t n_ant,
     const std::size_t n_beams, const std::size_t integration_spectra) {
     extern __shared__ unsigned char shared_storage[];
     auto* shared_weights = reinterpret_cast<ComplexFloat*>(shared_storage);
     auto* shared_voltage = reinterpret_cast<float2*>(
-        shared_storage + tiled_max_antennas * tiled_beam_tile * sizeof(ComplexFloat));
+        shared_storage + tiled_max_antennas * fp16_weight_stride * sizeof(ComplexFloat));
     auto* shared_power = reinterpret_cast<float*>(
         shared_voltage + tiled_time_tile * tiled_max_antennas);
 
@@ -112,26 +118,26 @@ __global__ void tiled_fp16_integrated_voltage_beamformer_kernel(
     const std::size_t window = blockIdx.z;
     const std::size_t linear_thread = local_time * tiled_beam_tile + local_beam;
 
+    // [f][plane][b][e] planes: element index fastest for coalesced reads.
+    const std::size_t plane_stride = n_beams * n_ant;
+    const __half* real_plane = weights_fp16 + frequency * 2 * plane_stride;
+    const __half* imag_plane = real_plane + plane_stride;
     for (std::size_t index = linear_thread; index < n_ant * tiled_beam_tile;
          index += tiled_threads) {
-        const std::size_t antenna = index / tiled_beam_tile;
-        const std::size_t tile_beam = index % tiled_beam_tile;
+        const std::size_t tile_beam = index / n_ant;
+        const std::size_t antenna = index % n_ant;
         const std::size_t global_beam =
             static_cast<std::size_t>(blockIdx.x) * tiled_beam_tile + tile_beam;
-        const auto shared_index = antenna * tiled_beam_tile + tile_beam;
+        const auto shared_index = antenna * fp16_weight_stride + tile_beam;
         if (global_beam < n_beams) {
-            const std::size_t tw_idx =
-                (((frequency * ((n_beams + tiled_beam_tile - 1) / tiled_beam_tile)
-                   + static_cast<std::size_t>(blockIdx.x))
-                  * n_ant
-                  + antenna)
-                     * tiled_beam_tile
-                 + tile_beam);
-            shared_weights[shared_index] = weights[tw_idx];
+            const std::size_t w_idx = global_beam * n_ant + antenna;
+            shared_weights[shared_index] = ComplexFloat{__half2float(real_plane[w_idx]),
+                                                        __half2float(imag_plane[w_idx])};
         } else {
             shared_weights[shared_index] = ComplexFloat{0.0F, 0.0F};
         }
     }
+    const float scale = beam < n_beams ? weight_scale[frequency * n_beams + beam] : 0.0F;
     __syncthreads();
 
     const std::size_t first_time = window * integration_spectra;
@@ -163,11 +169,14 @@ __global__ void tiled_fp16_integrated_voltage_beamformer_kernel(
                 const float sample_real = sample.x;
                 const float sample_imag = sample.y;
                 const ComplexFloat weight =
-                    shared_weights[antenna * tiled_beam_tile + local_beam];
+                    shared_weights[antenna * fp16_weight_stride + local_beam];
                 sum_real += weight.real * sample_real - weight.imag * sample_imag;
                 sum_imag += weight.real * sample_imag + weight.imag * sample_real;
             }
-            power = sum_real * sum_real + sum_imag * sum_imag;
+            // Scale before squaring: s^2 alone could under/overflow float32.
+            const float scaled_real = scale * sum_real;
+            const float scaled_imag = scale * sum_imag;
+            power = scaled_real * scaled_real + scaled_imag * scaled_imag;
         }
         shared_power[local_time * tiled_beam_tile + local_beam] = power;
         __syncthreads();
@@ -351,31 +360,14 @@ std::vector<double> shard_frequencies_hz(const std::size_t shard_id,
     return freqs;
 }
 
-TiledWeights repack_weights_to_tiled(const Weights& canonical_weights, const Dimensions& dims) {
-    if (canonical_weights.size() != dims.n_beams * dims.n_freq * dims.n_ant) {
-        throw std::invalid_argument("canonical weight count mismatch");
-    }
-    TiledWeights tiled(tiled_weight_count(dims), ComplexFloat{0.0F, 0.0F});
-    for (std::size_t f = 0; f < dims.n_freq; ++f) {
-        for (std::size_t b = 0; b < dims.n_beams; ++b) {
-            for (std::size_t a = 0; a < dims.n_ant; ++a) {
-                tiled[tiled_weight_index(f, b / tiled_weight_beam_tile, a,
-                                         b % tiled_weight_beam_tile, dims)] =
-                    canonical_weights[weight_index(b, f, a, dims)];
-            }
-        }
-    }
-    return tiled;
-}
-
-TiledWeights generate_tiled_weights(const Dimensions& dims, const std::vector<Vec3>& positions_m,
-                                    const std::vector<double>& frequencies_hz,
-                                    const std::vector<Vec3>& beam_directions) {
+Weights generate_weights(const Dimensions& dims, const std::vector<Vec3>& positions_m,
+                         const std::vector<double>& frequencies_hz,
+                         const std::vector<Vec3>& beam_directions) {
     if (positions_m.size() != dims.n_ant || frequencies_hz.size() != dims.n_freq
         || beam_directions.size() != dims.n_beams) {
-        throw std::invalid_argument("generate_tiled_weights dimension mismatch");
+        throw std::invalid_argument("generate_weights dimension mismatch");
     }
-    TiledWeights tiled(tiled_weight_count(dims), ComplexFloat{0.0F, 0.0F});
+    Weights weights(dims.n_beams * dims.n_freq * dims.n_ant);
     for (std::size_t f = 0; f < dims.n_freq; ++f) {
         const double wave_number = two_pi * frequencies_hz[f] / speed_of_light_m_per_s;
         for (std::size_t b = 0; b < dims.n_beams; ++b) {
@@ -386,15 +378,83 @@ TiledWeights generate_tiled_weights(const Dimensions& dims, const std::vector<Ve
                                        + static_cast<double>(pos[1]) * dir[1]
                                        + static_cast<double>(pos[2]) * dir[2];
                 const double phase = wave_number * delay_m;
-                tiled[tiled_weight_index(f, b / tiled_weight_beam_tile, a,
-                                         b % tiled_weight_beam_tile, dims)] = {
+                weights[weight_index(b, f, a, dims)] = {
                     static_cast<float>(std::cos(phase)),
                     static_cast<float>(std::sin(phase)),
                 };
             }
         }
     }
-    return tiled;
+    return weights;
+}
+
+Fp16Weights convert_weights_fp16(const Weights& canonical_weights, const Dimensions& dims) {
+    if (canonical_weights.size() != dims.n_beams * dims.n_freq * dims.n_ant) {
+        throw std::invalid_argument("canonical weight count mismatch");
+    }
+    Fp16Weights out;
+    out.values.assign(fp16_weight_count(dims), __float2half_rn(0.0F));
+    out.scale.assign(dims.n_freq * dims.n_beams, 0.0F);
+    double sum_sq_error = 0.0;
+    std::size_t error_count = 0;
+    for (std::size_t b = 0; b < dims.n_beams; ++b) {
+        for (std::size_t f = 0; f < dims.n_freq; ++f) {
+            const ComplexFloat* w = &canonical_weights[weight_index(b, f, 0, dims)];
+            double max_sq = 0.0;
+            for (std::size_t a = 0; a < dims.n_ant; ++a) {
+                if (!std::isfinite(w[a].real) || !std::isfinite(w[a].imag)) {
+                    throw std::invalid_argument("weights must be finite");
+                }
+                // Squares of float32 values are exact in double: no FMA dependence.
+                const double re2 = static_cast<double>(w[a].real) * w[a].real;
+                const double im2 = static_cast<double>(w[a].imag) * w[a].imag;
+                max_sq = std::max(max_sq, re2 + im2);
+            }
+            if (max_sq == 0.0) {
+                ++out.zero_beam_channels; // s = 0, W16 = 0: exact zero power
+                continue;
+            }
+            // Smallest k with 2^(2k) >= max_sq. max_sq = m * 2^e, m in [0.5, 1).
+            int e = 0;
+            const double m = std::frexp(max_sq, &e);
+            const int k = (m == 0.5) ? static_cast<int>(std::ceil((e - 1) / 2.0))
+                                     : static_cast<int>(std::ceil(e / 2.0));
+            if (k < -126 || k > 127) {
+                throw std::invalid_argument(
+                    "weight magnitude outside the float32 normal range of the fp16 scale");
+            }
+            const float s = std::ldexp(1.0F, k);
+            const float inv_s = std::ldexp(1.0F, -k); // exact: W / s == W * 2^-k
+            const double max_abs = std::sqrt(max_sq);
+            out.scale[weight_scale_index(f, b, dims)] = s;
+            for (std::size_t a = 0; a < dims.n_ant; ++a) {
+                const float parts[2] = {w[a].real, w[a].imag};
+                double err_sq = 0.0;
+                for (std::size_t plane = 0; plane < fp16_weight_plane_count; ++plane) {
+                    const float scaled = parts[plane] * inv_s;
+                    const __half h = __float2half_rn(scaled);
+                    std::uint16_t bits = 0;
+                    std::memcpy(&bits, &h, sizeof(bits));
+                    if (scaled != 0.0F) {
+                        if ((bits & 0x7fffU) == 0)
+                            ++out.flushed_components;
+                        else if ((bits & 0x7c00U) == 0)
+                            ++out.subnormal_components;
+                    }
+                    out.values[fp16_weight_index(f, plane, b, a, dims)] = h;
+                    const double back = static_cast<double>(__half2float(h)) * s;
+                    const double d = back - static_cast<double>(parts[plane]);
+                    err_sq += d * d;
+                }
+                const double rel = std::sqrt(err_sq) / max_abs;
+                out.max_relative_error = std::max(out.max_relative_error, rel);
+                sum_sq_error += rel * rel;
+                ++error_count;
+            }
+        }
+    }
+    out.rms_relative_error = error_count ? std::sqrt(sum_sq_error / error_count) : 0.0;
+    return out;
 }
 
 // =============================================================================
@@ -426,11 +486,12 @@ void launch_tiled_packed_beamformer(const cudaStream_t stream, const std::uint8_
 
 void launch_tiled_fp16_integrated_beamformer(const cudaStream_t stream,
                                              const __half2* fine_voltage,
-                                             const ComplexFloat* tiled_weights,
+                                             const __half* weights_fp16,
+                                             const float* weight_scale,
                                              float* integrated_intensity,
                                              const Dimensions& dims,
                                              const std::size_t integration_spectra) {
-    if (!fine_voltage || !tiled_weights || !integrated_intensity) {
+    if (!fine_voltage || !weights_fp16 || !weight_scale || !integrated_intensity) {
         throw std::invalid_argument("CUDA tiled integrated beamformer pointers must not be null");
     }
     if (integration_spectra != 10) {
@@ -441,7 +502,7 @@ void launch_tiled_fp16_integrated_beamformer(const cudaStream_t stream,
     const std::size_t window_count = integrated_time_count(dims.n_time, integration_spectra);
     const auto grid_x = (dims.n_beams + tiled_beam_tile - 1) / tiled_beam_tile;
     constexpr std::size_t shared_bytes =
-        tiled_max_antennas * tiled_beam_tile * sizeof(ComplexFloat)
+        tiled_max_antennas * fp16_weight_stride * sizeof(ComplexFloat)
         + tiled_time_tile * tiled_max_antennas * sizeof(float2)
         + tiled_time_tile * tiled_beam_tile * sizeof(float);
     const dim3 grid(static_cast<unsigned int>(grid_x),
@@ -449,8 +510,8 @@ void launch_tiled_fp16_integrated_beamformer(const cudaStream_t stream,
                     static_cast<unsigned int>(window_count));
     const dim3 block(tiled_beam_tile, tiled_time_tile, 1);
     tiled_fp16_integrated_voltage_beamformer_kernel<<<grid, block, shared_bytes, stream>>>(
-        fine_voltage, tiled_weights, integrated_intensity, dims.n_time, dims.n_freq, dims.n_ant,
-        dims.n_beams, integration_spectra);
+        fine_voltage, weights_fp16, weight_scale, integrated_intensity, dims.n_time, dims.n_freq,
+        dims.n_ant, dims.n_beams, integration_spectra);
     check_cuda(cudaGetLastError(), "tiled_fp16_integrated_voltage_beamformer_kernel launch");
 }
 
