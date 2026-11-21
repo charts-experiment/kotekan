@@ -1175,9 +1175,13 @@ __global__ void reduce_beam_power_kernel(
     const std::size_t beam_pol_stride = max_beams_stride * n_pol;
     const std::size_t tf_base = f * beam_pol_stride + b * n_pol;
     const std::size_t t_stride = n_freq * beam_pol_stride;
+    const bool use_mask = (d_rfi_mask != nullptr && n_chunks > 0 && chunk_size > 0);
 
     float thread_sum = 0.0f;
     for (std::size_t t = threadIdx.x; t < n_time; t += blockDim.x) {
+        if (use_mask && d_rfi_mask[(t / chunk_size) * n_freq + f] != 0) {
+            continue;
+        }
         const float2* v_ptr = voltages + t * t_stride + tf_base;
         #pragma unroll
         for (std::size_t p = 0; p < n_pol; ++p) {
@@ -1213,7 +1217,7 @@ __global__ void reduce_beam_power_kernel(
         }
         if (lane == 0) {
             float inv_time = 0.0f;
-            if (d_rfi_mask != nullptr && n_chunks > 0 && chunk_size > 0) {
+            if (use_mask) {
                 std::size_t valid_samples = 0;
                 for (std::size_t c = 0; c < n_chunks; ++c) {
                     if (d_rfi_mask[c * n_freq + f] == 0) {
