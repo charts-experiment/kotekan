@@ -28,6 +28,8 @@ V2_SCRIPT_DIR = Path("/home/fpalma/kotekan/charts/commissioning_20261119_v2")
 CONFIG_OUT_DIR = V2_SCRIPT_DIR / "configs"
 CONTINUATION_CONFIG_DIR = V2_SCRIPT_DIR / "configs_20261121"
 CONTINUATION_MANIFEST_PATH = V2_DATA_ROOT / "schedule_manifest_20261121.json"
+FULL_20261121_CONFIG_DIR = V2_SCRIPT_DIR / "configs_20261121_full"
+FULL_20261121_MANIFEST_PATH = V2_DATA_ROOT / "schedule_manifest_20261121_full.json"
 GAINS_FILE = "/data/calibration/corr_1119/gains_corr_1119_0_4_32_36_fringehp_672x64.npy"
 LOCALIZED_RFI_PATH = V2_DATA_ROOT / "localized_rfi_targets.json"
 FALLBACK_RFI_PATH = Path("/data/commissioning_20261119/localized_rfi_targets.json")
@@ -516,7 +518,7 @@ def build_beam_config(
                 conjugate_gains=conjugate_gains,
                 uncalibrated_beams=uncalibrated_beams,
                 beam_targets=beam_targets,
-                use_rfi_mask=rfi_enabled,
+                use_rfi_mask=rfi_enabled and rfi_blank_voltages,
             )
         )
         cmds.append({"name": "cudaSyncOutput"})
@@ -602,6 +604,34 @@ def compute_gal_b_icrs(b_deg: float) -> Dict[str, float]:
     return {"ra_deg": round(float(sc.ra.deg), 5), "dec_deg": round(float(sc.dec.deg), 5)}
 
 
+def compute_solar_transit_m0(date_str: str) -> float:
+    """Compute Sun meridional m0 at local transit (~16:30 UTC) from Carén site."""
+    loc = EarthLocation(lat=SITE_LAT_DEG * u.deg, lon=SITE_LON_DEG * u.deg, height=SITE_ALT_M * u.m)
+    t_ap = Time(f"{date_str}T16:30:00Z")
+    aa = get_sun(t_ap).transform_to(AltAz(obstime=t_ap, location=loc))
+    _, m0 = altaz_to_lm(float(aa.alt.deg), float(aa.az.deg))
+    return round(float(m0), 4)
+
+
+def patch_tracker_solar_m0(cfg: Dict[str, Any], m0_val: float) -> None:
+    """Update meridional m0 targets inside cudaDirectBeamTrackerCommand entries."""
+    for sb in ("0", "1"):
+        for cmd in cfg.get("gpu", {}).get(f"commands_{sb}", []):
+            if cmd.get("name") == "cudaDirectBeamTrackerCommand":
+                for k in (
+                    "source_m0",
+                    "source_m0_1",
+                    "source_m0_2",
+                    "source_m0_3",
+                    "source_m0_4",
+                    "source_m0_5",
+                    "source_m0_8",
+                ):
+                    cmd[k] = m0_val
+                cmd["source_m0_6"] = round(m0_val + 0.070, 4)
+                cmd["source_m0_7"] = round(m0_val - 0.122, 4)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--rebuild-beam-configs", action="store_true", help="Rebuild YAML configs only, preserving manifest timing")
@@ -610,10 +640,20 @@ def main():
         action="store_true",
         help="Write the 9 unfinished tests (test05-test11) into configs_20261121/ and schedule_manifest_20261121.json",
     )
+    p.add_argument(
+        "--generate-run-20261121-full",
+        action="store_true",
+        help="Write the 11-run full suite (test11/12a/12b/10 tonight + test05-09b tomorrow) into configs_20261121_full/",
+    )
     args = p.parse_args()
 
     V2_DATA_ROOT.mkdir(parents=True, exist_ok=True)
-    cfg_dir = CONTINUATION_CONFIG_DIR if args.generate_continuation_20261121 else CONFIG_OUT_DIR
+    if args.generate_run_20261121_full:
+        cfg_dir = FULL_20261121_CONFIG_DIR
+    elif args.generate_continuation_20261121:
+        cfg_dir = CONTINUATION_CONFIG_DIR
+    else:
+        cfg_dir = CONFIG_OUT_DIR
     cfg_dir.mkdir(parents=True, exist_ok=True)
     if not TLE_V2_PATH.exists() and TLE_V1_PATH.exists():
         shutil.copy2(TLE_V1_PATH, TLE_V2_PATH)
@@ -914,25 +954,69 @@ def main():
             copy_formed_beams_to_host=True,
         ),
         "13_test11_24h_phase_drift_corr.yaml": build_corr_config(
-            base_dir="/data/corr/corr_1121_drift" if args.generate_continuation_20261121 else "/data/corr/corr_1120_drift",
+            base_dir="/data/corr/corr_1121_drift" if (args.generate_continuation_20261121 or args.generate_run_20261121_full) else "/data/corr/corr_1120_drift",
             exit_after_n_files=120,     # 20.48 min (~1.31 GB)
+        ),
+        "14_test12a_geo_satellites_survey.yaml": build_beam_config(
+            run_id="test12a_geo_satellites_survey",
+            samples_per_data_set=15360,
+            buffer_depth=20,
+            gpu_buffer_depth=3,
+            max_beams=10,
+            conjugate_gains=True,
+            uncalibrated_beams=[],
+            beam_targets=[
+                {"l0": -0.5520, "m0": 0.4914},  # 0: MUOS-1 (updated live)
+                {"l0": 0.8871, "m0": 0.2608},   # 1: MUOS-3 (updated live)
+                {"l0": -0.0861, "m0": 0.6250},  # 2: GOES-19 (updated live)
+                {"l0": -0.9533, "m0": 0.2316},  # 3: GOES-18 (updated live)
+                {"l0": 0.8115, "m0": 0.2686},   # 4: UFO-10 (updated live)
+                {"l0": 0.8601, "m0": 0.2906},   # 5: SKYNET 5C (updated live)
+                {"l0": -0.3696, "m0": 0.3483},  # 6: USA 115 / MILSTAR (updated live)
+                {"l0": 0.3252, "m0": 0.4411},   # 7: INMARSAT 3-F5 (updated live)
+                {"l0": 0.0, "m0": -0.8192},     # 8: OFF-South El 35 deg control
+                {"l0": 0.0, "m0": 0.0},         # 9: Zenith control
+            ],
+            rfi_enabled=True,
+            rfi_blank_voltages=False,
+            accumulate_frames=20,
+            num_frames_per_file=585,
+            exit_after_n_files=3,       # 29.95 min
+            skip_frames=1,
+            copy_formed_beams_to_host=False,
+        ),
+        "15_test12b_airport_santiago_horizon.yaml": build_beam_config(
+            run_id="test12b_airport_santiago_horizon",
+            samples_per_data_set=15360,
+            buffer_depth=20,
+            gpu_buffer_depth=3,
+            max_beams=10,
+            conjugate_gains=True,
+            uncalibrated_beams=[8],
+            beam_targets=[
+                {"l0": 0.9176, "m0": 0.3975},   # 0: SCL Airport Horizon (Az 66.58, El 0.5)
+                {"l0": 0.9037, "m0": 0.3914},   # 1: SCL Approach (Az 66.58, El 10.0)
+                {"l0": 0.9958, "m0": -0.0912},  # 2: Santiago Centro Plaza (Az 95.23, El 0.5)
+                {"l0": 0.9996, "m0": -0.0229},  # 3: Cerro San Cristobal Cal (Az 91.31, El 1.0)
+                {"l0": 0.9835, "m0": -0.0515},  # 4: Santiago Elevated (Az 93.0, El 10.0)
+                {"l0": -0.99996, "m0": 0.0},    # 5: Quiet Horizon West (Az 270, El 0.5)
+                {"l0": 0.0, "m0": -0.99996},    # 6: Quiet Horizon South (Az 180, El 0.5)
+                {"l0": -0.5000, "m0": 0.8660},  # 7: Quiet Horizon NW (Az 330, El 0.5)
+                {"l0": 0.9996, "m0": -0.0229},  # 8: San Cristobal Uncal (Az 91.31, El 1.0)
+                {"l0": 0.0, "m0": 0.0},         # 9: Zenith control
+            ],
+            rfi_enabled=True,
+            rfi_blank_voltages=False,
+            accumulate_frames=20,
+            num_frames_per_file=585,
+            exit_after_n_files=3,       # 29.95 min
+            skip_frames=1,
+            copy_formed_beams_to_host=False,
         ),
     }
 
     if args.generate_continuation_20261121:
-        # Update 2026-11-21 solar meridian declination (-19.93 deg -> m0 = 0.2333)
-        t8_cmd0 = configs["09_test08_solar_chromaticity_2d.yaml"]["gpu"]["commands_0"][-3]
-        t8_cmd1 = configs["09_test08_solar_chromaticity_2d.yaml"]["gpu"]["commands_1"][-3]
-        for c in (t8_cmd0, t8_cmd1):
-            c["source_m0"] = 0.2333
-            c["source_m0_1"] = 0.2333
-            c["source_m0_2"] = 0.2333
-            c["source_m0_3"] = 0.2333
-            c["source_m0_4"] = 0.2333
-            c["source_m0_5"] = 0.2333
-            c["source_m0_6"] = 0.3033
-            c["source_m0_7"] = 0.1113
-            c["source_m0_8"] = 0.2333
+        patch_tracker_solar_m0(configs["09_test08_solar_chromaticity_2d.yaml"], compute_solar_transit_m0("2026-11-21"))
         cont_keys = {
             "05_test05_psr_b0950_transit.yaml",
             "06_test06a_sun_onoff_conj_true.yaml",
@@ -945,6 +1029,22 @@ def main():
             "13_test11_24h_phase_drift_corr.yaml",
         }
         configs = {k: v for k, v in configs.items() if k in cont_keys}
+    elif args.generate_run_20261121_full:
+        patch_tracker_solar_m0(configs["09_test08_solar_chromaticity_2d.yaml"], compute_solar_transit_m0("2026-11-22"))
+        full_keys = {
+            "05_test05_psr_b0950_transit.yaml",
+            "06_test06a_sun_onoff_conj_true.yaml",
+            "07_test06b_sun_onoff_conj_false.yaml",
+            "08_test07_cena_dual_source.yaml",
+            "09_test08_solar_chromaticity_2d.yaml",
+            "10_test09a_galactic_center_plane.yaml",
+            "11_test09b_psr_b1749_28_zenith.yaml",
+            "12_test10_production_stress_10beams.yaml",
+            "13_test11_24h_phase_drift_corr.yaml",
+            "14_test12a_geo_satellites_survey.yaml",
+            "15_test12b_airport_santiago_horizon.yaml",
+        }
+        configs = {k: v for k, v in configs.items() if k in full_keys}
 
     for fname, data in configs.items():
         p_out = cfg_dir / fname
@@ -952,7 +1052,7 @@ def main():
         p_out.write_text(header + yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
         print(f"Wrote {p_out}")
 
-    if args.rebuild_beam_configs and MANIFEST_PATH.exists() and not args.generate_continuation_20261121:
+    if args.rebuild_beam_configs and MANIFEST_PATH.exists() and not args.generate_continuation_20261121 and not args.generate_run_20261121_full:
         print("Preserving existing schedule_manifest.json (--rebuild-beam-configs).")
         return
 
@@ -1145,7 +1245,164 @@ def main():
         },
     ]
 
-    if args.generate_continuation_20261121:
+    if args.generate_run_20261121_full:
+        t0 = now_dt + timedelta(minutes=2)
+
+        def fmt(dt: datetime) -> str:
+            return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        runs = [
+            {
+                "id": "test11_24h_phase_drift_corr",
+                "title": "Test 11: 48-Hour Post-Epoch Phase & Delay Drift Correlator Audit",
+                "start_utc": fmt(t0),
+                "end_utc": fmt(t0 + timedelta(minutes=22)),
+                "duration_s": 1260,
+                "disk_cap_mb": 2048,
+                "config_path": str(cfg_dir / "13_test11_24h_phase_drift_corr.yaml"),
+                "output_dir": "/data/corr/corr_1121_drift",
+                "sidecar_mode": "corr_monitor",
+                "verifier": "calibrate_corr_epoch.py",
+                "verifier_args": [
+                    "--corr-dir",
+                    "/data/corr/corr_1121_drift",
+                    "--out-dir",
+                    str(V2_DATA_ROOT / "test11_24h_phase_drift_corr"),
+                    "--verify-only-gains",
+                    GAINS_FILE,
+                    "--min-sun-el",
+                    "15.0",
+                ],
+            },
+            {
+                "id": "test12a_geo_satellites_survey",
+                "title": "Test 12A: Multi-GEO Satellite UHF Survey (MUOS-1/3, GOES-18/19, UFO-10, SKYNET-5C, USA-115, INMARSAT-3F5)",
+                "start_utc": fmt(t0 + timedelta(minutes=24)),
+                "end_utc": fmt(t0 + timedelta(minutes=55)),
+                "duration_s": 1820,
+                "disk_cap_mb": 512,
+                "config_path": str(cfg_dir / "14_test12a_geo_satellites_survey.yaml"),
+                "output_dir": str(V2_DATA_ROOT / "test12a_geo_satellites_survey"),
+                "sidecar_mode": "geo_satellites",
+                "verifier": "verify_geo_horizon.py",
+                "verifier_args": ["--mode", "geo"],
+            },
+            {
+                "id": "test12b_airport_santiago_horizon",
+                "title": "Test 12B: SCL Airport, Santiago Centro & Cerro San Cristobal Horizon Directional Power Study",
+                "start_utc": fmt(t0 + timedelta(minutes=57)),
+                "end_utc": fmt(t0 + timedelta(minutes=88)),
+                "duration_s": 1820,
+                "disk_cap_mb": 512,
+                "config_path": str(cfg_dir / "15_test12b_airport_santiago_horizon.yaml"),
+                "output_dir": str(V2_DATA_ROOT / "test12b_airport_santiago_horizon"),
+                "sidecar_mode": "airport_santiago_horizon",
+                "verifier": "verify_geo_horizon.py",
+                "verifier_args": ["--mode", "horizon"],
+            },
+            {
+                "id": "test10_production_stress_10beams",
+                "title": "Test 10: 60-min 10-Beam Production Stress + RFI (No Triggers/Dumps)",
+                "start_utc": fmt(t0 + timedelta(minutes=90)),
+                "end_utc": fmt(t0 + timedelta(minutes=151)),
+                "duration_s": 3620,
+                "disk_cap_mb": 512,
+                "config_path": str(cfg_dir / "12_test10_production_stress_10beams.yaml"),
+                "output_dir": str(V2_DATA_ROOT / "test10_production_stress_10beams"),
+                "sidecar_mode": "stress",
+                "verifier": "verify_stress.py",
+            },
+            {
+                "id": "test05_psr_b0950_transit",
+                "title": "Test 5: Northern/Low-DM PSR B0950+08 Transit Fold @ 2.56 ms",
+                "start_utc": "2026-11-22T10:21:00Z",
+                "end_utc": "2026-11-22T10:42:00Z",
+                "duration_s": 1245,
+                "disk_cap_mb": 7200,
+                "config_path": str(cfg_dir / "05_test05_psr_b0950_transit.yaml"),
+                "output_dir": str(V2_DATA_ROOT / "test05_psr_b0950_transit"),
+                "sidecar_mode": "pulsar_static",
+                "verifier": "verify_pulsar_generic.py",
+                "verifier_args": ["--target", "b0950"],
+            },
+            {
+                "id": "test06a_sun_onoff_conj_true",
+                "title": "Test 6A: Morning Sun ON/OFF Allan Variance (conjugate_gains=true)",
+                "start_utc": "2026-11-22T12:15:00Z",
+                "end_utc": "2026-11-22T13:15:00Z",
+                "duration_s": 3600,
+                "disk_cap_mb": 512,
+                "config_path": str(cfg_dir / "06_test06a_sun_onoff_conj_true.yaml"),
+                "output_dir": str(V2_DATA_ROOT / "test06a_sun_onoff_conj_true"),
+                "sidecar_mode": "sun_onoff",
+                "verifier": "verify_sun_onoff.py",
+            },
+            {
+                "id": "test06b_sun_onoff_conj_false",
+                "title": "Test 6B: Morning Sun Sign Test (conjugate_gains=false)",
+                "start_utc": "2026-11-22T13:16:00Z",
+                "end_utc": "2026-11-22T13:26:30Z",
+                "duration_s": 610,
+                "disk_cap_mb": 256,
+                "config_path": str(cfg_dir / "07_test06b_sun_onoff_conj_false.yaml"),
+                "output_dir": str(V2_DATA_ROOT / "test06b_sun_onoff_conj_false"),
+                "sidecar_mode": "sun_onoff",
+                "verifier": "verify_sun_onoff.py",
+            },
+            {
+                "id": "test07_cena_dual_source",
+                "title": "Test 7: Centaurus A Transit + Simultaneous Sun Monitor",
+                "start_utc": "2026-11-22T13:36:00Z",
+                "end_utc": "2026-11-22T14:36:00Z",
+                "duration_s": 3600,
+                "disk_cap_mb": 512,
+                "config_path": str(cfg_dir / "08_test07_cena_dual_source.yaml"),
+                "output_dir": str(V2_DATA_ROOT / "test07_cena_dual_source"),
+                "sidecar_mode": "cena_dual",
+                "verifier": "verify_multi_source.py",
+            },
+            {
+                "id": "test08_solar_chromaticity_2d",
+                "title": "Test 8: Flagship 2D Solar Chromaticity & Drift-Scan Transit Suite",
+                "start_utc": "2026-11-22T15:40:00Z",
+                "end_utc": "2026-11-22T17:10:00Z",
+                "duration_s": 5400,
+                "disk_cap_mb": 768,
+                "config_path": str(cfg_dir / "09_test08_solar_chromaticity_2d.yaml"),
+                "output_dir": str(V2_DATA_ROOT / "test08_solar_chromaticity_2d"),
+                "sidecar_mode": "solar_chromaticity_2d",
+                "verifier": "verify_chromaticity.py",
+            },
+            {
+                "id": "test09a_galactic_center_plane",
+                "title": "Test 9A: Galactic Center (Sgr A*) Latitude Cut & Zenith Drift Scan",
+                "start_utc": "2026-11-22T17:36:00Z",
+                "end_utc": "2026-11-22T18:46:00Z",
+                "duration_s": 4200,
+                "disk_cap_mb": 768,
+                "config_path": str(cfg_dir / "10_test09a_galactic_center_plane.yaml"),
+                "output_dir": str(V2_DATA_ROOT / "test09a_galactic_center_plane"),
+                "sidecar_mode": "galactic_center",
+                "verifier": "verify_galactic_center.py",
+            },
+            {
+                "id": "test09b_psr_b1749_28_zenith",
+                "title": "Test 9B: Galactic Plane PSR B1749-28 High-El Fold @ 5.12 ms",
+                "start_utc": "2026-11-22T18:47:00Z",
+                "end_utc": "2026-11-22T19:08:00Z",
+                "duration_s": 1245,
+                "disk_cap_mb": 3800,
+                "config_path": str(cfg_dir / "11_test09b_psr_b1749_28_zenith.yaml"),
+                "output_dir": str(V2_DATA_ROOT / "test09b_psr_b1749_28_zenith"),
+                "sidecar_mode": "pulsar_static",
+                "verifier": "verify_pulsar_generic.py",
+                "verifier_args": ["--target", "b1749"],
+            },
+        ]
+        manifest_out = FULL_20261121_MANIFEST_PATH
+        campaign_name = "commissioning_20261119_v2_run_20261121_full"
+        stop_utc = "2026-11-23T00:00:00Z"
+    elif args.generate_continuation_20261121:
         cont_ids = {
             "test05_psr_b0950_transit",
             "test06a_sun_onoff_conj_true",

@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -294,16 +295,25 @@ def main():
         geom = -geometric_visibility_phase(t_arr, FREQS_MHZ, arr, triu_i, triu_j, src_name="sun")
         V_fs = V_raw * np.exp(-1j * geom)
         V_hp = V_fs.copy()
-        if len(t_arr) >= 24:
+        span_s = float(t_arr[-1] - t_arr[0]) if len(t_arr) >= 2 else 0.0
+        hp_method = "unfiltered"
+        if span_s >= 2400.0 and len(t_arr) >= 24:
             dt_step = float(np.median(np.diff(t_arr)))
             fs_hz = 1.0 / max(dt_step, 1.0)
-            b_hp, a_hp = butter(2, min(0.08e-3 / (0.5 * fs_hz), 0.4))
+            b_hp, a_hp = butter(2, min(0.08e-3 / (0.5 * fs_hz), 0.4), btype="high")
+            hp_method = "butter_2nd_0.08mHz_highpass"
             for p_idx in range(10):
                 if triu_i[p_idx] != triu_j[p_idx]:
                     V_hp[:, p_idx, :] = (
                         filtfilt(b_hp, a_hp, np.real(V_raw[:, p_idx, :]), axis=-1)
                         + 1j * filtfilt(b_hp, a_hp, np.imag(V_raw[:, p_idx, :]), axis=-1)
                     ) * np.exp(-1j * geom[:, p_idx, :])
+        elif len(t_arr) >= 4:
+            hp_method = "temporal_mean_subtract"
+            for p_idx in range(10):
+                if triu_i[p_idx] != triu_j[p_idx]:
+                    v_ac = V_raw[:, p_idx, :] - np.mean(V_raw[:, p_idx, :], axis=-1, keepdims=True)
+                    V_hp[:, p_idx, :] = v_ac * np.exp(-1j * geom[:, p_idx, :])
         V_mean_unfilt = np.mean(V_fs, axis=-1)
         V_mean_hp = np.mean(V_hp, axis=-1)
         drift_rep = {
@@ -314,11 +324,17 @@ def main():
             "end_utc": datetime.fromtimestamp(t_arr[-1], tz=timezone.utc).isoformat(),
             "sun_el_min_deg": round(float(sun_el.min()), 2),
             "sun_el_max_deg": round(float(sun_el.max()), 2),
+            "hp_method": hp_method,
             "residuals_unfilt_315_355": compute_residual_stats(V_mean_unfilt, gains_sub, clean_low),
+            "residuals_unfilt_440_462": compute_residual_stats(V_mean_unfilt, gains_sub, clean_high),
             "residuals_hp_315_355": compute_residual_stats(V_mean_hp, gains_sub, clean_low),
             "residuals_hp_440_462": compute_residual_stats(V_mean_hp, gains_sub, clean_high),
         }
-        (out_dir / "drift_verification.json").write_text(json.dumps(drift_rep, indent=2), encoding="utf-8")
+        out_json = out_dir / "drift_verification.json"
+        tmp_json = out_json.with_name(f".tmp.{os.getpid()}.{out_json.name}")
+        tmp_json.write_text(json.dumps(drift_rep, indent=2), encoding="utf-8")
+        os.chmod(tmp_json, 0o644)
+        os.replace(tmp_json, out_json)
         print(json.dumps(drift_rep, indent=2))
         return
 

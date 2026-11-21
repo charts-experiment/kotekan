@@ -97,11 +97,11 @@ def load_tles(tle_path: Path, ts) -> Dict[int, EarthSatellite]:
     return sats
 
 
-def sat_altaz_lm(sat: EarthSatellite, observer, sf_time) -> Tuple[float, float, float, float]:
+def sat_altaz_lm(sat: EarthSatellite, observer, sf_time, max_r2: float = 0.96) -> Tuple[float, float, float, float]:
     alt, az, _ = (sat - observer).at(sf_time).altaz()
     el_d = float(alt.degrees)
     az_d = float(az.degrees)
-    l0, m0 = clamp_lm(*altaz_to_lm(el_d, az_d))
+    l0, m0 = clamp_lm(*altaz_to_lm(el_d, az_d), max_r2=max_r2)
     return el_d, az_d, l0, m0
 
 
@@ -197,6 +197,8 @@ def main():
             "solar_chromaticity_2d",
             "galactic_center",
             "stress",
+            "geo_satellites",
+            "airport_santiago_horizon",
         ],
     )
     p.add_argument("--url", default="http://127.0.0.1:12048")
@@ -424,6 +426,46 @@ def main():
                     b5,
                 ]
 
+            elif args.mode == "geo_satellites":
+                geo_specs = [
+                    (0, "MUOS-1", 38093, (42.35, 311.67, -0.5520, 0.4914)),
+                    (1, "MUOS-3", 40374, (22.38, 73.62, 0.8871, 0.2608)),
+                    (2, "GOES-19_468.8MHz", 60133, (50.88, 352.16, -0.0861, 0.6250)),
+                    (3, "GOES-18_468.8MHz", 51850, (11.17, 283.65, -0.9533, 0.2316)),
+                    (4, "UFO-10_UHF", 25967, (31.26, 71.69, 0.8115, 0.2686)),
+                    (5, "SKYNET-5C_UHF", 33055, (24.79, 71.33, 0.8601, 0.2906)),
+                    (6, "USA-115_MILSTAR", 23712, (59.48, 313.29, -0.3696, 0.3483)),
+                    (7, "INMARSAT-3F5", 25153, (56.77, 36.40, 0.3252, 0.4411)),
+                ]
+                steer_cmds = []
+                for bid, lbl, nid, fallback in geo_specs:
+                    vals = sat_altaz_lm(sats[nid], caren_sf, sf_t, max_r2=0.995) if nid in sats else fallback
+                    steer_cmds.append(
+                        {"beam_id": bid, "label": lbl, "l0": vals[2], "m0": vals[3], "el_deg": vals[0], "az_deg": vals[1]}
+                    )
+                steer_cmds.extend([
+                    {"beam_id": 8, "label": "OFF_South_El35_Ctrl", "l0": 0.0, "m0": -0.8192, "el_deg": 35.0, "az_deg": 180.0, "parked": True},
+                    {"beam_id": 9, "label": "Zenith_Ctrl", "l0": 0.0, "m0": 0.0, "el_deg": 90.0, "az_deg": 0.0, "parked": True},
+                ])
+                send_mask = {i: (i < 8) for i in range(10)}
+
+            elif args.mode == "airport_santiago_horizon":
+                # Keep horizon beams strictly at their static YAML (l0, m0) coordinates;
+                # never clamp or steer via REST since r^2 = cos^2(0.5 deg) ~= 0.99992.
+                steer_cmds = [
+                    {"beam_id": 0, "label": "SCL_Airport_Horizon", "l0": 0.9176, "m0": 0.3975, "el_deg": 0.5, "az_deg": 66.58, "dist_km": 7.9, "calibrated": True, "parked": True},
+                    {"beam_id": 1, "label": "SCL_Approach_El10", "l0": 0.9037, "m0": 0.3914, "el_deg": 10.0, "az_deg": 66.58, "dist_km": 7.9, "calibrated": True, "parked": True},
+                    {"beam_id": 2, "label": "Santiago_Centro_Plaza", "l0": 0.9958, "m0": -0.0912, "el_deg": 0.5, "az_deg": 95.23, "dist_km": 19.8, "calibrated": True, "parked": True},
+                    {"beam_id": 3, "label": "Cerro_San_Cristobal_UHF", "l0": 0.9996, "m0": -0.0229, "el_deg": 1.0, "az_deg": 91.31, "dist_km": 21.4, "calibrated": True, "parked": True},
+                    {"beam_id": 4, "label": "Santiago_Elevated_El10", "l0": 0.9835, "m0": -0.0515, "el_deg": 10.0, "az_deg": 93.0, "dist_km": 20.0, "calibrated": True, "parked": True},
+                    {"beam_id": 5, "label": "Quiet_Horizon_West", "l0": -0.99996, "m0": 0.0, "el_deg": 0.5, "az_deg": 270.0, "calibrated": True, "parked": True},
+                    {"beam_id": 6, "label": "Quiet_Horizon_South", "l0": 0.0, "m0": -0.99996, "el_deg": 0.5, "az_deg": 180.0, "calibrated": True, "parked": True},
+                    {"beam_id": 7, "label": "Quiet_Horizon_NW", "l0": -0.5000, "m0": 0.8660, "el_deg": 0.5, "az_deg": 330.0, "calibrated": True, "parked": True},
+                    {"beam_id": 8, "label": "San_Cristobal_Uncal", "l0": 0.9996, "m0": -0.0229, "el_deg": 1.0, "az_deg": 91.31, "dist_km": 21.4, "calibrated": False, "parked": True},
+                    {"beam_id": 9, "label": "Zenith_Ctrl", "l0": 0.0, "m0": 0.0, "el_deg": 90.0, "az_deg": 0.0, "calibrated": True, "parked": True},
+                ]
+                send_mask = {i: False for i in range(10)}
+
             if steer_cmds:
                 for cmd in steer_cmds:
                     bid = cmd["beam_id"]
@@ -466,7 +508,7 @@ def main():
         with open(telem_path, "a", encoding="utf-8") as tf:
             tf.write(json.dumps(rec) + "\n")
 
-        if args.mode in ("muos_rfi", "fornax_chromaticity", "solar_chromaticity_2d", "galactic_center", "stress") and (cycle % 3 == 0):
+        if args.mode in ("muos_rfi", "fornax_chromaticity", "solar_chromaticity_2d", "galactic_center", "stress", "geo_satellites", "airport_santiago_horizon") and (cycle % 3 == 0):
             try:
                 ch_data = http_get_json(args.url, "/rfi_mitigation/channels", timeout=3.0)
                 with open(rfi_snap_path, "a", encoding="utf-8") as rf:

@@ -357,10 +357,11 @@ def run_single_observation(
         else:
             v_path = (SCRIPT_DIR / verifier_name).resolve()
             extra_args = list(run.get("verifier_args") or [])
-            if run_id == "test11_24h_phase_drift_corr":
+            if verifier_name == "calibrate_corr_epoch.py":
                 cmd = [PYTHON_BIN, str(v_path), *extra_args]
-                v_log_dir = COMM_DIR / "test11_24h_phase_drift_corr"
+                v_log_dir = COMM_DIR / run_id
                 v_log_dir.mkdir(parents=True, exist_ok=True)
+                os.chmod(v_log_dir, 0o777)
             elif run_id == "test06b_sun_onoff_conj_false":
                 t6a_dir = COMM_DIR / "test06a_sun_onoff_conj_true"
                 if t6a_dir.exists() and has_output_bin(t6a_dir):
