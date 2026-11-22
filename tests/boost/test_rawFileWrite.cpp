@@ -9,6 +9,7 @@
 #include "json.hpp" // for json
 
 #include <boost/test/included/unit_test.hpp> // for BOOST_CHECK, BOOST_REQUIRE
+#include <chrono>                            // for milliseconds
 #include <filesystem>                        // for path, directory_iterator, file_size
 #include <fstream>                           // for ifstream, ofstream
 #include <iterator>                          // for istreambuf_iterator
@@ -17,6 +18,7 @@
 #include <stdlib.h>                          // for mkdtemp
 #include <string>                            // for string
 #include <system_error>                      // for error_code
+#include <thread>                            // for sleep_for
 #include <unistd.h>                          // for gethostname
 #include <vector>                            // for vector
 
@@ -237,4 +239,82 @@ BOOST_AUTO_TEST_CASE(test_create_base_dir) {
     cfg = writer_config("create", dir.path / "file" / "b");
     cfg["create"]["create_base_dir"] = true;
     BOOST_CHECK_THROW(construct_writer(cfg, "create"), FatalError);
+}
+
+BOOST_AUTO_TEST_CASE(test_multi_frame_per_file) {
+    tmp_dir dir;
+    json cfg = writer_config("multi_frame", dir.path);
+    cfg["multi_frame"]["num_frames_per_file"] = 3;
+    cfg["multi_frame"]["exit_after_n_files"] = 2;
+
+    Config config;
+    config.update_config(cfg);
+
+    Buffer buf(6, frame_size, nullptr, "in_buf", "standard", 0, false, false, std::vector<int>{},
+               true);
+    buf.register_producer("test");
+    bufferContainer bc;
+    bc.add_buffer("in_buf", &buf);
+    rawFileWrite writer(config, "/multi_frame", bc);
+    for (uint32_t i = 0; i < 6; i++) {
+        BOOST_REQUIRE(buf.wait_for_empty_frame("test", i) != nullptr);
+        buf.mark_frame_full("test", i);
+    }
+    writer.main_thread();
+
+    const std::set<std::string> expected = {"x_0000000.dat", "x_0000001.dat"};
+    const std::set<std::string> found = list_dir(dir.path);
+    BOOST_CHECK_EQUAL_COLLECTIONS(found.begin(), found.end(), expected.begin(), expected.end());
+    const size_t expected_bytes = 3 * (sizeof(uint32_t) + frame_size);
+    for (const char* name : {"x_0000000.dat", "x_0000001.dat"})
+        BOOST_CHECK_EQUAL(fs::file_size(dir.path / name), expected_bytes);
+}
+
+BOOST_AUTO_TEST_CASE(test_partial_file_closed_on_stop) {
+    auto count_open_fds = []() -> size_t {
+        size_t n = 0;
+        if (fs::exists("/proc/self/fd")) {
+            for (const auto& _ : fs::directory_iterator("/proc/self/fd")) {
+                (void)_;
+                ++n;
+            }
+        }
+        return n;
+    };
+
+    const size_t fds_before = count_open_fds();
+    tmp_dir dir;
+    json cfg = writer_config("partial_stop", dir.path);
+    cfg["partial_stop"]["num_frames_per_file"] = 4;
+
+    Config config;
+    config.update_config(cfg);
+
+    Buffer buf(4, frame_size, nullptr, "in_buf", "standard", 0, false, false, std::vector<int>{},
+               true);
+    buf.register_producer("test");
+    bufferContainer bc;
+    bc.add_buffer("in_buf", &buf);
+    rawFileWrite writer(config, "/partial_stop", bc);
+
+    BOOST_REQUIRE(buf.wait_for_empty_frame("test", 0) != nullptr);
+    buf.mark_frame_full("test", 0);
+
+    writer.start();
+    const fs::path out_file = dir.path / "x_0000000.dat";
+    const size_t expected_bytes = sizeof(uint32_t) + frame_size;
+    for (int i = 0; i < 200; ++i) {
+        std::error_code ec;
+        if (fs::exists(out_file, ec) && fs::file_size(out_file, ec) >= expected_bytes)
+            break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    writer.stop();
+    buf.send_shutdown_signal();
+    writer.join();
+
+    BOOST_REQUIRE(fs::exists(out_file));
+    BOOST_CHECK_EQUAL(fs::file_size(out_file), expected_bytes);
+    if (fds_before > 0)
+        BOOST_CHECK_EQUAL(count_open_fds(), fds_before);
 }

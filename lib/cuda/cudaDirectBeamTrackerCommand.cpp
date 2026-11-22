@@ -1056,6 +1056,7 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
 
     gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_voltage, true, false, true));
     gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_formed_beams, false, true, true));
+    device.register_gpu_memory_name(_gpu_mem_formed_beams);
     if (!_gpu_mem_beam_power.empty()) {
         gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_beam_power, false, true, true));
         device.register_gpu_memory_name(_gpu_mem_beam_power);
