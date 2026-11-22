@@ -177,7 +177,8 @@ __global__ void extract_alive_antennas_coalesced_kernel(
     int num_to_extract,
     int max_alive_antennas,
     std::size_t total_spectra,
-    std::size_t n_ant)
+    std::size_t n_ant,
+    std::uint8_t zero_byte)
 {
     __shared__ int s_alive[MAX_MASK_ANTENNAS];
     const unsigned int tid = threadIdx.y * blockDim.x + threadIdx.x;
@@ -196,7 +197,7 @@ __global__ void extract_alive_antennas_coalesced_kernel(
     std::uint8_t* out_row = out_bytes + s * static_cast<std::size_t>(max_alive_antennas);
 
     for (int i = static_cast<int>(threadIdx.x); i < max_alive_antennas; i += static_cast<int>(blockDim.x)) {
-        out_row[i] = (i < num_to_extract) ? __ldg(&in_row[s_alive[i]]) : 0U;
+        out_row[i] = (i < num_to_extract) ? __ldg(&in_row[s_alive[i]]) : zero_byte;
     }
 }
 
@@ -370,7 +371,8 @@ void launch_extract_alive_antennas(
     int max_alive_antennas,
     std::size_t total_spectra,
     std::size_t n_ant,
-    cudaStream_t stream)
+    cudaStream_t stream,
+    bool is_swapped_withoffset)
 {
     if (max_alive_antennas <= 0 || total_spectra == 0) return;
     if (num_to_extract < 0) num_to_extract = 0;
@@ -384,11 +386,12 @@ void launch_extract_alive_antennas(
     const dim3 block(WARP_SIZE, SPECTRA_PER_BLOCK);
     const unsigned int num_blocks =
         static_cast<unsigned int>((total_spectra + SPECTRA_PER_BLOCK - 1) / SPECTRA_PER_BLOCK);
+    const std::uint8_t zero_byte = is_swapped_withoffset ? 0x88U : 0x00U;
 
     extract_alive_antennas_coalesced_kernel<<<num_blocks, block, 0, stream>>>(
         reinterpret_cast<const std::uint8_t*>(d_voltages),
         reinterpret_cast<std::uint8_t*>(d_alive_voltages),
-        d_alive_antennas, num_to_extract, max_alive_antennas, total_spectra, n_ant);
+        d_alive_antennas, num_to_extract, max_alive_antennas, total_spectra, n_ant, zero_byte);
 }
 
 void launch_inject_faults(
@@ -494,7 +497,7 @@ inspect_channel_coherence_kernel(
     if (a < MAX_COH_ANT) {
         s_pwr[a] = p_a;
         s_kurt[a] = k_a;
-        s_valid[a] = (a < n_elem && p_a > 0.5f && p_a < 12.0f && k_a < 2.8f) ? 1U : 0U;
+        s_valid[a] = (a < n_elem && p_a > 0.5f && p_a < 40.0f && k_a < 2.8f) ? 1U : 0U;
     }
     __syncthreads();
 

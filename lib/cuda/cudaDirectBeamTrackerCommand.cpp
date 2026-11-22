@@ -878,11 +878,14 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                     std::vector<float> spectrum;
                     spectrum.reserve(total_channels);
                     for (auto* inst : sorted_insts) {
-                        const float* h_ptr = inst->get_host_beam_power();
+                        const auto snap = inst->get_last_beam_power();
                         const int n_f = inst->get_num_local_freq();
-                        if (h_ptr != nullptr && b < active_b) {
-                            const float* beam_f_ptr = h_ptr + b * n_f;
-                            spectrum.insert(spectrum.end(), beam_f_ptr, beam_f_ptr + n_f);
+                        const std::size_t off =
+                            static_cast<std::size_t>(b) * static_cast<std::size_t>(n_f);
+                        if (!snap.empty() && b < active_b
+                            && off + static_cast<std::size_t>(n_f) <= snap.size()) {
+                            spectrum.insert(spectrum.end(), snap.begin() + off,
+                                            snap.begin() + off + n_f);
                         } else {
                             spectrum.insert(spectrum.end(), n_f, 0.0f);
                         }
@@ -1117,7 +1120,8 @@ void cudaDirectBeamTrackerCommand::upload_wavenumbers(cudaStream_t stream) {
 }
 
 void cudaDirectBeamTrackerCommand::upload_calibration_gains(const DirectBeamTrackerConfig& cfg,
-                                                            cudaStream_t stream) {
+                                                            cudaStream_t stream,
+                                                            std::uint64_t gains_gen) {
     // The weight kernels multiply each weight by calibration_gains[freq][elem] and form
     // y = sum_e w_e v_e, so they need the corrector 1 / g_v of each element (v_obs = g_v v,
     // g_v = conj(g_file): load_gains_npy conjugates the charts-utils file); non-finite or
@@ -1175,9 +1179,11 @@ void cudaDirectBeamTrackerCommand::upload_calibration_gains(const DirectBeamTrac
         auto apply_cal_mask = [&](DirectBeamTrackerConfig& target_cfg) {
             if (!any_channel_valid)
                 return;
-            if (!target_cfg.calibration_mask_initialized) {
+            if (!target_cfg.calibration_mask_initialized
+                || target_cfg.calibration_mask_generation != gains_gen) {
                 target_cfg.calibration_valid_mask = cal_valid;
                 target_cfg.calibration_mask_initialized = true;
+                target_cfg.calibration_mask_generation = gains_gen;
             } else {
                 for (std::size_t r = 0; r < MAX_DIRECT_ANTENNAS; ++r) {
                     target_cfg.calibration_valid_mask[r] |= cal_valid[r];
@@ -1270,6 +1276,11 @@ void cudaDirectBeamTrackerCommand::allocate_device_buffers() {
     CHECK_CUDA_ERROR_NON_OO(cudaMemset(_d_beam_power, 0, power_bytes));
     CHECK_CUDA_ERROR_NON_OO(cudaMallocHost(&_h_beam_power, power_bytes));
     std::memset(_h_beam_power, 0, power_bytes);
+    {
+        std::lock_guard<std::mutex> blk(_beam_power_mutex);
+        _last_beam_power.assign(
+            static_cast<std::size_t>(_max_beams) * static_cast<std::size_t>(_num_local_freq), 0.0f);
+    }
 
     cudaStream_t stream = device.getStream(cuda_stream_id);
     set_l2_persisting_weights_policy(stream, _d_weights, 2 * weights_bytes);
@@ -1296,7 +1307,7 @@ void cudaDirectBeamTrackerCommand::allocate_device_buffers() {
                                        _num_elements * sizeof(float), cudaMemcpyHostToDevice));
 
     if (!_gains_file.empty()) {
-        upload_calibration_gains(cfg);
+        upload_calibration_gains(cfg, nullptr, init_gains_gen);
         _applied_gains_generation = init_gains_gen;
     }
 
@@ -1383,7 +1394,8 @@ void cudaDirectBeamTrackerCommand::free_device_buffers() {
 
 void cudaDirectBeamTrackerCommand::update_weights_if_needed(const DirectBeamTrackerConfig& in_cfg,
                                                             cudaStream_t stream,
-                                                            double frame_timestamp_utc) {
+                                                            double frame_timestamp_utc,
+                                                            bool* out_has_motion) {
     std::shared_ptr<TrackerGroup> group;
     {
         std::lock_guard<std::mutex> reg_lock(_registry_mutex);
@@ -1446,6 +1458,20 @@ void cudaDirectBeamTrackerCommand::update_weights_if_needed(const DirectBeamTrac
                     }
                 }
             }
+        }
+
+        if (out_has_motion != nullptr) {
+            bool moving = false;
+            for (std::size_t b = 0; b < active_beams; ++b) {
+                const auto& d0 = grp_cfg.targets[b].direction;
+                const auto& d1 = grp_cfg.targets[b].direction_end;
+                if (std::abs(d1.x - d0.x) > 1.0e-7f || std::abs(d1.y - d0.y) > 1.0e-7f
+                    || std::abs(d1.z - d0.z) > 1.0e-7f) {
+                    moving = true;
+                    break;
+                }
+            }
+            *out_has_motion = moving;
         }
 
         if (_applied_config_generation != grp_cfg.config_generation) {
@@ -1520,6 +1546,7 @@ void cudaDirectBeamTrackerCommand::update_weights_if_needed(const DirectBeamTrac
 cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate*/,
                                                   const std::vector<cudaEvent_t>&) {
     pre_execute();
+    _last_frame_copied_power = false;
 
     std::shared_ptr<TrackerGroup> group;
     {
@@ -1636,7 +1663,7 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
         && (_applied_gains_generation != group_gains_gen
             || _loaded_gains_first_channel != _gains_first_channel)) {
         _gains_file = group_gains_file;
-        upload_calibration_gains(current_config, stream);
+        upload_calibration_gains(current_config, stream, group_gains_gen);
         _applied_gains_generation = group_gains_gen;
         subband_reloaded = true;
     }
@@ -1645,7 +1672,8 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
         _applied_mask_generation = 0;
         invalidate_cuda_graphs();
     }
-    update_weights_if_needed(current_config, stream, frame_timestamp_utc);
+    bool has_subframe_motion = false;
+    update_weights_if_needed(current_config, stream, frame_timestamp_utc, &has_subframe_motion);
 
     DirectInputFormat input_format = DirectInputFormat::INT4X2;
     if (charts_meta && charts_meta->type == kotekan::int4x2_swapped_withoffset) {
@@ -1656,7 +1684,8 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
         }
     }
 
-    const bool use_interp = current_config.enable_subframe_interpolation && !_grid_mode_enabled;
+    const bool use_interp =
+        current_config.enable_subframe_interpolation && !_grid_mode_enabled && has_subframe_motion;
     const float2* step_weights_ptr = use_interp ? _d_step_weights : nullptr;
 
     // Invalidate CUDA graphs if either active beam count or interpolation mode changed
@@ -1734,6 +1763,7 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
                                                     * static_cast<std::size_t>(_num_local_freq)
                                                     * sizeof(float),
                                                 cudaMemcpyDeviceToHost, stream));
+        _last_frame_copied_power = true;
     }
 
     if (!_gpu_mem_beam_power.empty()) {
@@ -1757,6 +1787,12 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
 
 void cudaDirectBeamTrackerCommand::finalize_frame() {
     cudaCommand::finalize_frame();
+    if (_last_frame_copied_power && _h_beam_power) {
+        const std::size_t n_floats =
+            static_cast<std::size_t>(_max_beams) * static_cast<std::size_t>(_num_local_freq);
+        std::lock_guard<std::mutex> blk(_beam_power_mutex);
+        _last_beam_power.assign(_h_beam_power, _h_beam_power + n_floats);
+    }
     const double exec_s = get_last_gpu_execution_time();
     if (_tracker_kernel_time && exec_s > 0.0) {
         _tracker_kernel_time->add_sample(exec_s * 1e3);

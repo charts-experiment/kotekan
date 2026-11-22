@@ -167,6 +167,7 @@ struct DirectBeamTrackerConfig {
     std::array<std::uint8_t, MAX_DIRECT_ANTENNAS> antenna_mask;
     std::array<std::uint8_t, MAX_DIRECT_ANTENNAS> calibration_valid_mask;
     bool calibration_mask_initialized = false;
+    std::uint64_t calibration_mask_generation = 0;
     std::array<float3, MAX_DIRECT_ANTENNAS> antenna_positions;
     std::array<float, MAX_DIRECT_ANTENNAS> normalized_taper_weights;
     DirectSiteLocation site;

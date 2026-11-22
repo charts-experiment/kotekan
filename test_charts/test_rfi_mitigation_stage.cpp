@@ -658,6 +658,95 @@ int main() {
     std::printf("  Result: [PASSED] Flagged dips no longer ratchet persistent EMA downward!\n\n");
     std::fflush(stdout);
 
+    // 5D: Verify Gaussian sub-passband dips do NOT poison EMA, and clean broadband +30% sky/solar
+    // shifts recover cleanly from latched TIME_BURST without staying permanently blanked.
+    std::mt19937 rng_5d(20261122);
+    const std::size_t f_gauss_dip = 75;
+    std::vector<int4x2_t> h_gauss_dip = h_clean_base;
+    for (std::size_t t = 0; t < n_time; ++t) {
+        const std::size_t base = (t * n_freq + f_gauss_dip) * n_elem;
+        for (int a = 0; a < num_active; ++a) {
+            const int raw_e = active_raw[a];
+            const float sig = std::max(0.35f, ant_sigmas[a] * 0.40f);
+            const int re = static_cast<int>(std::round(norm(rng_5d) * sig));
+            const int im = static_cast<int>(std::round(norm(rng_5d) * sig));
+            h_gauss_dip[base + raw_e] = pack_int4x2_signed(re, im);
+        }
+    }
+
+    cudaMemset(d_ema_power, 0, n_freq * sizeof(float));
+    cudaMemset(d_ema_mad, 0, n_freq * sizeof(float));
+    cudaMemcpy(d_voltages, h_clean_base.data(), frame_elems * sizeof(int4x2_t),
+               cudaMemcpyHostToDevice);
+    for (int warmup = 0; warmup < 5; ++warmup) {
+        launch_inspect_rfi_chunks(d_voltages, d_active_antennas, num_active, d_chunk_power,
+                                  d_chunk_sk, d_chunk_sat_frac, n_time, n_freq, n_elem, chunk_size,
+                                  1, nullptr, false);
+        launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_chunk_sat_frac, d_static_notch,
+                                  d_channel_gains, d_chunk_rfi_mask, d_channel_stats, n_chunks,
+                                  n_freq, num_active, chunk_size, cfg_bench, nullptr, nullptr,
+                                  d_ema_power, d_ema_mad);
+    }
+    cudaDeviceSynchronize();
+    float gdip_before = 0.0f;
+    cudaMemcpy(&gdip_before, d_ema_power + f_gauss_dip, sizeof(float), cudaMemcpyDeviceToHost);
+
+    cudaMemcpy(d_voltages, h_gauss_dip.data(), frame_elems * sizeof(int4x2_t),
+               cudaMemcpyHostToDevice);
+    launch_inspect_rfi_chunks(d_voltages, d_active_antennas, num_active, d_chunk_power, d_chunk_sk,
+                              d_chunk_sat_frac, n_time, n_freq, n_elem, chunk_size, 1, nullptr,
+                              false);
+    launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_chunk_sat_frac, d_static_notch,
+                              d_channel_gains, d_chunk_rfi_mask, d_channel_stats, n_chunks, n_freq,
+                              num_active, chunk_size, cfg_bench, nullptr, nullptr, d_ema_power,
+                              d_ema_mad);
+    cudaDeviceSynchronize();
+    float gdip_after = 0.0f;
+    cudaMemcpy(&gdip_after, d_ema_power + f_gauss_dip, sizeof(float), cudaMemcpyDeviceToHost);
+
+    // Synthesize broadband +30% power step (clean Gaussian across all channels, |freq_z| < 2.5)
+    std::vector<int4x2_t> h_broad_shift(frame_elems);
+    std::memset(h_broad_shift.data(), 0, frame_elems * sizeof(int4x2_t));
+    for (std::size_t t = 0; t < n_time; ++t) {
+        for (std::size_t f = 0; f < n_freq; ++f) {
+            const float pb_scale = passband_scale[f] * 1.15f; // ~+32% power everywhere
+            const std::size_t base = (t * n_freq + f) * n_elem;
+            for (int a = 0; a < num_active; ++a) {
+                const int raw_e = active_raw[a];
+                const float sig = ant_sigmas[a] * pb_scale;
+                const int re = static_cast<int>(std::round(norm(rng_5d) * sig));
+                const int im = static_cast<int>(std::round(norm(rng_5d) * sig));
+                h_broad_shift[base + raw_e] = pack_int4x2_signed(re, im);
+            }
+        }
+    }
+    const std::size_t f_rel = 120;
+    cudaMemcpy(d_voltages, h_broad_shift.data(), frame_elems * sizeof(int4x2_t),
+               cudaMemcpyHostToDevice);
+    for (int fstep = 0; fstep < 120; ++fstep) {
+        launch_inspect_rfi_chunks(d_voltages, d_active_antennas, num_active, d_chunk_power,
+                                  d_chunk_sk, d_chunk_sat_frac, n_time, n_freq, n_elem, chunk_size,
+                                  1, nullptr, false);
+        launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_chunk_sat_frac, d_static_notch,
+                                  d_channel_gains, d_chunk_rfi_mask, d_channel_stats, n_chunks,
+                                  n_freq, num_active, chunk_size, cfg_bench, nullptr, nullptr,
+                                  d_ema_power, d_ema_mad);
+    }
+    cudaDeviceSynchronize();
+    cudaMemcpy(h_stats.data(), d_channel_stats, n_freq * sizeof(RfiChannelStats),
+               cudaMemcpyDeviceToHost);
+
+    std::printf("  6. Gaussian dip guard ch=%zu (EMA %.4f -> %.4f) & +32%% broadband recovery ch=%zu (flagged_frac=%.2f)\n",
+                f_gauss_dip, gdip_before, gdip_after, f_rel, h_stats[f_rel].flagged_chunk_fraction);
+    if (std::abs(gdip_after - gdip_before) > 1.0e-5f
+        || h_stats[f_rel].flagged_chunk_fraction > 0.0f) {
+        std::printf("  Result: [FAILED] Gaussian dip or broadband latch-up recovery failed!\n");
+        std::fflush(stdout);
+        return 1;
+    }
+    std::printf("  Result: [PASSED] Gaussian dip immunity & broadband TIME_BURST unlatching verified!\n\n");
+    std::fflush(stdout);
+
     // >>> TEST 6: Conditional Frequency Shoulder & Clean-Window Passband MAD <<<
     std::printf(">>> TEST 6: Conditional Frequency Shoulder & Clean-Window Passband MAD <<<\n");
 

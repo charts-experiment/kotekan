@@ -682,7 +682,8 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
     set_name("cudaAntennaMaskCommand");
     gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_voltage, true, true, true));
     if (!_gpu_mem_alive_voltages.empty()) {
-        gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_alive_voltages, true, false, true));
+        gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_alive_voltages, false, true, true));
+        device.register_gpu_memory_name(_gpu_mem_alive_voltages);
     }
 
     allocate_device_buffers();
@@ -987,7 +988,7 @@ cudaEvent_t cudaAntennaMaskCommand::execute(cudaPipelineState& /*pipestate*/,
             int4x2_t* d_alive_voltages = reinterpret_cast<int4x2_t*>(alive_memory);
             launch_extract_alive_antennas(d_voltages, d_alive_voltages, _d_alive_antennas,
                                           num_to_extract, _max_alive_antennas, total_spectra,
-                                          _num_elements, stream);
+                                          _num_elements, stream, is_swapped_withoffset);
 
             std::shared_ptr<metadataObject> meta_alive =
                 device.get_gpu_memory_array_metadata(_gpu_mem_voltage, gpu_frame_id);
