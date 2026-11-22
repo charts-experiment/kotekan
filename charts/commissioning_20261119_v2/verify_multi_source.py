@@ -15,7 +15,15 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from beam_io import FREQS_MHZ, clean_channel_mask, load_dual_subband_beam_power, load_jsonl
+from beam_io import (
+    FREQS_MHZ,
+    atomic_savefig,
+    atomic_write_text,
+    clean_channel_mask,
+    load_dual_subband_beam_power,
+    load_jsonl,
+    theoretical_array_factor_sq,
+)
 
 
 def eval_pair(wf: np.ndarray, clean: np.ndarray, on_b: int, off_b: int, name: str) -> Dict[str, Any]:
@@ -24,6 +32,9 @@ def eval_pair(wf: np.ndarray, clean: np.ndarray, on_b: int, off_b: int, name: st
     exc = (on_ts - off_ts) / np.maximum(off_ts, 1e-12)
     mean_exc = float(np.mean(exc))
     se_exc = float(np.std(exc) / np.sqrt(max(len(exc), 1)))
+    mid_i = max(1, len(exc) // 2)
+    h1_exc = float(np.mean(exc[:mid_i]))
+    h2_exc = float(np.mean(exc[mid_i:])) if mid_i < len(exc) else h1_exc
     # Fit spectral contrast slope across ~14 frequency bins
     edges = np.linspace(300.0, 501.5, 15)
     fs, rs = [], []
@@ -45,6 +56,8 @@ def eval_pair(wf: np.ndarray, clean: np.ndarray, on_b: int, off_b: int, name: st
         "mean_on_power": round(float(np.mean(on_ts)), 4),
         "mean_off_power": round(float(np.mean(off_ts)), 4),
         "mean_excess_frac": round(mean_exc, 5),
+        "first_half_excess_frac": round(h1_exc, 5),
+        "second_half_excess_frac": round(h2_exc, 5),
         "std_err_frac": round(se_exc, 5),
         "snr_mean_over_se": round(mean_exc / max(se_exc, 1e-12), 2),
         "excess_spectral_slope": alpha_slope,
@@ -88,6 +101,49 @@ def main():
         pairs.append(eval_pair(wf, clean, 8, 4, "PictorA_Uncal vs OFF_Pictor"))
         pairs.append(eval_pair(wf, clean, 9, 4, "Zenith vs OFF_Pictor"))
 
+    sun_af_sidelobe_check: Dict[str, Any] = {}
+    if mode == "cena" and pointing:
+        sun_bid = 4
+        check_bids = [0, 2, 3, 5]
+        t_rel_s = (seq - seq[0]).astype(np.float64) * (10.0 / 3.0) * 1e-6
+        t0_unix = float(pointing[0]["unix"])
+        p_mat = np.zeros((len(pointing), n_beams), dtype=np.float64)
+        af_mat = np.zeros((len(pointing), n_beams), dtype=np.float64)
+        for si, snap in enumerate(pointing):
+            idx_t = int(np.argmin(np.abs(t_rel_s - (float(snap["unix"]) - t0_unix))))
+            tg = {int(x["beam_id"]): x for x in snap.get("targets", [])}
+            if sun_bid not in tg:
+                continue
+            s_tgt = tg[sun_bid]
+            for bid in range(n_beams):
+                p_mat[si, bid] = float(np.mean(wf[idx_t, bid, clean]))
+                if bid in tg:
+                    af_mat[si, bid] = float(
+                        np.mean(
+                            theoretical_array_factor_sq(
+                                float(tg[bid]["l0"]),
+                                float(tg[bid]["m0"]),
+                                float(s_tgt["l0"]),
+                                float(s_tgt["m0"]),
+                                FREQS_MHZ[clean],
+                            )
+                        )
+                    )
+        obs_p = p_mat[:, check_bids].ravel()
+        obs_af = af_mat[:, check_bids].ravel()
+        if np.std(obs_af) > 1e-6 and np.std(obs_p) > 1e-12:
+            af_slope, af_intercept = np.polyfit(obs_af, obs_p, 1)
+            r_corr = float(np.corrcoef(obs_af, obs_p)[0, 1])
+            resid0 = p_mat[:, 0] - (af_intercept + af_slope * af_mat[:, 0])
+            resid5 = p_mat[:, 5] - (af_intercept + af_slope * af_mat[:, 5])
+            sun_af_sidelobe_check = {
+                "pearson_r": round(r_corr, 4),
+                "slope_per_af": round(float(af_slope), 4),
+                "intercept_power": round(float(af_intercept), 4),
+                "mean_af_sun_by_beam": {f"beam_{b}": round(float(np.mean(af_mat[:, b])), 4) for b in check_bids},
+                "sun_af_subtracted_cena_excess_frac": round(float(np.mean(resid0 - resid5) / max(abs(af_intercept), 1e-12)), 5),
+            }
+
     summary = {
         "run_dir": str(run_dir),
         "mode": mode,
@@ -95,8 +151,9 @@ def main():
         "clean_channels": int(np.sum(clean)),
         "pointing_samples": len(pointing),
         "sources": pairs,
+        "sun_af_sidelobe_check": sun_af_sidelobe_check,
     }
-    (run_dir / "multi_source_verification.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    atomic_write_text(run_dir / "multi_source_verification.json", json.dumps(summary, indent=2))
 
     fig, axes = plt.subplots(1, 2, figsize=(13.5, 5.2), layout="constrained")
     for s in pairs:
@@ -118,7 +175,7 @@ def main():
     axes[1].grid(True, alpha=0.25)
     axes[1].legend(fontsize=7.5)
 
-    fig.savefig(run_dir / "multi_source_verification.png", dpi=140)
+    atomic_savefig(fig, run_dir / "multi_source_verification.png", dpi=140)
     plt.close(fig)
     print(json.dumps(summary, indent=2))
 

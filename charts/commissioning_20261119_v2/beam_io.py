@@ -13,12 +13,24 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from charts_constants import DELTA_TIME, FREQ
+from charts_constants import C_LIGHT, DELTA_TIME, FREQ
 
 FREQS_MHZ = np.asarray(FREQ, dtype=np.float64)
 N_CHAN_SB = 336
 N_CHAN_TOTAL = 672
 FPGA_DT_S = float(DELTA_TIME)  # 10/3 us
+C_LIGHT_MPS = float(C_LIGHT.value) if hasattr(C_LIGHT, "value") else float(C_LIGHT)
+
+# Local ENU coordinates (m) of the 4 commissioned CHARTS antennas [0, 4, 32, 36]
+POS4 = np.array(
+    [
+        [0.0, 0.0, 0.0],
+        [-4.24775, 0.0275, 0.0],
+        [0.15, 4.30625, 0.0],
+        [-4.12725, 4.42725, 0.0],
+    ],
+    dtype=np.float64,
+)
 
 
 def load_beam_power_subband(
@@ -261,6 +273,55 @@ def overlapping_allan_deviation(
         out_taus.append(m * dt_s)
         out_adev.append(float(np.sqrt(max(avar, 0.0))))
     return np.asarray(out_taus), np.asarray(out_adev)
+
+
+def overlapping_hadamard_deviation(
+    y: np.ndarray,
+    dt_s: float,
+    taus_s: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute overlapping Hadamard deviation (invariant to linear drift slope) in O(N) per lag."""
+    y = np.asarray(y, dtype=np.float64)
+    y = y[np.isfinite(y)]
+    n = len(y)
+    if taus_s is None:
+        max_m = max(1, (n - 1) // 3)
+        ms = np.unique(np.round(np.geomspace(1, max_m, 30)).astype(int))
+    else:
+        ms = np.unique(np.clip(np.round(np.asarray(taus_s) / dt_s).astype(int), 1, max(1, (n - 1) // 3)))
+
+    x = np.concatenate([[0.0], np.cumsum(y) * dt_s])
+    out_taus: List[float] = []
+    out_hdev: List[float] = []
+    for m in ms:
+        if 3 * m >= len(x):
+            continue
+        tau = m * dt_s
+        d3 = x[3 * m :] - 3.0 * x[2 * m : -m] + 3.0 * x[m : -2 * m] - x[: -3 * m]
+        if len(d3) < 2:
+            continue
+        hvar = float(np.mean(d3 * d3)) / (6.0 * tau * tau)
+        out_taus.append(tau)
+        out_hdev.append(float(np.sqrt(max(hvar, 0.0))))
+    return np.asarray(out_taus), np.asarray(out_hdev)
+
+
+def theoretical_array_factor_sq(
+    l_off: float,
+    m_off: float,
+    l_src: float,
+    m_src: float,
+    freqs_mhz: np.ndarray,
+    pos: np.ndarray = POS4,
+) -> np.ndarray:
+    """Normalized power array factor |mean(exp(i k r.(s_off - s_src)))|^2 vs frequency."""
+    n_off = float(np.sqrt(max(0.0, 1.0 - l_off * l_off - m_off * m_off)))
+    n_src = float(np.sqrt(max(0.0, 1.0 - l_src * l_src - m_src * m_src)))
+    ds = np.array([l_off - l_src, m_off - m_src, n_off - n_src], dtype=np.float64)
+    delays = np.asarray(pos, dtype=np.float64) @ ds
+    k = 2.0 * np.pi * np.asarray(freqs_mhz, dtype=np.float64) * 1e6 / C_LIGHT_MPS
+    af = np.mean(np.exp(1j * k[:, None] * delays[None, :]), axis=1)
+    return np.abs(af) ** 2
 
 
 def load_jsonl(path: Path) -> List[Dict[str, Any]]:

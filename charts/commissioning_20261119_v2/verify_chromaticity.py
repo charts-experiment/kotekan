@@ -17,6 +17,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
+from scipy.optimize import curve_fit
 
 from beam_io import (
     FREQS_MHZ,
@@ -25,6 +26,7 @@ from beam_io import (
     clean_channel_mask,
     load_dual_subband_beam_power,
     load_jsonl,
+    theoretical_array_factor_sq,
 )
 
 
@@ -116,10 +118,23 @@ def main():
     if int(np.sum(clean)) < 30:
         clean = np.mean(np.isfinite(wf[:, 0, :]) & (wf[:, 0, :] > 0.0), axis=0) > 0.85
 
+    # E-W mainlobe spatial-fan beams for baseline-free chromatic FWHM fitting
+    ew_max_off = 4.5 if mode == "solar" else 6.5
+    ew_pairs = sorted(
+        [(off_deg, bid) for bid, lbl, off_deg in fan_specs if bid == 0 or lbl.startswith(("E ", "W "))],
+        key=lambda x: x[0],
+    )
+    ew_main_pairs = [(off_deg, bid) for off_deg, bid in ew_pairs if abs(off_deg) <= ew_max_off]
+    ew_offs = np.array([x[0] for x in ew_main_pairs], dtype=np.float64)
+    ew_bids = [x[1] for x in ew_main_pairs]
+
+    mid_targets = {int(x["beam_id"]): x for x in pointing[len(pointing) // 2].get("targets", [])} if pointing else {}
+
     # Group clean channels into ~18 ~10-MHz spectral bins across 300-501.3 MHz
     edges = np.linspace(300.0, 501.5, 19)
     subbands: List[Dict[str, Any]] = []
-    sb_freqs, sb_fwhm_deg, sb_tpeak_s, sb_squint_deg = [], [], [], []
+    sb_freqs, sb_fwhm_deg, sb_fan_fwhm_deg, sb_tpeak_s, sb_squint_deg = [], [], [], [], []
+    sb_self_tpeak_s = []
     sb_cal_excess, sb_uncal_excess = [], []
 
     for bi in range(len(edges) - 1):
@@ -131,6 +146,80 @@ def main():
         t_pk, fwhm_s, snr, _ = measure_fwhm_and_peak(t_rel_s, drift_ts)
         fwhm_deg = (fwhm_s * sky_rate_deg_per_s) if (fwhm_s is not None and not is_smoke) else None
 
+        # Self-baselined linear+Gaussian fit on raw Beam 1 drift (immune to Beam 9 grating lobes)
+        self_t0_s, self_fwhm_deg = None, None
+        if not is_smoke and dur_s > 600.0:
+            y1_raw = np.mean(wf[:, drift_beam, m_b], axis=1)
+            sm_sig = max(2.0, min(8.0, len(y1_raw) / 20.0))
+            pk_guess = float(t_rel_s[int(np.argmax(gaussian_filter1d(y1_raw, sm_sig, mode="nearest")))])
+            lo_t, hi_t = 0.10 * dur_s, 0.90 * dur_s
+            lo_fw, hi_fw = 1.5 / sky_rate_deg_per_s, 16.0 / sky_rate_deg_per_s
+            t0_g = float(np.clip(pk_guess, lo_t + 1.0, hi_t - 1.0))
+            fw_g = float(np.clip(5.0 / sky_rate_deg_per_s, lo_fw + 1.0, hi_fw - 1.0))
+            amp_g = float(max(0.05, np.max(y1_raw) - np.min(y1_raw)))
+            try:
+                popt_d, _ = curve_fit(
+                    lambda t, c0, c1, amp, t0, fw: c0
+                    + c1 * (t / max(dur_s, 1.0) - 0.5)
+                    + amp * np.exp(-4.0 * np.log(2.0) * ((t - t0) / fw) ** 2),
+                    t_rel_s,
+                    y1_raw,
+                    p0=[float(np.min(y1_raw)), 0.0, amp_g, t0_g, fw_g],
+                    bounds=([-np.inf, -np.inf, 0.01, lo_t, lo_fw], [np.inf, np.inf, np.inf, hi_t, hi_fw]),
+                    maxfev=6000,
+                )
+                model_d = (
+                    popt_d[0]
+                    + popt_d[1] * (t_rel_s / max(dur_s, 1.0) - 0.5)
+                    + popt_d[2] * np.exp(-4.0 * np.log(2.0) * ((t_rel_s - popt_d[3]) / popt_d[4]) ** 2)
+                )
+                snr_d = float(popt_d[2] / max(np.std(y1_raw - model_d), 1e-12))
+                fw_cand = float(popt_d[4] * sky_rate_deg_per_s)
+                if snr_d >= 1.5 and 1.5 <= fw_cand <= 15.0:
+                    self_t0_s = float(popt_d[3])
+                    self_fwhm_deg = fw_cand
+            except Exception:
+                pass
+
+        # Baseline-free E-W spatial fan fit: P(theta) = B_sky + A * exp(-4 ln 2 * (theta / FWHM)^2)
+        fan_fwhm_deg = None
+        if len(ew_bids) >= 3:
+            ew_meds = np.array([float(np.median(np.mean(wf[:, bid, m_b], axis=1))) for bid in ew_bids], dtype=np.float64)
+            edge_min = float(min(ew_meds[0], ew_meds[-1]))
+            on_pk = float(np.max(ew_meds))
+            if on_pk - edge_min > 0.15:
+                amp_f0 = float(max(0.05, on_pk - edge_min))
+                try:
+                    popt_f, _ = curve_fit(
+                        lambda x, b0, amp, fw: b0 + amp * np.exp(-4.0 * np.log(2.0) * (x / fw) ** 2),
+                        ew_offs,
+                        ew_meds,
+                        p0=[edge_min, amp_f0, 4.5],
+                        bounds=([0.0, 0.02, 1.5], [30.0, 30.0, 15.0]),
+                        maxfev=6000,
+                    )
+                    fw_f = float(popt_f[2])
+                    resid_f = float(np.std(ew_meds - (popt_f[0] + popt_f[1] * np.exp(-4.0 * np.log(2.0) * (ew_offs / fw_f) ** 2))))
+                    if 1.5 <= fw_f <= 14.5 and float(popt_f[1]) > 3.0 * max(resid_f, 1e-6):
+                        fan_fwhm_deg = fw_f
+                except Exception:
+                    pass
+
+        off_af_sq = None
+        if mode == "solar" and 0 in mid_targets and off_beam in mid_targets:
+            off_af_sq = round(
+                float(
+                    theoretical_array_factor_sq(
+                        float(mid_targets[off_beam]["l0"]),
+                        float(mid_targets[off_beam]["m0"]),
+                        float(mid_targets[0]["l0"]),
+                        float(mid_targets[0]["m0"]),
+                        np.array([f_mid]),
+                    )[0]
+                ),
+                4,
+            )
+
         p_on = float(np.median(np.mean(wf[:, 0, m_b] - wf[:, off_beam, m_b], axis=1)))
         p_un = float(np.median(np.mean(wf[:, uncal_beam, m_b] - wf[:, off_beam, m_b], axis=1)))
         p_off = float(np.median(np.mean(wf[:, off_beam, m_b], axis=1)))
@@ -140,7 +229,11 @@ def main():
             "n_clean_ch": int(np.sum(m_b)),
             "drift_snr": round(snr, 2),
             "drift_peak_s": round(t_pk, 2) if t_pk is not None else None,
+            "self_drift_peak_s": round(self_t0_s, 2) if self_t0_s is not None else None,
             "fwhm_deg": round(fwhm_deg, 3) if fwhm_deg is not None else None,
+            "self_drift_fwhm_deg": round(self_fwhm_deg, 3) if self_fwhm_deg is not None else None,
+            "fan_fwhm_deg": round(fan_fwhm_deg, 3) if fan_fwhm_deg is not None else None,
+            "off_beam_sun_af_sq": off_af_sq,
             "cal_excess_frac": round(p_on / max(p_off, 1e-12), 4),
             "uncal_excess_frac": round(p_un / max(p_off, 1e-12), 4),
         }
@@ -152,10 +245,14 @@ def main():
         # narrower peaks are noise spikes rather than physical sky drift transits.
         if fwhm_deg is not None and fwhm_deg >= 1.0 and snr >= 5.0:
             sb_fwhm_deg.append((f_mid, fwhm_deg))
+        if fan_fwhm_deg is not None:
+            sb_fan_fwhm_deg.append((f_mid, fan_fwhm_deg))
         if t_pk is not None and fwhm_deg is not None and fwhm_deg >= 1.0 and snr >= 5.0 and not is_smoke:
             sb_tpeak_s.append((f_mid, t_pk))
+        if self_t0_s is not None and not is_smoke:
+            sb_self_tpeak_s.append((f_mid, self_t0_s))
 
-    # 1. Fit power-law FWHM(nu) = A * (nu/400)^(-beta)
+    # 1. Fit power-law FWHM(nu) = A * (nu/400)^(-beta) on Drift and Tracked Fan
     beta_fit, a_400_fit = None, None
     if len(sb_fwhm_deg) >= 4:
         fs = np.array([x[0] for x in sb_fwhm_deg])
@@ -164,16 +261,26 @@ def main():
         beta_fit = round(float(-slope), 4)
         a_400_fit = round(float(np.exp(intercept)), 3)
 
-    # 2. Squint vs frequency relative to median transit time
+    beta_fan_fit, a_400_fan_fit = None, None
+    if len(sb_fan_fwhm_deg) >= 4:
+        fs_f = np.array([x[0] for x in sb_fan_fwhm_deg])
+        ws_f = np.array([x[1] for x in sb_fan_fwhm_deg])
+        slope_f, intercept_f = np.polyfit(np.log(fs_f / 400.0), np.log(ws_f), 1)
+        beta_fan_fit = round(float(-slope_f), 4)
+        a_400_fan_fit = round(float(np.exp(intercept_f)), 3)
+
+    # 2. Squint vs frequency relative to median transit time (prefer self-baselined drift if available)
+    squint_pts = sb_self_tpeak_s if len(sb_self_tpeak_s) >= 4 else sb_tpeak_s
     squint_slope_deg_per_100mhz = None
-    if len(sb_tpeak_s) >= 4:
-        t_med = float(np.median([x[1] for x in sb_tpeak_s]))
+    if len(squint_pts) >= 4:
+        t_med = float(np.median([x[1] for x in squint_pts]))
+        pk_key = "self_drift_peak_s" if len(sb_self_tpeak_s) >= 4 else "drift_peak_s"
         for rec in subbands:
-            if rec["drift_peak_s"] is not None:
-                sq = (rec["drift_peak_s"] - t_med) * sky_rate_deg_per_s
+            if rec[pk_key] is not None:
+                sq = (rec[pk_key] - t_med) * sky_rate_deg_per_s
                 rec["squint_deg"] = round(sq, 4)
-        fs_sq = np.array([x[0] for x in sb_tpeak_s])
-        sq_vals = np.array([(x[1] - t_med) * sky_rate_deg_per_s for x in sb_tpeak_s])
+        fs_sq = np.array([x[0] for x in squint_pts])
+        sq_vals = np.array([(x[1] - t_med) * sky_rate_deg_per_s for x in squint_pts])
         squint_slope_deg_per_100mhz = round(float(np.polyfit(fs_sq / 100.0, sq_vals, 1)[0]), 4)
 
     # 3. Spatial-fan beam profile B(offset, nu) & offset spectral-index tilt delta_alpha
@@ -227,6 +334,12 @@ def main():
             "fwhm_at_400mhz_deg": a_400_fit,
             "n_subbands_fitted": len(sb_fwhm_deg),
         },
+        "chromaticity_power_law_fwhm_fan": {
+            "beta_measured": beta_fan_fit,
+            "beta_expected_chromatic_array": 1.0,
+            "fwhm_at_400mhz_deg": a_400_fan_fit,
+            "n_subbands_fitted": len(sb_fan_fwhm_deg),
+        },
         "beam_squint_deg_per_100mhz": squint_slope_deg_per_100mhz,
         "cal_vs_uncal": {
             "mean_power_cal_on": round(p_on_tot, 4),
@@ -258,7 +371,18 @@ def main():
     ax00.grid(True, alpha=0.25)
     ax00.legend(fontsize=8.5)
 
-    if len(sb_fwhm_deg) >= 2:
+    if len(sb_fan_fwhm_deg) >= 2:
+        fs_f = np.array([x[0] for x in sb_fan_fwhm_deg])
+        ws_f = np.array([x[1] for x in sb_fan_fwhm_deg])
+        ax01.plot(fs_f, ws_f, "o-", color="#0f172a", label="Spatial Fan FWHM(nu)")
+        if beta_fan_fit is not None and a_400_fan_fit is not None:
+            fg = np.linspace(300, 500, 100)
+            ax01.plot(fg, a_400_fan_fit * (fg / 400.0) ** (-beta_fan_fit), "--", color="#2563eb", label=f"Fan fit beta={beta_fan_fit:.2f} (A={a_400_fan_fit:.2f} deg)")
+            ax01.plot(fg, a_400_fan_fit * (fg / 400.0) ** (-1.0), ":", color="#dc2626", label="Theory beta=1.0")
+        if len(sb_fwhm_deg) >= 2:
+            ax01.plot([x[0] for x in sb_fwhm_deg], [x[1] for x in sb_fwhm_deg], "s", ms=4, color="#16a34a", label="Drift FWHM")
+        ax01.legend(fontsize=8.0)
+    elif len(sb_fwhm_deg) >= 2:
         fs = np.array([x[0] for x in sb_fwhm_deg])
         ws = np.array([x[1] for x in sb_fwhm_deg])
         ax01.plot(fs, ws, "o-", color="#0f172a", label="Measured FWHM(nu)")

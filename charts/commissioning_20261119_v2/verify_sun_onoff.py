@@ -25,34 +25,16 @@ import numpy as np
 
 from beam_io import (
     FREQS_MHZ,
+    POS4,
     atomic_savefig,
     atomic_write_text,
     clean_channel_mask,
     load_dual_subband_beam_power,
     load_jsonl,
     overlapping_allan_deviation,
+    overlapping_hadamard_deviation,
+    theoretical_array_factor_sq,
 )
-
-POS4 = np.array(
-    [
-        [0.0, 0.0, 0.0],
-        [-4.24775, 0.0275, 0.0],
-        [0.15, 4.30625, 0.0],
-        [-4.12725, 4.42725, 0.0],
-    ],
-    dtype=np.float64,
-)
-
-
-def theoretical_array_factor_sq(l_off: float, m_off: float, l_src: float, m_src: float, freqs_mhz: np.ndarray) -> np.ndarray:
-    """Normalized 4-element power array factor |1/4 sum exp(i k r.(s_off - s_src))|^2."""
-    n_off = np.sqrt(max(0.0, 1.0 - l_off ** 2 - m_off ** 2))
-    n_src = np.sqrt(max(0.0, 1.0 - l_src ** 2 - m_src ** 2))
-    ds = np.array([l_off - l_src, m_off - m_src, n_off - n_src], dtype=np.float64)
-    delays = POS4 @ ds
-    k = 2.0 * np.pi * freqs_mhz * 1e6 / 299792458.0
-    af = np.mean(np.exp(1j * k[:, None] * delays[None, :]), axis=1)
-    return np.abs(af) ** 2
 
 
 def summarize_sun_run(run_dir: Path) -> Dict[str, Any]:
@@ -98,10 +80,18 @@ def summarize_sun_run(run_dir: Path) -> Dict[str, Any]:
     y_diff_n = (p_on - p_off_n) / np.mean(p_off_n)
     y_diff_n = y_diff_n - np.mean(y_diff_n) + 1.0
 
+    y_ratio_s = p_on / np.maximum(p_off_s, 1e-12)
+    y_ratio_s /= np.mean(y_ratio_s)
+
     taus_on, adev_on = overlapping_allan_deviation(y_on, dt_s, taus_target)
     _, adev_off_n = overlapping_allan_deviation(y_off_n, dt_s, taus_target)
     _, adev_ratio_n = overlapping_allan_deviation(y_ratio_n, dt_s, taus_target)
     _, adev_diff_n = overlapping_allan_deviation(y_diff_n, dt_s, taus_target)
+
+    th_on, hdev_on = overlapping_hadamard_deviation(y_on, dt_s, taus_target)
+    _, hdev_off_n = overlapping_hadamard_deviation(y_off_n, dt_s, taus_target)
+    _, hdev_ratio_n = overlapping_hadamard_deviation(y_ratio_n, dt_s, taus_target)
+    _, hdev_ratio_s = overlapping_hadamard_deviation(y_ratio_s, dt_s, taus_target)
 
     def _opt_tau(taus, adev):
         if len(taus) == 0:
@@ -113,6 +103,7 @@ def summarize_sun_run(run_dir: Path) -> Dict[str, Any]:
     tau_opt_off, _ = _opt_tau(taus_on, adev_off_n)
     tau_opt_ratio, min_adev_ratio = _opt_tau(taus_on, adev_ratio_n)
     tau_opt_diff, min_adev_diff = _opt_tau(taus_on, adev_diff_n)
+    tau_opt_hratio_n, min_hdev_ratio_n = _opt_tau(th_on, hdev_ratio_n)
 
     def _at_tau(taus, adev, target):
         if len(taus) == 0:
@@ -160,6 +151,19 @@ def summarize_sun_run(run_dir: Path) -> Dict[str, Any]:
             "adev_ratio_16s": _at_tau(taus_on, adev_ratio_n, 16.0),
             "adev_ratio_120s": _at_tau(taus_on, adev_ratio_n, 120.0),
         },
+        "hadamard_variance": {
+            "taus_s": [round(float(x), 3) for x in th_on],
+            "hdev_on": [round(float(x), 6) for x in hdev_on],
+            "hdev_off_n": [round(float(x), 6) for x in hdev_off_n],
+            "hdev_on_div_off_n": [round(float(x), 6) for x in hdev_ratio_n],
+            "hdev_on_div_off_s": [round(float(x), 6) for x in hdev_ratio_s],
+            "tau_opt_ratio_n_s": tau_opt_hratio_n,
+            "min_hdev_ratio_n": min_hdev_ratio_n,
+            "hdev_ratio_16s": _at_tau(th_on, hdev_ratio_n, 16.0),
+            "hdev_ratio_65s": _at_tau(th_on, hdev_ratio_n, 65.0),
+            "hdev_ratio_120s": _at_tau(th_on, hdev_ratio_n, 120.0),
+            "hdev_ratio_300s": _at_tau(th_on, hdev_ratio_n, 300.0),
+        },
         "_arrays": {
             "t_s": (seq - seq[0]).astype(np.float64) * (10.0 / 3.0) * 1e-6,
             "ts_clean": ts_clean,
@@ -170,6 +174,9 @@ def summarize_sun_run(run_dir: Path) -> Dict[str, Any]:
             "adev_off_n": adev_off_n,
             "adev_ratio_n": adev_ratio_n,
             "adev_diff_n": adev_diff_n,
+            "taus_hdev": th_on,
+            "hdev_on": hdev_on,
+            "hdev_ratio_n": hdev_ratio_n,
         },
     }
 
@@ -220,15 +227,17 @@ def main():
     if len(taus) > 1:
         ax01.loglog(taus, arr_a["adev_on"], "o-", ms=3, color="#dc2626", label=f"Raw Sun ON (opt={res_a['allan_variance']['tau_opt_on_s']}s)")
         ax01.loglog(taus, arr_a["adev_off_n"], "s-", ms=3, color="#2563eb", label=f"Raw OFF-N (opt={res_a['allan_variance']['tau_opt_off_s']}s)")
-        ax01.loglog(taus, arr_a["adev_ratio_n"], "^-", ms=4, color="#16a34a", lw=2.0, label=f"ON / OFF-N (opt={res_a['allan_variance']['tau_opt_ratio_s']}s)")
-        ax01.loglog(taus, arr_a["adev_diff_n"], "v--", ms=3, color="#7c3aed", label=f"(ON - OFF-N) norm (opt={res_a['allan_variance']['tau_opt_diff_s']}s)")
+        ax01.loglog(taus, arr_a["adev_ratio_n"], "^-", ms=4, color="#16a34a", lw=2.0, label=f"ADEV ON/OFF-N (opt={res_a['allan_variance']['tau_opt_ratio_s']}s)")
+        ax01.loglog(taus, arr_a["adev_diff_n"], "v--", ms=3, color="#7c3aed", label=f"ADEV (ON-OFF-N) (opt={res_a['allan_variance']['tau_opt_diff_s']}s)")
+        if len(arr_a["taus_hdev"]) > 1:
+            ax01.loglog(arr_a["taus_hdev"], arr_a["hdev_ratio_n"], "d-", ms=4, color="#0f766e", lw=1.8, label=f"HDEV ON/OFF-N (opt={res_a['hadamard_variance']['tau_opt_ratio_n_s']}s)")
         ref = arr_a["adev_ratio_n"][0] * np.sqrt(taus[0] / taus)
         ax01.loglog(taus, ref, "k:", lw=1.2, label="Radiometer tau^-1/2")
-    ax01.set_title("Overlapping Allan Deviation (1/f Drift Cancellation)")
+    ax01.set_title("Allan & Hadamard Deviation (1/f Drift Cancellation)")
     ax01.set_xlabel("Averaging Time tau (s)")
-    ax01.set_ylabel("Allan Deviation sigma_y(tau)")
+    ax01.set_ylabel("Deviation sigma_y(tau)")
     ax01.grid(True, which="both", alpha=0.25)
-    ax01.legend(fontsize=8.0)
+    ax01.legend(fontsize=7.5)
 
     ax10 = axes[1, 0]
     clean = arr_a["clean"]

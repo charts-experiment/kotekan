@@ -17,7 +17,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 
-from beam_io import FREQS_MHZ, clean_channel_mask, load_dual_subband_beam_power, load_jsonl
+from beam_io import (
+    FREQS_MHZ,
+    atomic_savefig,
+    atomic_write_text,
+    clean_channel_mask,
+    load_dual_subband_beam_power,
+    load_jsonl,
+    theoretical_array_factor_sq,
+)
 
 
 def main():
@@ -97,6 +105,50 @@ def main():
     sun_ts = np.mean(wf[:, sun_beam, clean], axis=1)
     sun_exc = float(np.mean((sun_ts - off_ts) / np.maximum(off_ts, 1e-12)))
 
+    # 4-antenna Sun Array Factor (AF_sun) sidelobe coupling regression across non-Sun beams
+    sun_af_regression: Dict[str, Any] = {}
+    if pointing:
+        non_sun_bids = [0, 1, 2, 3, 4, 5, 6, 7, 9]
+        p_samp = np.zeros((len(pointing), 10), dtype=np.float64)
+        af_samp = np.zeros((len(pointing), 10), dtype=np.float64)
+        t_start_unix = float(pointing[0]["unix"])
+        for si, snap in enumerate(pointing):
+            idx_t = int(np.argmin(np.abs(t_rel_s - (float(snap["unix"]) - t_start_unix))))
+            tg = {int(x["beam_id"]): x for x in snap.get("targets", [])}
+            if sun_beam not in tg:
+                continue
+            s_tgt = tg[sun_beam]
+            for bid in range(10):
+                p_samp[si, bid] = float(np.mean(wf[idx_t, bid, clean]))
+                if bid in tg:
+                    af_samp[si, bid] = float(
+                        np.mean(
+                            theoretical_array_factor_sq(
+                                float(tg[bid]["l0"]),
+                                float(tg[bid]["m0"]),
+                                float(s_tgt["l0"]),
+                                float(s_tgt["m0"]),
+                                FREQS_MHZ[clean],
+                            )
+                        )
+                    )
+        obs_p = p_samp[:, non_sun_bids].ravel()
+        obs_af = af_samp[:, non_sun_bids].ravel()
+        if np.std(obs_af) > 1e-6 and np.std(obs_p) > 1e-12:
+            af_slope, af_intercept = np.polyfit(obs_af, obs_p, 1)
+            r_corr = float(np.corrcoef(obs_af, obs_p)[0, 1])
+            sun_af_regression = {
+                "pearson_r": round(r_corr, 4),
+                "slope_per_af": round(float(af_slope), 4),
+                "intercept_power": round(float(af_intercept), 4),
+                "sun_monitor_minus_intercept": round(float(np.mean(p_samp[:, sun_beam]) - af_intercept), 4),
+            }
+            for row in lat_profile:
+                bid = int(row["beam_id"])
+                resid = p_samp[:, bid] - (af_intercept + af_slope * af_samp[:, bid])
+                row["mean_af_sun"] = round(float(np.mean(af_samp[:, bid])), 4)
+                row["sun_af_subtracted_resid"] = round(float(np.mean(resid)), 4)
+
     summary = {
         "run_dir": str(run_dir),
         "duration_s": round(float(t_rel_s[-1] - t_rel_s[0]) if len(t_rel_s) > 1 else 0.0, 2),
@@ -107,10 +159,11 @@ def main():
         "b0_excess_spectral_slope": slope_contrast,
         "drift_peak_elapsed_s": round(drift_pk_s, 2),
         "sun_monitor_excess_vs_cold_off": round(sun_exc, 4),
+        "sun_af_regression": sun_af_regression,
         "subband_freqs_mhz": [round(x, 2) for x in spec_freqs],
         "subband_b0_excess_frac": [round(float(x), 4) for x in spec_exc],
     }
-    (run_dir / "galactic_center_verification.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    atomic_write_text(run_dir / "galactic_center_verification.json", json.dumps(summary, indent=2))
 
     # 2x2 Diagnostic Figure
     fig, axes = plt.subplots(2, 2, figsize=(13.5, 9), layout="constrained")
@@ -147,7 +200,7 @@ def main():
     axes[1, 1].grid(True, alpha=0.25)
     axes[1, 1].legend(fontsize=8.5)
 
-    fig.savefig(run_dir / "galactic_center_verification.png", dpi=140)
+    atomic_savefig(fig, run_dir / "galactic_center_verification.png", dpi=140)
     plt.close(fig)
     print(json.dumps(summary, indent=2))
 

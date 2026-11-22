@@ -19,6 +19,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from astropy.coordinates import EarthLocation, SkyCoord
 from astropy.time import Time
+from scipy.ndimage import uniform_filter1d
 
 from beam_io import (
     FREQS_MHZ,
@@ -78,6 +79,46 @@ def normalize_clean_beam(wf_b_clean: np.ndarray) -> np.ndarray:
     return np.where(pos, np.clip((v - mu[None, :]) / sd[None, :], -8.0, 8.0), 0.0).astype(np.float32)
 
 
+def highpass_normalize_beam(wf_b_clean: np.ndarray, cadence_s: float, period_s: float) -> np.ndarray:
+    """Subtract slow continuum drift via running boxcar before per-channel normalization."""
+    v = wf_b_clean.astype(np.float32, copy=False)
+    pos = np.isfinite(v) & (v > 0.0)
+    cnt = np.maximum(pos.sum(axis=0), 1)
+    chan_med = np.where(pos, v, 0.0).sum(axis=0, keepdims=True) / cnt[None, :]
+    v_fill = np.where(pos, v, chan_med)
+    hp_win = max(15, int(round(max(2.0, 4.0 * period_s) / max(cadence_s, 1e-5))))
+    trend = uniform_filter1d(v_fill, size=hp_win, axis=0, mode="nearest")
+    detrended = np.where(pos, v_fill - trend + chan_med, 0.0)
+    return normalize_clean_beam(detrended)
+
+
+def top_fft_peaks(norm_tc: np.ndarray, f_ch: np.ndarray, cadence_s: float, n_top: int = 5) -> list[Dict[str, float]]:
+    """Return top zero-DM FFT power peaks (>= 0.5 Hz) to expose 50 Hz mains / frame combs."""
+    ts0 = dedisperse_1d(norm_tc, f_ch, 0.0, cadence_s)
+    if len(ts0) < 32:
+        return []
+    ts0 = ts0 - float(np.mean(ts0))
+    pw = np.abs(np.fft.rfft(ts0)) ** 2
+    fr = np.fft.rfftfreq(len(ts0), d=cadence_s)
+    ref_mask = fr >= 1.0
+    med_pw = float(np.median(pw[ref_mask])) if np.any(ref_mask) else float(np.median(pw[1:]))
+    cand = np.where(fr >= 0.5)[0]
+    if len(cand) == 0 or med_pw <= 0.0:
+        return []
+    order = cand[np.argsort(pw[cand])[::-1]]
+    picked = []
+    for idx in order:
+        if any(abs(int(idx) - p_i) <= 4 for p_i in picked):
+            continue
+        picked.append(int(idx))
+        if len(picked) >= n_top:
+            break
+    return [
+        {"freq_hz": round(float(fr[i]), 4), "period_s": round(float(1.0 / fr[i]), 6), "power_over_median": round(float(pw[i] / med_pw), 1)}
+        for i in picked
+    ]
+
+
 def dedisperse_1d(
     norm_tc: np.ndarray,
     freqs_ch: np.ndarray,
@@ -105,15 +146,20 @@ def dedisperse_1d(
 
 
 def fold_1d(ts: np.ndarray, t_rel_s: np.ndarray, period_s: float, n_bins: int = 32) -> Tuple[np.ndarray, float]:
-    """Fold 1D dedispersed time series at period_s and return (profile, off-pulse-rms SNR)."""
+    """Fold 1D dedispersed time series at period_s and return (profile, unbiased off-pulse SNR)."""
     bins = np.clip((np.mod(t_rel_s / period_s, 1.0) * n_bins).astype(np.int64), 0, n_bins - 1)
     s = np.bincount(bins, weights=ts, minlength=n_bins)
     c = np.bincount(bins, minlength=n_bins)
     prof = s / np.maximum(c, 1.0)
-    med = float(np.median(prof))
-    off = np.sort(prof)[: max(4, int(0.70 * n_bins))]
-    off_rms = float(np.std(off)) if np.std(off) > 0 else float(np.std(prof))
-    snr = float((np.max(prof) - med) / max(off_rms, 1e-12))
+    pk = int(np.argmax(prof))
+    hw = max(1, n_bins // 10)
+    off_mask = np.ones(n_bins, dtype=bool)
+    for d in range(-hw, hw + 1):
+        off_mask[(pk + d) % n_bins] = False
+    off_vals = prof[off_mask]
+    off_med = float(np.median(off_vals))
+    off_rms = float(np.std(off_vals)) if np.std(off_vals) > 0 else float(np.std(prof))
+    snr = float((prof[pk] - off_med) / max(off_rms, 1e-12))
     return prof, snr
 
 
@@ -179,12 +225,6 @@ def main():
     if int(np.sum(clean_mask)) < 30:
         clean_mask = np.mean(np.isfinite(wf[:, 0, :]) & (wf[:, 0, :] > 0.0), axis=0) > 0.85
 
-    ch_idx = np.where(clean_mask)[0]
-    f_ch = FREQS_MHZ[ch_idx]
-    norm0 = normalize_clean_beam(wf[:, 0, ch_idx])
-    norm1 = normalize_clean_beam(wf[:, 1, ch_idx])
-    norm2 = normalize_clean_beam(wf[:, 2, ch_idx])
-
     mid_unix = 0.5 * (timing["start_time0_unix"] + timing["end_time0_unix"])
     if mid_unix <= 0:
         mid_unix = datetime.now(timezone.utc).timestamp()
@@ -198,6 +238,22 @@ def main():
     dm_cat = cat["dm_cat"]
     dur_s = float(n_t * cadence_s)
     is_smoke = dur_s < 30.0
+
+    ch_idx = np.where(clean_mask)[0]
+    f_ch = FREQS_MHZ[ch_idx]
+    if is_smoke and n_t < 60:
+        norm0 = normalize_clean_beam(wf[:, 0, ch_idx])
+        norm1 = normalize_clean_beam(wf[:, 1, ch_idx])
+        norm2 = normalize_clean_beam(wf[:, 2, ch_idx])
+    else:
+        norm0 = highpass_normalize_beam(wf[:, 0, ch_idx], cadence_s, p_bary_obs_s)
+        norm1 = highpass_normalize_beam(wf[:, 1, ch_idx], cadence_s, p_bary_obs_s)
+        norm2 = highpass_normalize_beam(wf[:, 2, ch_idx], cadence_s, p_bary_obs_s)
+
+    fft_rfi_diag = {
+        "beam0_cal": top_fft_peaks(norm0, f_ch, cadence_s),
+        "beam2_off": top_fft_peaks(norm2, f_ch, cadence_s),
+    }
     ts_dm_cache: Dict[float, np.ndarray] = {}
     if is_smoke:
         best_p = p_topo_pred_s
@@ -250,6 +306,75 @@ def main():
                     best_snr = sn_f
                     best_dm = c_dm
                     best_p = float(pf)
+
+    blind_best_p, blind_best_dm = float(best_p), float(best_dm)
+    ts_blind = ts_dm_cache.get(round(blind_best_dm, 3))
+    if ts_blind is None:
+        ts_blind = dedisperse_1d(norm0, f_ch, blind_best_dm, cadence_s)
+    _, blind_best_snr = fold_1d(
+        ts_blind,
+        t_rel_s,
+        blind_best_p,
+        n_bins=args.n_bins,
+    )
+
+    # Ephemeris-locked tight search around predicted topocentric period at dm_cat
+    ts_cat = ts_dm_cache.get(round(float(dm_cat), 3))
+    if ts_cat is None:
+        ts_cat = dedisperse_1d(norm0, f_ch, dm_cat, cadence_s)
+        ts_dm_cache[round(float(dm_cat), 3)] = ts_cat
+    _, exact_p_topo_snr = fold_1d(ts_cat, t_rel_s, p_topo_pred_s, n_bins=args.n_bins)
+
+    ephem_half_win_s = 2.5e-5 if tgt_key == "vela" else 5.0e-6
+    dp_ephem = max(5.0e-8, 0.25 * (p_topo_pred_s ** 2) / (args.n_bins * max(dur_s, 10.0)))
+    n_ephem_side = max(2, int(round(ephem_half_win_s / dp_ephem))) if not is_smoke else 0
+    ps_ephem = p_topo_pred_s + np.arange(-n_ephem_side, n_ephem_side + 1) * dp_ephem
+    ephem_snrs = [fold_1d(ts_cat, t_rel_s, float(pe), n_bins=args.n_bins)[1] for pe in ps_ephem]
+    ephem_idx = int(np.argmax(ephem_snrs))
+    ephem_best_p = float(ps_ephem[ephem_idx])
+    ephem_snr_cal = float(ephem_snrs[ephem_idx])
+
+    _, ephem_snr_uncal = fold_1d(dedisperse_1d(norm1, f_ch, dm_cat, cadence_s), t_rel_s, ephem_best_p, n_bins=args.n_bins)
+    _, ephem_snr_off = fold_1d(dedisperse_1d(norm2, f_ch, dm_cat, cadence_s), t_rel_s, ephem_best_p, n_bins=args.n_bins)
+    _, ephem_snr_rev = fold_1d(dedisperse_1d(norm0, FREQS_MHZ[::-1][ch_idx], dm_cat, cadence_s), t_rel_s, ephem_best_p, n_bins=args.n_bins)
+    ts_dm0_ep = ts_dm_cache.get(0.0)
+    if ts_dm0_ep is None:
+        ts_dm0_ep = dedisperse_1d(norm0, f_ch, 0.0, cadence_s)
+        ts_dm_cache[0.0] = ts_dm0_ep
+    _, ephem_snr_dm0 = fold_1d(ts_dm0_ep, t_rel_s, ephem_best_p, n_bins=args.n_bins)
+
+    m_ep_lo = f_ch < 400.65
+    m_ep_hi = f_ch >= 400.65
+    pk_ep_lo = int(np.argmax(fold_1d(dedisperse_1d(norm0, f_ch, dm_cat, cadence_s, m_ep_lo), t_rel_s, ephem_best_p, n_bins=args.n_bins)[0])) if np.any(m_ep_lo) else 0
+    pk_ep_hi = int(np.argmax(fold_1d(dedisperse_1d(norm0, f_ch, dm_cat, cadence_s, m_ep_hi), t_rel_s, ephem_best_p, n_bins=args.n_bins)[0])) if np.any(m_ep_hi) else 0
+    sb_bin_diff = min(abs(pk_ep_lo - pk_ep_hi), args.n_bins - abs(pk_ep_lo - pk_ep_hi))
+
+    detection_verified = bool(
+        (not is_smoke)
+        and ephem_snr_cal >= 5.0
+        and ephem_snr_cal >= 1.8 * max(ephem_snr_off, 1.0)
+        and ephem_snr_cal >= 1.5 * max(ephem_snr_rev, ephem_snr_dm0, 1.0)
+        and sb_bin_diff <= 2
+    )
+    if detection_verified:
+        best_p = ephem_best_p
+        best_dm = float(dm_cat)
+
+    ephem_locked_check = {
+        "window_half_us": round(ephem_half_win_s * 1e6, 1),
+        "n_trials": int(len(ps_ephem)),
+        "exact_p_topo_snr": round(float(exact_p_topo_snr), 3),
+        "best_p_s": round(ephem_best_p, 9),
+        "delta_p_us": round((ephem_best_p - p_topo_pred_s) * 1e6, 3),
+        "snr_cal": round(ephem_snr_cal, 3),
+        "snr_uncal": round(float(ephem_snr_uncal), 3),
+        "snr_off": round(float(ephem_snr_off), 3),
+        "snr_rev": round(float(ephem_snr_rev), 3),
+        "snr_dm0": round(float(ephem_snr_dm0), 3),
+        "subband_lo_peak_bin": pk_ep_lo,
+        "subband_hi_peak_bin": pk_ep_hi,
+        "subband_bin_diff": int(sb_bin_diff),
+    }
 
     ts0_best = ts_dm_cache.get(round(best_dm, 3))
     if ts0_best is None:
@@ -315,9 +440,17 @@ def main():
         "best_period_s": round(best_p, 9),
         "best_dm_pc_cm3": round(best_dm, 3),
         "catalog_dm_pc_cm3": dm_cat,
+        "detection_verified": detection_verified,
         "snr_beam0_cal_on": round(snr_cal, 3),
         "snr_beam1_uncal_on": round(snr_uncal, 3),
         "snr_beam2_off_cal": round(snr_off, 3),
+        "blind_search_max": {
+            "period_s": round(blind_best_p, 9),
+            "dm_pc_cm3": round(blind_best_dm, 3),
+            "snr": round(float(blind_best_snr), 3),
+        },
+        "ephemeris_locked_check": ephem_locked_check,
+        "periodic_rfi_fft_peaks_hz": fft_rfi_diag,
         "subband_alignment_at_cat_dm": subband_alignment,
         "channel_order_check_at_cat_dm": {
             "normal_300_to_501_snr": round(snr_cat_normal, 3),
@@ -341,7 +474,8 @@ def main():
     axes[0, 0].plot(phase_axis, prof_cal, lw=2.0, color="#2563eb", label=f"Beam 0 Cal (SNR={snr_cal:.2f})")
     axes[0, 0].plot(phase_axis, prof_uncal, lw=1.4, color="#f59e0b", label=f"Beam 1 Uncal (SNR={snr_uncal:.2f})")
     axes[0, 0].plot(phase_axis, prof_off, lw=1.4, color="#64748b", ls="--", label=f"Beam 2 OFF (SNR={snr_off:.2f})")
-    axes[0, 0].set_title(f"{cat['name']} Folded Profile (P={best_p*1e3:.4f} ms, DM={best_dm:.2f})")
+    status_tag = "VERIFIED" if detection_verified else "BELOW SENSITIVITY LIMIT"
+    axes[0, 0].set_title(f"{cat['name']} [{status_tag}] (P={best_p*1e3:.4f} ms, DM={best_dm:.2f})")
     axes[0, 0].set_xlabel("Pulse Phase")
     axes[0, 0].set_ylabel("Normalized Amplitude")
     axes[0, 0].grid(True, alpha=0.25)
@@ -357,7 +491,8 @@ def main():
         )
         fig.colorbar(im, ax=axes[0, 1], label="Fold SNR")
         axes[0, 1].axhline(dm_cat, color="white", ls="--", lw=1.0, label=f"Cat DM={dm_cat}")
-        axes[0, 1].axvline(best_p * 1e3, color="#fde047", ls=":", lw=1.0, label=f"Best P={best_p*1e3:.4f} ms")
+        axes[0, 1].axvline(p_topo_pred_s * 1e3, color="#22d3ee", ls="--", lw=1.0, label=f"Pred P_topo={p_topo_pred_s*1e3:.4f} ms")
+        axes[0, 1].axvline(best_p * 1e3, color="#fde047", ls=":", lw=1.1, label=f"Best P={best_p*1e3:.4f} ms")
         axes[0, 1].set_title("2D (P, DM) Search SNR")
         axes[0, 1].set_xlabel("Period (ms)")
         axes[0, 1].set_ylabel("DM (pc cm^-3)")
