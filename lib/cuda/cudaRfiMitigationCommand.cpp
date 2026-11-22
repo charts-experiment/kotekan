@@ -843,26 +843,32 @@ cudaEvent_t cudaRfiMitigationCommand::execute(cudaPipelineState& /*pipestate*/,
                                     stream, is_swapped_withoffset);
         }
 
-        if (!_gpu_mem_rfi_mask.empty()) {
-            const std::size_t mask_bytes =
-                _num_chunks * static_cast<std::size_t>(_num_local_freq) * sizeof(std::uint8_t);
-            void* d_out_mask = device.get_gpu_memory_array(_gpu_mem_rfi_mask, gpu_frame_id,
-                                                           _gpu_buffer_depth, mask_bytes);
-            if (d_out_mask) {
-                CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(d_out_mask, _d_chunk_rfi_mask, mask_bytes,
-                                                        cudaMemcpyDeviceToDevice, stream));
-                if (meta) {
-                    device.claim_gpu_memory_array_metadata(_gpu_mem_rfi_mask, gpu_frame_id, meta);
-                }
-            }
-        }
-
         // Copy lightweight per-channel summary (336 * 24B = 8 KB) to pinned host for REST telemetry;
         // consume _h_channel_stats only in finalize_frame() after the stream completes.
         CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_h_channel_stats, _d_channel_stats,
                                                 _num_local_freq * sizeof(RfiChannelStats),
                                                 cudaMemcpyDeviceToHost, stream));
         _last_frame_enabled = true;
+    }
+
+    if (!_gpu_mem_rfi_mask.empty()) {
+        const std::size_t mask_bytes =
+            _num_chunks * static_cast<std::size_t>(_num_local_freq) * sizeof(std::uint8_t);
+        void* d_out_mask = device.get_gpu_memory_array(_gpu_mem_rfi_mask, gpu_frame_id,
+                                                       _gpu_buffer_depth, mask_bytes);
+        if (d_out_mask) {
+            if (cfg.enabled && !_current_active_raw.empty() && cfg.blank_voltages_enabled) {
+                CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(d_out_mask, _d_chunk_rfi_mask, mask_bytes,
+                                                        cudaMemcpyDeviceToDevice, stream));
+            } else {
+                // Zero stale ring-buffer flags when RFI excision is disabled or monitor-only
+                // so downstream power reduction averages all unblanked samples uniformly.
+                CHECK_CUDA_ERROR_NON_OO(cudaMemsetAsync(d_out_mask, 0, mask_bytes, stream));
+            }
+            if (meta) {
+                device.claim_gpu_memory_array_metadata(_gpu_mem_rfi_mask, gpu_frame_id, meta);
+            }
+        }
     }
 
     _frame_counter++;
