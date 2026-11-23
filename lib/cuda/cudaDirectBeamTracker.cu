@@ -257,8 +257,23 @@ fuse_weight_space_bislc_kernel(
     __shared__ float2 s_pivot_val;
     __shared__ bool s_singular;
     __shared__ float2 s_factors[MAX_B];
+    __shared__ float s_diag_pow;
 
-    if (tid == 0) s_singular = false;
+    if (tid == 0) {
+        s_singular = false;
+        if (norm_taper != nullptr) {
+            float diag_sum = 0.0f;
+            for (std::size_t a = 0; a < n_elem; ++a) {
+                const float t_a = __ldg(&norm_taper[a]);
+                if (t_a > 0.0f) {
+                    diag_sum = fmaf(t_a, t_a, diag_sum);
+                }
+            }
+            s_diag_pow = (diag_sum > 0.0f) ? diag_sum : 1.0f;
+        } else {
+            s_diag_pow = 1.0f;
+        }
+    }
     __syncthreads();
 
     const std::size_t total_pairs = B * B;
@@ -266,7 +281,7 @@ fuse_weight_space_bislc_kernel(
         const std::size_t i = idx / B;
         const std::size_t j = idx % B;
 
-        float2 a_val = make_float2(1.0f, 0.0f);
+        float2 a_val = make_float2(s_diag_pow, 0.0f);
         if (i != j) {
             const DirectDirection3D di = directions[i];
             const DirectDirection3D dj = directions[j];

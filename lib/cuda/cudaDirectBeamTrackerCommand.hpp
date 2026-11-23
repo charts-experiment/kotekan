@@ -72,6 +72,10 @@ public:
     const float* get_host_beam_power() const {
         return _h_beam_power;
     }
+    std::vector<float> get_last_beam_power() const {
+        std::lock_guard<std::mutex> lk(_beam_power_mutex);
+        return _last_beam_power;
+    }
     std::uint64_t get_last_frame_id() const {
         return _last_frame_id.load(std::memory_order_relaxed);
     }
@@ -96,9 +100,11 @@ private:
     void free_device_buffers();
     void invalidate_cuda_graphs();
     void update_weights_if_needed(const DirectBeamTrackerConfig& cfg, cudaStream_t stream,
-                                   double frame_timestamp_utc = -1.0);
+                                   double frame_timestamp_utc = -1.0,
+                                   bool* out_has_motion = nullptr);
     void upload_calibration_gains(const DirectBeamTrackerConfig& cfg,
-                                  cudaStream_t stream = nullptr);
+                                  cudaStream_t stream = nullptr,
+                                  std::uint64_t gains_gen = 1);
     void upload_wavenumbers(cudaStream_t stream = nullptr);
 
     std::string _rest_prefix = "/direct_tracker";
@@ -177,6 +183,9 @@ private:
     // Power reduction buffers
     float* _d_beam_power = nullptr;
     float* _h_beam_power = nullptr;
+    mutable std::mutex _beam_power_mutex;
+    std::vector<float> _last_beam_power;
+    bool _last_frame_copied_power = false;
 
     // Sky grid support
     bool _grid_mode_enabled = false;

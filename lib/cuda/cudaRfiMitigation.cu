@@ -540,14 +540,30 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
             const float ema_p = d_ema_power[f];
             const float ema_mad = (d_ema_mad != nullptr) ? d_ema_mad[f] : 0.0f;
             const float alpha = fminf(fmaxf(ema_alpha, 1.0e-4f), 1.0f);
+            // Block negative passband dropouts from ratcheting EMA down, while letting clean
+            // broadband passband shifts (|freq_z| < 2.5, steady MAD, no non-burst core flags)
+            // re-converge if trapped in permanent TIME_BURST latch-up.
+            const bool is_neg_dropout = (local_med > 0.0f) && (freq_z <= -2.5f);
+            constexpr std::uint32_t kNonBurstCoreMask = RFI_SK_IMPULSIVE | RFI_SK_CW_TONE
+                                                        | RFI_FREQ_MAD | RFI_STATIC_NOTCH
+                                                        | RFI_SATURATION_CLIP;
+            const float steady_mad_cap =
+                2.0f * fmaxf(ema_mad, 0.025f * fmaxf(chan_med_p, 1.0e-3f));
+            const bool is_clean_passband_latch =
+                (ema_p > 0.0f) && (local_med > 0.0f) && (flagged_chunks > 0U)
+                && ((chan_flag_bits & kNonBurstCoreMask) == 0U) && (fabsf(freq_z) < 2.5f)
+                && (chan_mad_p <= steady_mad_cap);
+            const bool allow_ema_init = (flagged_chunks == 0U) && !is_neg_dropout;
+            const bool allow_ema_update =
+                ((flagged_chunks == 0U) && !is_neg_dropout) || is_clean_passband_latch;
             if (ema_p <= 0.0f) {
-                if (flagged_chunks == 0U) {
+                if (allow_ema_init) {
                     d_ema_power[f] = chan_med_p;
                     if (d_ema_mad != nullptr) {
                         d_ema_mad[f] = chan_mad_p;
                     }
                 }
-            } else if (flagged_chunks == 0U) {
+            } else if (allow_ema_update) {
                 d_ema_power[f] = (1.0f - alpha) * ema_p + alpha * chan_med_p;
                 if (d_ema_mad != nullptr) {
                     d_ema_mad[f] = (1.0f - alpha) * ema_mad + alpha * chan_mad_p;

@@ -299,6 +299,83 @@ int main(int /*argc*/, char** /*argv*/) {
                       : "[FAILED]")
               << "\n\n";
 
+    // ========================================================================
+    // TEST 5: Offset-Binary Alive Extraction (0x88 pad) & High-Power Coherence
+    // ========================================================================
+    std::cout << ">>> TEST 5: Offset-Binary Extraction Pad & q-RMS 3.5 Coherence Ceiling <<<\n";
+    const std::size_t n_t5 = 256;
+    const std::size_t n_f5 = 4;
+    const std::size_t n_e5 = 8;
+    const std::size_t max_alive5 = 4;
+    const std::size_t spec5 = n_t5 * n_f5;
+    std::vector<kotekan::int4x2_t> h_off_in(spec5 * n_e5);
+    std::vector<int> h_alive5 = {1, 3}; // only 2 active out of max_alive5=4
+    for (std::size_t t = 0; t < n_t5; ++t) {
+        for (std::size_t f = 0; f < n_f5; ++f) {
+            const double ph = 0.21 * static_cast<double>(t);
+            // Coherent sinusoidal signal around amplitude 3.8 -> p_a ~ 14.4 (above old 12.0 cap)
+            const int r_val = static_cast<int>(std::lround(3.8 * std::cos(ph)));
+            const int i_val = static_cast<int>(std::lround(3.8 * std::sin(ph)));
+            const std::uint8_t enc =
+                static_cast<std::uint8_t>(((r_val + 8) << 4) | ((i_val + 8) & 0x0F));
+            for (std::size_t a = 0; a < n_e5; ++a) {
+                h_off_in[(t * n_f5 + f) * n_e5 + a].val = enc;
+            }
+        }
+    }
+
+    kotekan::int4x2_t* d_off_in = nullptr;
+    kotekan::int4x2_t* d_off_out = nullptr;
+    int* d_alive5 = nullptr;
+    float* d_cp5 = nullptr;
+    float* d_cc5 = nullptr;
+    cudaMalloc(&d_off_in, h_off_in.size() * sizeof(kotekan::int4x2_t));
+    cudaMalloc(&d_off_out, spec5 * max_alive5 * sizeof(kotekan::int4x2_t));
+    cudaMalloc(&d_alive5, h_alive5.size() * sizeof(int));
+    cudaMalloc(&d_cp5, n_f5 * n_e5 * sizeof(float));
+    cudaMalloc(&d_cc5, n_f5 * n_e5 * sizeof(float));
+
+    cudaMemcpy(d_off_in, h_off_in.data(), h_off_in.size() * sizeof(kotekan::int4x2_t),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(d_alive5, h_alive5.data(), h_alive5.size() * sizeof(int), cudaMemcpyHostToDevice);
+
+    kotekan::launch_extract_alive_antennas(d_off_in, d_off_out, d_alive5, 2,
+                                           static_cast<int>(max_alive5), spec5, n_e5, stream,
+                                           /*is_swapped_withoffset=*/true);
+    kotekan::launch_inspect_channel_coherence(d_off_in, d_cp5, d_cc5, n_t5, n_f5, n_e5, stream,
+                                              /*is_swapped_withoffset=*/true);
+    cudaStreamSynchronize(stream);
+
+    std::vector<kotekan::int4x2_t> h_off_out(spec5 * max_alive5);
+    std::vector<float> h_cp5(n_f5 * n_e5), h_cc5(n_f5 * n_e5);
+    cudaMemcpy(h_off_out.data(), d_off_out, h_off_out.size() * sizeof(kotekan::int4x2_t),
+               cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_cp5.data(), d_cp5, h_cp5.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_cc5.data(), d_cc5, h_cc5.size() * sizeof(float), cudaMemcpyDeviceToHost);
+
+    bool test5_passed = true;
+    for (std::size_t s = 0; s < spec5; ++s) {
+        if (h_off_out[s * max_alive5 + 2].val != 0x88U
+            || h_off_out[s * max_alive5 + 3].val != 0x88U) {
+            test5_passed = false;
+            break;
+        }
+    }
+    if (h_cp5[0] <= 12.0f || h_cc5[0] < 0.80f) {
+        test5_passed = false;
+    }
+    std::cout << "  Inactive offset-binary pad byte: 0x" << std::hex
+              << static_cast<int>(h_off_out[2].val) << std::dec << " (Expected 0x88)\n";
+    std::cout << "  q-RMS~3.8 channel power=" << h_cp5[0] << ", coherence=" << h_cc5[0]
+              << " (Expected > 0.80)\n";
+    std::cout << "  Result: " << (test5_passed ? "[PASSED]" : "[FAILED]") << "\n\n";
+
+    cudaFree(d_off_in);
+    cudaFree(d_off_out);
+    cudaFree(d_alive5);
+    cudaFree(d_cp5);
+    cudaFree(d_cc5);
+
     // Clean up
     cudaFree(d_voltages);
     cudaFree(d_powers);
@@ -314,7 +391,7 @@ int main(int /*argc*/, char** /*argv*/) {
     cudaEventDestroy(t_stop);
     cudaStreamDestroy(stream);
 
-    bool all_passed = (test1_passed && test2_passed && test3_passed && test4_passed);
+    bool all_passed = (test1_passed && test2_passed && test3_passed && test4_passed && test5_passed);
     std::cout << "================================================================================="
                  "===================\n";
     std::cout << " ANTENNA MASKING TEST RESULT: "

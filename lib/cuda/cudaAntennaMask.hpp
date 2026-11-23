@@ -200,7 +200,8 @@ void launch_extract_alive_antennas(const int4x2_t* __restrict__ d_voltages,
                                    int4x2_t* __restrict__ d_alive_voltages,
                                    const int* __restrict__ d_alive_antennas, int num_to_extract,
                                    int max_alive_antennas, std::size_t total_spectra,
-                                   std::size_t n_ant, cudaStream_t stream);
+                                   std::size_t n_ant, cudaStream_t stream,
+                                   bool is_swapped_withoffset = false);
 
 /**
  * @brief Per-channel passband power and cross-antenna spatial coherence inspection kernel.
