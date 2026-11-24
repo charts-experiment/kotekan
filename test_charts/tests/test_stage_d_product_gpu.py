@@ -239,6 +239,30 @@ class ProductGpu(unittest.TestCase):
         self.assertNotIn("fine_quantization", d["history"])
         self.assertIn("(2s - 127)/256", d["history"]["pfb"])
         self.assertIn("fp16 fine voltage", d["intensity"]["power_convention"])
+        self.assertNotIn("int4 code", d["intensity"]["power_convention"])
+        self.assertEqual(d["beamformer"]["kernel"], "tensor_core")
+        self.assertIn("tensor-core MMA", d["beamformer"]["arithmetic"])
+        self.assertIn("not bit-reproducible", d["beamformer"]["arithmetic"])
+        self.assertEqual(d["weights"]["device"]["precision"], "fp16")
+        self.assertIn("normalization", d["history"]["upchan_gain"])
+        # The reader requires the complete v3 description.
+        for path in (("beamformer",), ("weights", "device"),
+                     ("history", "upchan_gain", "normalization"), ("history", "fine_format")):
+            bad = json.loads(json.dumps(d))
+            node = bad
+            for key in path[:-1]:
+                node = node[key]
+            del node[path[-1]]
+            bad_file = self.root / "bad_descriptor.json"
+            bad_file.write_text(json.dumps(bad))
+            with self.assertRaises(ip.ProductError, msg=str(path)):
+                ip.load_descriptor(bad_file)
+        bad = json.loads(json.dumps(d))
+        bad["history"]["fine_quantization"] = {"clamp": 7}
+        bad_file = self.root / "bad_descriptor.json"
+        bad_file.write_text(json.dumps(bad))
+        with self.assertRaises(ip.ProductError):
+            ip.load_descriptor(bad_file)
 
     # ------------------------------------------------------------------ fixtures
     # The constant-chunk fixture needs a nonzero chunk whose 16 fine bins x 16 beams are equal

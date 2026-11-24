@@ -17,8 +17,11 @@ from .packet_loss import read_product
 
 SCHEMA = "charts-intensity-product-v3"
 # v1 descriptors (before 2026-11-02) have no history.upchan_gain; their fine gain is unity.
-# v2: int4 fine path (beamform-64). v3: fp16 fine path, no fine_quantization block.
+# v2: int4 fine path (beamform-64). v3: fp16 fine path, no fine_quantization block; fp16
+# device weights (weights.device), beamformer.{kernel, arithmetic} and
+# history.upchan_gain.normalization are required.
 SUPPORTED_SCHEMAS = ("charts-intensity-product-v1", "charts-intensity-product-v2", SCHEMA)
+BEAMFORMER_KERNELS = ("tensor_core", "scalar_reference")
 INVALID_CODE = -128
 
 
@@ -40,6 +43,15 @@ def load_descriptor(path: Path) -> dict:
             raise ProductError("v3 descriptor must not carry history.fine_quantization")
         if history.get("fine_format") != "fp16":
             raise ProductError("v3 descriptor must declare history.fine_format = 'fp16'")
+        if "normalization" not in (history.get("upchan_gain") or {}):
+            raise ProductError("v3 descriptor must declare history.upchan_gain.normalization")
+        device = (d.get("weights") or {}).get("device") or {}
+        if device.get("precision") != "fp16" or not device.get("effective_sha256"):
+            raise ProductError("v3 descriptor must describe the fp16 device weights "
+                               "(weights.device.precision, effective_sha256)")
+        if (d.get("beamformer") or {}).get("kernel") not in BEAMFORMER_KERNELS:
+            raise ProductError(f"v3 descriptor must name beamformer.kernel, one of "
+                               f"{BEAMFORMER_KERNELS}")
     return d
 
 

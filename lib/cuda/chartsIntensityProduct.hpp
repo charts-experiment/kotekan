@@ -21,8 +21,9 @@ namespace beamformer {
 // v2 (2026-11-02): history.upchan_gain describes the fine-channel gain G(u).
 // v3 (2026-11-14, branch beamform-64-fp16-tc): fp16 fine voltages without clamp or int4
 // re-quantization (history.fine_format), CHORD PFB window; no fine_quantization block.
-// weights.device (fp16 + power-of-two scale) and beamformer.{kernel, arithmetic} were added
-// to v3 on the same unreleased branch (2026-11-20).
+// weights.device (fp16 + power-of-two scale), beamformer.{kernel, arithmetic} and
+// history.upchan_gain.normalization were added to v3 on the same unreleased branch
+// (2026-11-20); the reader requires them for v3.
 inline constexpr const char* product_schema = "charts-intensity-product-v3";
 
 struct ProductDescription {
@@ -41,6 +42,7 @@ struct ProductDescription {
     bool upchan_gain_unity = true;
     std::string upchan_gain_source = "unity";
     std::string upchan_gain_reference;
+    std::string upchan_gain_normalization = "none"; // declared by the configuration
     std::string upchan_gain_sha256;  // of the applied float32 [336*32] array
     nlohmann::json weights;
     std::string beamformer_kernel = "tensor_core"; // or "scalar_reference" (tests only)
@@ -79,9 +81,9 @@ inline nlohmann::json product_descriptor(const ProductDescription& p) {
            "where W is the effective weight s*W16 applied on the GPU (weights.device: fp16 "
            "with a power-of-two scale per beam and channel) and x is the fp16 fine voltage "
            "after the gain G(u) (history.upchan_gain); no "
-           "averaging, exposure normalization or rejection; arbitrary units of "
-           "(weight * fine voltage)^2, the fine voltage being the PFB output of int4 input "
-           "codes"},
+           "averaging, exposure normalization or rejection; units of (weight * fp16 fine "
+           "voltage)^2, the fine voltage being the PFB output (1/32 gain included, times "
+           "G(u)) of the raw input codes; arithmetic in beamformer.arithmetic"},
           {"component_convention", "x = low nibble + i*high nibble"}}},
         {"frequency",
          {{"nu0_hz", p.freq_zero_hz},
@@ -110,6 +112,10 @@ inline nlohmann::json product_descriptor(const ProductDescription& p) {
                          {"unity", p.upchan_gain_unity},
                          {"source", p.upchan_gain_source},
                          {"reference", p.upchan_gain_reference},
+                         {"normalization", p.upchan_gain_normalization},
+                         {"normalization_note", "declared by the configuration "
+                                                "(upchan_gain_normalization) and recorded "
+                                                "verbatim; the code applies values as given"},
                          {"applied", "float32 [336*32], G[f*32 + u] = values[u] for every local "
                                      "coarse channel f"},
                          {"sha256", p.upchan_gain_sha256},

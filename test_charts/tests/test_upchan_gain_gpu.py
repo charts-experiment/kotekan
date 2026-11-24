@@ -150,6 +150,7 @@ class UpchanGainGpu(unittest.TestCase):
         self.assertEqual(g["source"], "unity")
         self.assertEqual(g["values"], [1.0] * U)
         self.assertEqual(g["sha256"], gain_sha256([1.0] * U))
+        self.assertEqual(g["normalization"], "none")
         np.testing.assert_array_equal(ip.upchan_gain(d), np.ones(FF, np.float32))
 
         # A profile with non-dyadic values (1/H_amp of the firmware PFB, rounded).
@@ -159,7 +160,8 @@ class UpchanGainGpu(unittest.TestCase):
         run = self.run_fine("d_profile", shard=1, fmt="float32",
                             extra={"upchan_gain": [float(v) for v in values],
                                    "upchan_gain_source": "analytic",
-                                   "upchan_gain_reference": "f-engine pfb_fir 4-tap hamming"})
+                                   "upchan_gain_reference": "f-engine pfb_fir 4-tap hamming",
+                                   "upchan_gain_normalization": "1/H_amp, band centre = 1"})
         d = ip.load_descriptor(run["descriptor"])
         g = d["history"]["upchan_gain"]
         record("g_descriptor", {"unity": ip.load_descriptor(unity["descriptor"])["history"],
@@ -167,6 +169,7 @@ class UpchanGainGpu(unittest.TestCase):
         self.assertFalse(g["unity"])
         self.assertEqual(g["source"], "analytic")
         self.assertEqual(g["reference"], "f-engine pfb_fir 4-tap hamming")
+        self.assertEqual(g["normalization"], "1/H_amp, band centre = 1")
         np.testing.assert_array_equal(np.asarray(g["values"], np.float32), values)
         self.assertEqual(g["sha256"], gain_sha256(values))
         np.testing.assert_array_equal(ip.upchan_gain(d), np.tile(values, F))
@@ -197,6 +200,9 @@ class UpchanGainGpu(unittest.TestCase):
                                  "fine", limit),
             "quantize_clamp_removed": ({"quantize_clamp": 7.0}, "fine",
                                        "quantize_clamp was removed"),
+            "normalization_with_unity": ({"upchan_gain_normalization": "rms"}, "fine",
+                                         "upchan_gain_normalization must be 'none' for "
+                                         "all-unity upchan_gain"),
             "non_unity_without_source": ({"upchan_gain": two}, "fine",
                                          "upchan_gain_source must be"),
             "non_unity_labelled_unity": ({"upchan_gain": two, "upchan_gain_source": "unity"},

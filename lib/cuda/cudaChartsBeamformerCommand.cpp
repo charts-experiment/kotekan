@@ -41,6 +41,9 @@ public:
     bool upchan_gain_unity = true;
     std::string upchan_gain_source = "unity";
     std::string upchan_gain_reference;
+    // Declared normalization of the configured profile (FP16_TC_ARCHITECTURE.md §7.2 is
+    // still open); recorded verbatim, never applied by the code.
+    std::string upchan_gain_normalization = "none";
     std::string upchan_gain_sha256; // of the applied float32 [336*32] array
     Dimensions beamform_dims;
     Dimensions output_dims;
@@ -144,6 +147,12 @@ public:
         require((upchan_gain_source == "unity") == upchan_gain_unity,
                 "upchan_gain_source 'unity' is required for, and only for, all-unity upchan_gain");
         upchan_gain_reference = cfg.get_default<std::string>(name, "upchan_gain_reference", "");
+        upchan_gain_normalization = cfg.get_default<std::string>(
+            name, "upchan_gain_normalization", upchan_gain_unity ? "none" : "unspecified");
+        require(!upchan_gain_normalization.empty(),
+                "upchan_gain_normalization must not be empty");
+        require(!upchan_gain_unity || upchan_gain_normalization == "none",
+                "upchan_gain_normalization must be 'none' for all-unity upchan_gain");
 
         output_dims = {integrated_time_count(beamform_dims.n_time, integration_spectra),
                        beamform_dims.n_freq, n_ant, n_beams};
@@ -478,6 +487,7 @@ public:
             product.upchan_gain_unity = state->upchan_gain_unity;
             product.upchan_gain_source = state->upchan_gain_source;
             product.upchan_gain_reference = state->upchan_gain_reference;
+            product.upchan_gain_normalization = state->upchan_gain_normalization;
             product.upchan_gain_sha256 = state->upchan_gain_sha256;
             product.weights = state->weights_identity;
             product.beamformer_kernel = state->beamformer_kernel;
