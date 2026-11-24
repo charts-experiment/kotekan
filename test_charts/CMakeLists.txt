@@ -8,6 +8,7 @@ if(CUDAToolkit_FOUND)
         ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cuda/cudaBiSLC.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cuda/cudaTransientTrigger.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cuda/cudaRfiMitigation.cu
+        ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cuda/cudaPirateBeamQuantize.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/../lib/core/kotekanLogging.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../lib/core/errors.c)
 
@@ -108,4 +109,10 @@ if(CUDAToolkit_FOUND)
     add_executable(test_rfi_mitigation_stage test_rfi_mitigation_stage.cpp ${COMMON_TEST_SRCS})
     target_link_libraries(test_rfi_mitigation_stage PRIVATE CUDA::cudart Threads::Threads)
     target_include_directories(test_rfi_mitigation_stage PRIVATE ${COMMON_INCLUDE_DIRS})
+
+    # 1. Pirate FRB Beam Quantizer Test Suite
+    add_executable(test_pirate_beam_quantize_suite test_pirate_beam_quantize_suite.cpp
+                                                   ${COMMON_TEST_SRCS})
+    target_link_libraries(test_pirate_beam_quantize_suite PRIVATE CUDA::cudart Threads::Threads)
+    target_include_directories(test_pirate_beam_quantize_suite PRIVATE ${COMMON_INCLUDE_DIRS})
 endif()
