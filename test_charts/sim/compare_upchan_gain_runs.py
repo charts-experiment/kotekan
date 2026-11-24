@@ -73,6 +73,7 @@ def analyse_shard(run_dir: Path, shard: int, every: int, max_frames: int):
         raise SystemExit(f"no intensity.shard{shard} files in {run_dir}")
     files = files[::every][:max_frames]
     beams, labels = onehot_beams(d)
+    cols = ip.beam_positions(d, beams)          # weight-file beams -> output positions
     g = ip.upchan_gain(d).astype(np.float64)                         # [10752]
     nu = ip.frequencies_hz(d) / 1e6
     k = d["K"]
@@ -83,10 +84,10 @@ def analyse_shard(run_dir: Path, shard: int, every: int, max_frames: int):
     for p in files:
         codes = ip.read_intensity(d, p)
         params = ip.read_quant_params(d, Path(str(p).replace("intensity.", "qparams.")))
-        i = ip.decode_int8(d, codes, params, shard=shard)[:, :, beams]   # [W][FF][b]
+        i = ip.decode_int8(d, codes, params, shard=shard)[:, :, cols]   # [W][FF][b]
         acc += np.nansum(i, axis=0)
         cnt += np.sum(np.isfinite(i), axis=0)
-        q = codes[1][:, :, beams]
+        q = codes[1][:, :, cols]
         floor += np.sum(q == -127, axis=(0, 1))
         finite += np.sum(q != ip.INVALID_CODE, axis=(0, 1))
     mean = acc / np.maximum(cnt, 1)                                    # [FF][b] window power

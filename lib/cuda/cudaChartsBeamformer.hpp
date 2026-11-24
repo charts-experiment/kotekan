@@ -120,6 +120,62 @@ constexpr std::size_t quantization_parameter_count(const Dimensions& integrated_
     return t_tiles * f_tiles * b_tiles;
 }
 
+// int8 output beam selection (output_beam_groups): whole quantization beam groups of 16, so
+// every 1x16x16 chunk keeps its content and its codes and (offset, scale) are bit-identical
+// to the full product; only their destination changes. Output group g holds the computed
+// beams 16*source[g] ... 16*source[g] + 15 (B = 128 beams are always computed).
+inline constexpr std::size_t beam_group_count = beam_count / quantization_chunk_beam;
+static_assert(beam_count % quantization_chunk_beam == 0, "B must be a multiple of 16");
+
+struct BeamGroupSelection {
+    std::uint32_t count = 0;                     // G = number of written groups, 1..8
+    std::uint32_t source[beam_group_count] = {}; // computed group of output group g, increasing
+
+    std::size_t written_beams() const {
+        return count * quantization_chunk_beam;
+    }
+    // Computed (weight-file) beam index of every written beam, in output order.
+    std::vector<std::size_t> written_beam_indices() const {
+        std::vector<std::size_t> beams;
+        beams.reserve(written_beams());
+        for (std::uint32_t g = 0; g < count; ++g)
+            for (std::size_t b = 0; b < quantization_chunk_beam; ++b)
+                beams.push_back(source[g] * quantization_chunk_beam + b);
+        return beams;
+    }
+    std::vector<std::size_t> groups() const {
+        return std::vector<std::size_t>(source, source + count);
+    }
+};
+
+inline BeamGroupSelection all_beam_groups() {
+    BeamGroupSelection selection;
+    selection.count = beam_group_count;
+    for (std::uint32_t g = 0; g < beam_group_count; ++g)
+        selection.source[g] = g;
+    return selection;
+}
+
+// Validates a configured list: non-empty, entries in 0..7, strictly increasing.
+inline BeamGroupSelection make_beam_group_selection(const std::vector<std::int64_t>& groups) {
+    if (groups.empty())
+        throw std::invalid_argument("output_beam_groups must not be empty");
+    if (groups.size() > beam_group_count)
+        throw std::invalid_argument("output_beam_groups has more than 8 groups");
+    BeamGroupSelection selection;
+    for (std::size_t i = 0; i < groups.size(); ++i) {
+        if (groups[i] < 0 || groups[i] >= static_cast<std::int64_t>(beam_group_count))
+            throw std::invalid_argument("output_beam_groups entries must be in 0..7 "
+                                        "(beam group b // 16 of B = 128)");
+        if (i > 0 && groups[i] <= groups[i - 1])
+            throw std::invalid_argument("output_beam_groups must be strictly increasing "
+                                        "(no duplicates)");
+        selection.source[i] = static_cast<std::uint32_t>(groups[i]);
+    }
+    selection.count = static_cast<std::uint32_t>(groups.size());
+    return selection;
+}
+
 // Centre of local fine channel f*32 + u (U = 32 always).
 inline double channel_frequency_hz(const std::size_t shard_id, const std::size_t local_channel,
                                    const double first_coarse_center_hz = 300e6,
@@ -180,10 +236,14 @@ struct TensorCoreKernelResources {
 };
 TensorCoreKernelResources tensor_core_beamformer_resources(std::size_t n_ant);
 
+// integrated_dims describes the full fp32 input [n_time][n_freq][n_beams = 128]. Only the
+// selected beam groups are quantized: codes [n_time][n_freq][16G] and parameters
+// [(t_tile * f_tiles + f_tile) * G + g].
 void launch_quantize_integrated_intensity(cudaStream_t stream, const float* integrated_intensity,
                                           std::int8_t* quantized_intensity,
                                           Int8QuantizationParameters* parameters,
-                                          const Dimensions& integrated_dims);
+                                          const Dimensions& integrated_dims,
+                                          const BeamGroupSelection& beam_groups);
 
 } // namespace beamformer
 

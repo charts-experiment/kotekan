@@ -53,21 +53,24 @@ def integrate_shard(run_dir: Path, shard: int, every: int = 1):
         cnt += np.sum(np.isfinite(i), axis=0)
         if n % 100 == 0:
             print(f"  {run_dir.name} shard {shard}: {n}/{len(files)}", flush=True)
-    return {"power": acc / np.maximum(cnt, 1), "windows": cnt,
+    return {"power": acc / np.maximum(cnt, 1), "windows": cnt, "beams": ip.beam_indices(d),
             "freq_mhz": ip.frequencies_hz(d) / 1e6, "gain": ip.upchan_gain(d),
             "frames": len(files)}
 
 
 def beam_labels(run_dir: Path) -> list[str]:
+    """Label of every output beam; the directions file labels weight-file beams, so it is
+    indexed through beam_indices (output beam j = weight beam written[j])."""
     d = ip.load_descriptor(run_dir / "intensity.shard0.product.json")
-    n_beams = int(d["intensity"]["shape"][2])
+    beams = ip.beam_indices(d)
     wfile = str(d.get("weights", {}).get("file", ""))
     for base in (wfile, wfile.replace("/data/beamform/", "/mnt/A02/beamform/")):
         try:
-            return json.loads(Path(base).with_name("muos_directions.json").read_text())["beam_labels"]
-        except (OSError, KeyError, ValueError):
+            labels = json.loads(Path(base).with_name("muos_directions.json").read_text())["beam_labels"]
+            return [labels[b] for b in beams]
+        except (OSError, KeyError, ValueError, IndexError):
             continue
-    return [f"beam {b}" for b in range(n_beams)]
+    return [f"beam {b}" for b in beams]
 
 
 def cmd_integrate(args):
@@ -94,12 +97,18 @@ def cmd_integrate(args):
 # --------------------------------------------------------------------------- plot
 
 def load(out: Path, label: str):
+    """Returns power [21504][B'] with the weight-file beam of every column (beams); both
+    shards must have written the same beams (output_beam_groups)."""
     s = [np.load(out / f"integrated_{label}_shard{k}.npz") for k in (0, 1)]
-    power = np.concatenate([x["power"] for x in s])                     # [21504][B]
+    beams = [x["beams"] if "beams" in x else np.arange(x["power"].shape[1]) for x in s]
+    if not np.array_equal(beams[0], beams[1]):
+        raise SystemExit(f"run {label}: shards wrote different beams {beams[0].tolist()} / "
+                         f"{beams[1].tolist()}; plot them separately")
+    power = np.concatenate([x["power"] for x in s])                     # [21504][B']
     gain = np.concatenate([x["gain"] for x in s]).astype(np.float64)
     freq = np.concatenate([x["freq_mhz"] for x in s])
     frames = int(s[0]["frames"])
-    return power, gain, freq, frames
+    return power, gain, freq, frames, beams[0].astype(int)
 
 
 def style(ax):
@@ -127,9 +136,17 @@ def cmd_plot(args):
     meta = json.loads((args.out / "runs.json").read_text())
     labels_run = list(meta)
     data = {r: load(args.out, r) for r in labels_run}
-    labels = meta[labels_run[0]]["labels"]
-    n_beams = data[labels_run[0]][0].shape[1]
-    beams = args.beams if args.beams else [b for b in range(min(11, n_beams))]
+    # Beams are weight-file indices (--beams, --zoom-beams); each run maps them to its own
+    # output columns. runs.json labels are per output column of that run.
+    label_of = {}
+    col_of = {}
+    for r in labels_run:
+        run_beams = data[r][4]
+        col_of[r] = {int(b): j for j, b in enumerate(run_beams)}
+        for j, b in enumerate(run_beams):
+            label_of.setdefault(int(b), meta[r]["labels"][j])
+    common = sorted(set.intersection(*(set(c) for c in col_of.values())))
+    beams = args.beams if args.beams else common[:11]
 
     # ---- coarse small multiples -----------------------------------------------------
     ncol = 3
@@ -139,13 +156,15 @@ def cmd_plot(args):
     for ax, b in zip(axes.flat, beams):
         style(ax)
         for i, r in enumerate(labels_run):
-            power, gain, freq, frames = data[r]
-            coarse = (power[:, b] / gain ** 2).reshape(-1, 32).mean(axis=1)
+            power, gain, freq, frames, _ = data[r]
+            if b not in col_of[r]:
+                continue                                    # beam not written in this run
+            coarse = (power[:, col_of[r][b]] / gain ** 2).reshape(-1, 32).mean(axis=1)
             cf = freq.reshape(-1, 32).mean(axis=1)
             ax.plot(cf, db(coarse / np.nanmedian(coarse)), color=SERIES[i], lw=0.9,
                     label=f"{r} ({frames} frames)")
         ax.axvspan(360, 380, color=INK2, alpha=0.07, lw=0)
-        ax.set_title(f"{b}: {labels[b]}", fontsize=8, color=INK, loc="left")
+        ax.set_title(f"{b}: {label_of.get(b, 'not written')}", fontsize=8, color=INK, loc="left")
     for ax in axes.flat[len(beams):]:
         ax.set_visible(False)
     for ax in axes[-1]:
@@ -169,11 +188,13 @@ def cmd_plot(args):
     for ax, b in zip(axes[0], args.zoom_beams):
         style(ax)
         for i, r in enumerate(labels_run):
-            power, gain, freq, frames = data[r]
+            power, gain, freq, frames, _ = data[r]
+            if b not in col_of[r]:
+                continue
             m = (freq > z0) & (freq < z1)
-            p = power[m, b]
+            p = power[m, col_of[r][b]]
             ax.plot(freq[m], db(p / np.nanmedian(p)), color=SERIES[i], lw=0.9, label=r)
-        ax.set_title(f"{b}: {labels[b]}", fontsize=8, color=INK, loc="left")
+        ax.set_title(f"{b}: {label_of.get(b, 'not written')}", fontsize=8, color=INK, loc="left")
         ax.set_xlabel("frequency (MHz)", fontsize=8, color=INK2)
     axes[0, 0].set_ylabel("output power, dB re median", fontsize=8, color=INK2)
     axes[0, -1].legend(fontsize=8, frameon=False)
@@ -187,8 +208,9 @@ def cmd_plot(args):
     cmap = LinearSegmentedColormap.from_list("div", ["#1c5cab", "#86b6ef", "#e8e7e2",
                                                      "#f2a07c", "#b5431b"])
     for r in labels_run:
-        power, gain, freq, frames = data[r]
-        coarse = (power / gain[:, None] ** 2).reshape(-1, 32, n_beams).mean(axis=1)  # [672][B]
+        power, gain, freq, frames, run_beams = data[r]
+        n_beams = len(run_beams)
+        coarse = (power / gain[:, None] ** 2).reshape(-1, 32, n_beams).mean(axis=1)  # [672][B']
         rel = db(coarse / np.nanmedian(coarse, axis=0, keepdims=True)).T              # [B][672]
         cf = freq.reshape(-1, 32).mean(axis=1)
         fig, ax = plt.subplots(figsize=(13, 6))
@@ -196,8 +218,8 @@ def cmd_plot(args):
                        norm=TwoSlopeNorm(0, args.map_range[0], args.map_range[1]),
                        extent=(cf[0], cf[-1], -0.5, n_beams - 0.5), interpolation="nearest")
         ax.set_yticks(range(n_beams))
-        ax.set_yticklabels([f"{b} {labels[b]}" if b < 11 else str(b) for b in range(n_beams)],
-                           fontsize=5)
+        ax.set_yticklabels([f"{b} {meta[r]['labels'][j]}" if j < 11 else str(b)
+                            for j, b in enumerate(run_beams)], fontsize=5)
         ax.set_xlabel("frequency (MHz)", fontsize=8, color=INK2)
         ax.tick_params(labelsize=7, colors=INK2)
         cb = fig.colorbar(im, ax=ax, pad=0.01)

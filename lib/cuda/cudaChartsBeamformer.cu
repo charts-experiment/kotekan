@@ -358,10 +358,15 @@ __global__ void quantize_integrated_intensity_kernel(
     Int8QuantizationParameters* __restrict__ parameters,
     const std::size_t n_time, const std::size_t n_freq,
     const std::size_t n_beams, const std::size_t frequency_tiles,
-    const std::size_t beam_tiles) {
+    const BeamGroupSelection beam_groups) {
+    // One block per output chunk: output beam group g = beam_tile reads the computed group
+    // beam_groups.source[g]. Input stride n_beams (all computed beams), output stride 16G.
+    const std::size_t beam_tiles = beam_groups.count;
+    const std::size_t output_beams = beam_tiles * quantization_chunk_beam;
     const std::size_t chunk = blockIdx.x;
     const std::size_t lane = threadIdx.x;
     const std::size_t beam_tile = chunk % beam_tiles;
+    const std::size_t source_tile = beam_groups.source[beam_tile];
     const std::size_t time_frequency_tile = chunk / beam_tiles;
     const std::size_t frequency_tile = time_frequency_tile % frequency_tiles;
     const std::size_t time_tile = time_frequency_tile / frequency_tiles;
@@ -383,13 +388,14 @@ __global__ void quantize_integrated_intensity_kernel(
         const std::size_t local_beam = sample % quantization_chunk_beam;
         const std::size_t time = time_tile * quantization_chunk_time + local_time;
         const std::size_t frequency = frequency_tile * quantization_chunk_frequency + local_frequency;
-        const std::size_t beam = beam_tile * quantization_chunk_beam + local_beam;
+        const std::size_t beam = source_tile * quantization_chunk_beam + local_beam;
         valid[item] = time < n_time && frequency < n_freq && beam < n_beams;
         if (!valid[item]) {
             continue;
         }
-        output_indices[item] = (time * n_freq + frequency) * n_beams + beam;
-        values[item] = integrated_intensity[output_indices[item]];
+        output_indices[item] = (time * n_freq + frequency) * output_beams
+                               + beam_tile * quantization_chunk_beam + local_beam;
+        values[item] = integrated_intensity[(time * n_freq + frequency) * n_beams + beam];
         if (!isfinite(values[item])) {
             non_finite = true;
         } else {
@@ -701,21 +707,36 @@ void launch_quantize_integrated_intensity(const cudaStream_t stream,
                                           const float* integrated_intensity,
                                           std::int8_t* quantized_intensity,
                                           Int8QuantizationParameters* parameters,
-                                          const Dimensions& integrated_dims) {
+                                          const Dimensions& integrated_dims,
+                                          const BeamGroupSelection& beam_groups) {
     if (!integrated_intensity || !quantized_intensity || !parameters) {
         throw std::invalid_argument("CUDA quantization pointers must not be null");
+    }
+    if (integrated_dims.n_beams % quantization_chunk_beam != 0) {
+        throw std::invalid_argument("int8 quantization requires a multiple of 16 beams");
+    }
+    const std::size_t computed_groups = integrated_dims.n_beams / quantization_chunk_beam;
+    if (beam_groups.count == 0 || beam_groups.count > computed_groups) {
+        throw std::invalid_argument("int8 beam group selection count out of range");
+    }
+    for (std::uint32_t g = 0; g < beam_groups.count; ++g) {
+        if (beam_groups.source[g] >= computed_groups
+            || (g > 0 && beam_groups.source[g] <= beam_groups.source[g - 1])) {
+            throw std::invalid_argument(
+                "int8 beam groups must be strictly increasing and within the computed beams");
+        }
     }
     (void)cudaGetLastError();
 
     const std::size_t f_tiles =
         (integrated_dims.n_freq + quantization_chunk_frequency - 1) / quantization_chunk_frequency;
-    const std::size_t b_tiles =
-        (integrated_dims.n_beams + quantization_chunk_beam - 1) / quantization_chunk_beam;
-    const std::size_t chunk_count = quantization_parameter_count(integrated_dims);
+    Dimensions written_dims = integrated_dims;
+    written_dims.n_beams = beam_groups.written_beams();
+    const std::size_t chunk_count = quantization_parameter_count(written_dims);
     quantize_integrated_intensity_kernel<<<static_cast<unsigned int>(chunk_count),
                                            quantization_threads, 0, stream>>>(
         integrated_intensity, quantized_intensity, parameters, integrated_dims.n_time,
-        integrated_dims.n_freq, integrated_dims.n_beams, f_tiles, b_tiles);
+        integrated_dims.n_freq, integrated_dims.n_beams, f_tiles, beam_groups);
     check_cuda(cudaGetLastError(), "quantize_integrated_intensity_kernel launch");
 }
 

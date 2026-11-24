@@ -4,6 +4,10 @@ The descriptor is the JSON sidecar written by cudaChartsBeamformerCommand when
 `product_descriptor_file` is configured. Frame records are native rawFileWrite records:
 raw chartsMetadata (input provenance, immutable) followed by the payload. Intensity, exposure
 and int8 parameter records of one frame are paired by (shard, FPGA_SEQ_NUM, T_raw).
+
+Beam axis: since 2026-11-24 the int8 product may hold only selected 16-beam groups
+(`output_beam_groups`); `beams.written` maps output beam j to weight-file beam written[j].
+Label or select beams with beam_indices()/beam_positions(), never by position alone.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ SCHEMA = "charts-intensity-product-v3"
 SUPPORTED_SCHEMAS = ("charts-intensity-product-v1", "charts-intensity-product-v2", SCHEMA)
 BEAMFORMER_KERNELS = ("tensor_core", "scalar_reference")
 INVALID_CODE = -128
+BEAM_GROUP_SIZE = 16
 
 
 class ProductError(ValueError):
@@ -52,7 +57,61 @@ def load_descriptor(path: Path) -> dict:
         if (d.get("beamformer") or {}).get("kernel") not in BEAMFORMER_KERNELS:
             raise ProductError(f"v3 descriptor must name beamformer.kernel, one of "
                                f"{BEAMFORMER_KERNELS}")
+    if "beams" in d:
+        _check_beams(d)
+    elif d["schema"] == SCHEMA and d["intensity"]["shape"][2] != 128:
+        # v3 without the block predates beam selection and always wrote B = 128.
+        raise ProductError(f"v3 descriptor without a beams block has intensity.shape[2] = "
+                           f"{d['intensity']['shape'][2]}, expected 128")
     return d
+
+
+def _check_beams(d: dict) -> None:
+    """The beams block (v3, added 2026-11-24): whole groups of 16 of the computed beams."""
+    b = d["beams"]
+    if not isinstance(b, dict):
+        raise ProductError("beams must be an object")
+    for key in ("computed", "group_size", "groups", "written"):
+        if key not in b:
+            raise ProductError(f"beams lacks {key!r}")
+    size, computed = b["group_size"], b["computed"]
+    if size != BEAM_GROUP_SIZE or computed <= 0 or computed % size:
+        raise ProductError(f"beams: group_size {size} / computed {computed} invalid")
+    groups = list(b["groups"])
+    if not groups or any(not isinstance(g, int) or isinstance(g, bool)
+                         or g < 0 or g >= computed // size
+                         for g in groups) or any(a >= c for a, c in zip(groups, groups[1:])):
+        raise ProductError(f"beams.groups {groups} must be strictly increasing in "
+                           f"0..{computed // size - 1}")
+    expected = [g * size + j for g in groups for j in range(size)]
+    if list(b["written"]) != expected:
+        raise ProductError("beams.written is inconsistent with beams.groups")
+    if d["intensity"]["shape"][2] != len(expected):
+        raise ProductError(f"intensity.shape[2] = {d['intensity']['shape'][2]} but "
+                           f"{len(expected)} beams are written")
+    params = (d.get("int8") or {}).get("parameters")
+    if params and params.get("beam_tiles") != len(groups):
+        raise ProductError(f"int8.parameters.beam_tiles = {params.get('beam_tiles')} but "
+                           f"{len(groups)} beam groups are written")
+
+
+def beam_indices(d: dict) -> np.ndarray:
+    """Weight-file beam index of every output beam (output beam j is weight beam result[j]).
+    Descriptors without a beams block were written with all beams, in order."""
+    if "beams" in d:
+        return np.asarray(d["beams"]["written"], dtype=np.int64)
+    return np.arange(d["intensity"]["shape"][2], dtype=np.int64)
+
+
+def beam_positions(d: dict, beams) -> np.ndarray:
+    """Output position of each requested weight-file beam; ProductError if one was not
+    written."""
+    where = {int(b): j for j, b in enumerate(beam_indices(d))}
+    missing = [int(b) for b in beams if int(b) not in where]
+    if missing:
+        raise ProductError(f"beams {missing} were not written (beams.groups = "
+                           f"{d.get('beams', {}).get('groups')})")
+    return np.asarray([where[int(b)] for b in beams], dtype=np.int64)
 
 
 def frequencies_hz(d: dict) -> np.ndarray:

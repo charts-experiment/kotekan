@@ -18,7 +18,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .astro import resolve_beam_targets
 from .constants import (
@@ -321,11 +321,14 @@ def create_beamformer_yaml(
     spacing_m: float = DEFAULT_SPACING_M,
     beam_l_step: float = 0.01,
     weights_file: Optional[Path] = None,
+    output_beam_groups: Optional[Sequence[int]] = None,
 ) -> Path:
     """Generates Kotekan YAML for rawFileRead -> cudaChartsBeamformerCommand -> rawFileWrite.
 
     The beamformer always upchannelizes (U=32, K=10) and forms exactly 128 beams; input_mode
-    and num_beams are kept for callers but only accept those values.
+    and num_beams are kept for callers but only accept those values. output_beam_groups
+    (int8 only) writes those 16-beam groups and sizes the intensity frames for 16*G beams;
+    the int8 parameter buffer, when a caller adds one, needs G beam tiles.
     """
     if input_mode != "fine":
         raise ValueError("input_mode: coarse was removed; the beamformer is always fine (U=32)")
@@ -339,8 +342,12 @@ def create_beamformer_yaml(
 
     n_time_out = (n_time_bf + integration_spectra - 1) // integration_spectra
     bytes_per_sample = 1 if output_format == "int8" else 4
-    output_frame_bytes = n_time_out * n_freq_out * num_beams * bytes_per_sample
+    written_beams = num_beams if output_beam_groups is None else 16 * len(output_beam_groups)
+    output_frame_bytes = n_time_out * n_freq_out * written_beams * bytes_per_sample
     weights_line = f'      weights_file: "{weights_file.as_posix()}"\n' if weights_file else ""
+    if output_beam_groups is not None:
+        groups = ", ".join(str(int(g)) for g in output_beam_groups)
+        weights_line += f"      output_beam_groups: [{groups}]\n"
 
     content = f"""######################################################################
 # CHARTS Unified GPU Intensity Beamformer Replay Pipeline ({input_mode}, {num_beams} Beams)

@@ -60,6 +60,8 @@ gpu_0:
     - name: cudaChartsBeamformerCommand
       input_mode: fine
       output_format: int8
+      # output_beam_groups: [0, 1, 2, 3]   # int8 only: write these 16-beam groups; the intensity
+      #                                    # frame_size then uses 16 * G beams instead of num_beams
       in_buf: raw
       out_buf: intensity
       shard_id: 0
@@ -124,6 +126,8 @@ gpu_1:
     - name: cudaChartsBeamformerCommand
       input_mode: fine
       output_format: int8
+      # output_beam_groups: [0, 1, 2, 3]   # int8 only: write these 16-beam groups; the intensity
+      #                                    # frame_size then uses 16 * G beams instead of num_beams
       in_buf: raw
       out_buf: intensity
       shard_id: 1

@@ -57,11 +57,13 @@ def check_shard(run_dir: Path, shard: int, decode_frames: int) -> dict:
         pr = ip.read_quant_params(d, qpar[n])
         x = ip.decode_int8(d, q, pr, shard=shard)
         nan_chunks += int(np.isnan(x).any(axis=(1, 2)).sum())
-        decoded.append(np.nanmedian(x, axis=(0, 1)))         # per beam
+        decoded.append(np.nanmedian(x, axis=(0, 1)))         # per output beam (written_beams)
     return {
         "shard": shard,
         "descriptor": {"schema": d["schema"], "input_mode": d["input_mode"], "K": k,
                        "dtype": d["intensity"]["dtype"], "shape": d["intensity"]["shape"],
+                       "beam_groups": (d.get("beams") or {}).get("groups", "all (no beams block)"),
+                       "written_beams": ip.beam_indices(d).tolist(),
                        "reconstructable": bool(d.get("int8") and d["int8"]["reconstructable"]),
                        "weights": d["weights"]},
         "frames": {"intensity": len(inten), "qparams": len(qpar), "exposure": len(expo)},

@@ -36,6 +36,10 @@ capture_n_frames: 0                  # handler runs until Kotekan exits
 run_frames: 200                      # frames written per shard before Kotekan exits
 
 # Fine mode, K=10: 15360/32 = 480 fine spectra -> 48 windows; 10752 fine channels.
+# int8 output of selected 16-beam groups (output_beam_groups in each beamformer command):
+# in the two frame-byte expressions below (not the top-level num_beams, which stays 128) use
+# 16 * G instead of num_beams (G = number of written groups), e.g. 64 for [0, 1, 2, 3] (hex64
+# without the zero-weight padding beams). Both shards here share these sizes.
 intensity_frame_bytes: 48 * 10752 * num_beams
 qparams_frame_bytes: 48 * (10752 / 16) * (num_beams / 16) * 8
 exposure_frame_bytes: 48 * num_local_freq
@@ -200,6 +204,7 @@ gpu_beamformer_0:
     - name: cudaChartsBeamformerCommand
       input_mode: fine
       output_format: int8
+      # output_beam_groups: [0, 1, 2, 3]   # write only these 16-beam groups (see frame bytes)
       in_buf: raw
       out_buf: intensity
       shard_id: 0
@@ -257,6 +262,7 @@ gpu_beamformer_1:
     - name: cudaChartsBeamformerCommand
       input_mode: fine
       output_format: int8
+      # output_beam_groups: [0, 1, 2, 3]   # write only these 16-beam groups (see frame bytes)
       in_buf: raw
       out_buf: intensity
       shard_id: 1

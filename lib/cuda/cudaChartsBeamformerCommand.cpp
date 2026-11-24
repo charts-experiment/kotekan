@@ -27,6 +27,9 @@ void require(bool ok, const char* message) {
         throw std::invalid_argument(message);
     }
 }
+void require(bool ok, const std::string& message) {
+    require(ok, message.c_str());
+}
 } // namespace
 
 class chartsBeamformerState : public cudaCommandState {
@@ -46,7 +49,14 @@ public:
     std::string upchan_gain_normalization = "none";
     std::string upchan_gain_sha256; // of the applied float32 [336*32] array
     Dimensions beamform_dims;
-    Dimensions output_dims;
+    Dimensions output_dims; // computed fp32 intensity, always B = 128 beams
+    // int8 only: beam groups that are quantized, copied and written (output_beam_groups).
+    // written_dims = output_dims with n_beams = 16G; it sizes the int8 codes and parameters,
+    // never the weights, the fp32 scratch or the beamformer launch.
+    BeamGroupSelection beam_groups = all_beam_groups();
+    bool beam_groups_configured = false;
+    Dimensions written_dims;
+    std::string beam_groups_summary; // logged by the command
     std::size_t raw_voltage_bytes = 0;
     std::size_t fp32_intensity_bytes = 0;
     std::size_t output_bytes = 0;
@@ -91,6 +101,26 @@ public:
         require(fmt_str == "float32" || fmt_str == "int8",
                 "output_format must be 'float32' or 'int8'");
         quantize_int8 = (fmt_str == "int8");
+        // Looked up like every other key of this command (the command block, then its parent
+        // blocks), so a selection set at the cudaProcess level or the root is honoured, not
+        // silently ignored. Strictly a list of integers (no floats or booleans).
+        std::optional<nlohmann::json> groups_value;
+        try {
+            groups_value = cfg.get_value(name, "output_beam_groups");
+        } catch (const std::runtime_error&) {
+        }
+        beam_groups_configured = groups_value.has_value();
+        if (beam_groups_configured) {
+            require(quantize_int8, "output_beam_groups requires output_format: int8; float32 "
+                                   "is a full diagnostic product");
+            require(groups_value->is_array(), "output_beam_groups must be a list of integers");
+            std::vector<std::int64_t> groups;
+            for (const auto& item : *groups_value) {
+                require(item.is_number_integer(), "output_beam_groups must be a list of integers");
+                groups.push_back(item.get<std::int64_t>());
+            }
+            beam_groups = make_beam_group_selection(groups);
+        }
 
         shard_id = cfg.get_default<std::size_t>(name, "shard_id", 0);
         require(shard_id < frequency_shard_count, "shard_id must be 0 or 1");
@@ -157,10 +187,30 @@ public:
         output_dims = {integrated_time_count(beamform_dims.n_time, integration_spectra),
                        beamform_dims.n_freq, n_ant, n_beams};
         raw_voltage_bytes = raw_n_time * local_frequency_channels * n_ant;
+        written_dims = output_dims;
+        written_dims.n_beams = beam_groups.written_beams();
         const std::size_t output_samples =
             output_dims.n_time * output_dims.n_freq * output_dims.n_beams;
         fp32_intensity_bytes = output_samples * sizeof(float);
-        output_bytes = quantize_int8 ? (output_samples * sizeof(std::int8_t)) : fp32_intensity_bytes;
+        output_bytes = quantize_int8 ? (written_dims.n_time * written_dims.n_freq
+                                        * written_dims.n_beams * sizeof(std::int8_t))
+                                     : fp32_intensity_bytes;
+        {
+            const auto groups = beam_groups.groups();
+            const auto beams = beam_groups.written_beam_indices();
+            std::string group_list;
+            std::string ranges;
+            for (const auto g : groups) {
+                const char* sep = group_list.empty() ? "" : ", ";
+                group_list += fmt::format("{:s}{:d}", sep, g);
+                ranges += fmt::format("{:s}{:d}-{:d}", sep, g * quantization_chunk_beam,
+                                      g * quantization_chunk_beam + quantization_chunk_beam - 1);
+            }
+            beam_groups_summary = fmt::format(
+                "writes {:d} of {:d} computed beams: groups [{:s}] = beams {:s}{:s}",
+                beams.size(), output_dims.n_beams, group_list, ranges,
+                beam_groups_configured ? "" : " (default, all)");
+        }
 
         packet_loss_enabled = !cfg.get_default<std::string>(name, "gpu_mem_missing", "").empty();
         if (packet_loss_enabled) {
@@ -339,7 +389,7 @@ public:
             device_fp32_scratch = static_cast<float*>(
                 device.get_gpu_memory(name + "/fp32_scratch", fp32_intensity_bytes));
             quant_param_bytes =
-                quantization_parameter_count(output_dims) * sizeof(Int8QuantizationParameters);
+                quantization_parameter_count(written_dims) * sizeof(Int8QuantizationParameters);
             // Used only when the parameters are not exported (gpu_mem_quant_params unset).
             device_quant_params = static_cast<Int8QuantizationParameters*>(
                 device.get_gpu_memory(name + "/quant_params", quant_param_bytes));
@@ -362,6 +412,9 @@ public:
         voltage_name(cfg.get_default<std::string>(name, "gpu_mem_voltage", "voltage")),
         intensity_name(cfg.get_default<std::string>(name, "gpu_mem_intensity", "intensity")) {
         require(bool(state), "missing chartsBeamformerState");
+        if (inst == 0 && state->quantize_int8)
+            INFO("CHARTS shard {:d} int8 output {:s}", state->shard_id,
+                 state->beam_groups_summary);
         if (inst == 0 && !state->weights_summary.empty())
             INFO("CHARTS weights loaded from .npy: {:s}", state->weights_summary);
         if (inst == 0)
@@ -399,7 +452,9 @@ public:
         if (!out_buf_name.empty()) {
             output_buf = buffers.get_buffer(out_buf_name);
             require(output_buf && output_buf->frame_size == state->output_bytes,
-                    "output host buffer frame_size mismatch");
+                    fmt::format("output host buffer frame_size mismatch: expected {:d} bytes "
+                                "({:d} written beams)",
+                                state->output_bytes, state->written_dims.n_beams));
         }
 
         if (state->packet_loss_enabled) {
@@ -460,7 +515,9 @@ public:
             require(!quant_buf_name.empty(), "gpu_mem_quant_params requires out_buf_quant_params");
             auto* quant_buf = buffers.get_buffer(quant_buf_name);
             require(quant_buf && quant_buf->frame_size == state->quant_param_bytes,
-                    "quant params host buffer frame_size mismatch");
+                    fmt::format("quant params host buffer frame_size mismatch: expected {:d} "
+                                "bytes ({:d} beam groups)",
+                                state->quant_param_bytes, state->beam_groups.count));
             d_quant_params = static_cast<Int8QuantizationParameters*>(
                 device.get_gpu_memory_array(quant_params_name, inst, _gpu_buffer_depth,
                                             state->quant_param_bytes));
@@ -477,7 +534,10 @@ public:
             product.integration_spectra = state->integration_spectra;
             product.n_time = state->output_dims.n_time;
             product.n_freq = state->output_dims.n_freq;
-            product.n_beams = state->output_dims.n_beams;
+            product.n_beams = state->written_dims.n_beams;
+            product.n_computed_beams = state->output_dims.n_beams;
+            product.beam_groups = state->beam_groups.groups();
+            product.written_beams = state->beam_groups.written_beam_indices();
             product.n_elements = state->beamform_dims.n_ant;
             product.freq_zero_hz = state->freq_zero_hz;
             product.freq_step_hz = state->freq_step_hz;
@@ -497,7 +557,7 @@ public:
                                           : "";
             product.exposure_bytes = state->exposure_bytes;
             product.quant_params_buffer = quant_params_name.empty() ? "" : quant_buf_name;
-            product.quant_param_count = quantization_parameter_count(state->output_dims);
+            product.quant_param_count = quantization_parameter_count(state->written_dims);
             write_product_descriptor(descriptor_file, product);
             INFO("CHARTS product descriptor written to {:s}", descriptor_file);
         }
@@ -623,7 +683,7 @@ public:
             launch_quantize_integrated_intensity(
                 stream, fp32_target, static_cast<std::int8_t*>(d_output),
                 d_quant_params ? d_quant_params : state->device_quant_params,
-                state->output_dims);
+                state->output_dims, state->beam_groups);
         }
 
         if (meta) {

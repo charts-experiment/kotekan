@@ -23,7 +23,9 @@ namespace beamformer {
 // re-quantization (history.fine_format), CHORD PFB window; no fine_quantization block.
 // weights.device (fp16 + power-of-two scale), beamformer.{kernel, arithmetic} and
 // history.upchan_gain.normalization were added to v3 on the same unreleased branch
-// (2026-11-20); the reader requires them for v3.
+// (2026-11-20); the reader requires them for v3. The beams block (output_beam_groups: int8
+// output of selected 16-beam groups) was added to v3 on 2026-11-24 without a schema bump; a
+// v3 descriptor without it was written by a binary that always wrote all 128 beams.
 inline constexpr const char* product_schema = "charts-intensity-product-v3";
 
 struct ProductDescription {
@@ -33,7 +35,10 @@ struct ProductDescription {
     std::size_t integration_spectra = 0;
     std::size_t n_time = 0;
     std::size_t n_freq = 0;
-    std::size_t n_beams = 0;
+    std::size_t n_beams = 0;          // written beams (intensity.shape[2]) = 16G for int8
+    std::size_t n_computed_beams = 0; // beams formed on the GPU (B = 128)
+    std::vector<std::size_t> beam_groups;   // written 16-beam groups of the computed beams
+    std::vector<std::size_t> written_beams; // computed beam index of each output beam
     std::size_t n_elements = 0;
     double freq_zero_hz = 0;
     double freq_step_hz = 0;
@@ -132,6 +137,15 @@ inline nlohmann::json product_descriptor(const ProductDescription& p) {
          {{"key", {"shard", "FPGA_SEQ_NUM", "T_raw"}},
           {"rule", "intensity, exposure and int8 parameter records of one frame carry the "
                    "same raw metadata; pair by key, never by ring slot or file index"}}},
+        {"beams",
+         {{"computed", p.n_computed_beams},
+          {"group_size", quantization_chunk_beam},
+          {"groups", p.beam_groups},
+          {"written", p.written_beams},
+          {"rule", "output beam j is weight-file beam written[j]; whole groups of 16 "
+                   "(group g = beams 16g ... 16g + 15); a subset is possible only for int8 "
+                   "(output_beam_groups), whose 1x16x16 chunks and parameters then equal those "
+                   "of the full product"}}},
         {"weights", p.weights},
         {"beamformer",
          {{"kernel", p.beamformer_kernel},
