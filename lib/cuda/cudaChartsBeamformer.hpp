@@ -149,11 +149,6 @@ Weights generate_weights(const Dimensions& dims, const std::vector<Vec3>& positi
 // -----------------------------------------------------------------------------
 // Tiled Beamforming, Temporal Integration & Quantization Device Launchers
 // -----------------------------------------------------------------------------
-// Old int4 fine-voltage kernel (tiled complex64 weights); unused, removed in WP4.
-void launch_tiled_packed_beamformer(cudaStream_t stream, const std::uint8_t* packed_voltage,
-                                    const ComplexFloat* tiled_weights, float* intensity,
-                                    const Dimensions& dims);
-
 // Scalar fp32 reference beamformer (K = 10) on fp16 fine voltages [t][f][e] and fp16 weights
 // with power-of-two scales (fp16_weight_index / weight_scale_index):
 // P = sum over the window of (s*Yr)^2 + (s*Yi)^2, Y = sum_e W16[b,f,e] x[t,f,e] in fp32.

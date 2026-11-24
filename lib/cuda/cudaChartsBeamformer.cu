@@ -27,77 +27,8 @@ constexpr unsigned int tiled_max_antennas = 64;
 constexpr unsigned int fp16_weight_stride = tiled_beam_tile + 1;
 
 // =============================================================================
-// 1. Tiled Packed int4x2 Beamformer Kernels (Unintegrated & Fused Integrated)
+// 1. Scalar fp32 Reference Beamformer (fp16 inputs, test reference)
 // =============================================================================
-
-__global__ void tiled_packed_voltage_beamformer_kernel(
-    const std::uint8_t* packed_voltage, const ComplexFloat* weights, float* intensity,
-    const std::size_t n_time, const std::size_t n_freq,
-    const std::size_t n_ant, const std::size_t n_beams) {
-    extern __shared__ unsigned char shared_storage[];
-    auto* shared_weights = reinterpret_cast<ComplexFloat*>(shared_storage);
-    auto* shared_voltage =
-        shared_storage + tiled_max_antennas * tiled_beam_tile * sizeof(ComplexFloat);
-
-    const std::size_t local_beam = threadIdx.x;
-    const std::size_t local_time = threadIdx.y;
-    const std::size_t frequency = blockIdx.y;
-    const std::size_t beam = static_cast<std::size_t>(blockIdx.x) * tiled_beam_tile + local_beam;
-    const std::size_t time = static_cast<std::size_t>(blockIdx.z) * tiled_time_tile + local_time;
-    const std::size_t linear_thread = local_time * tiled_beam_tile + local_beam;
-
-    for (std::size_t index = linear_thread; index < n_ant * tiled_beam_tile;
-         index += tiled_threads) {
-        const std::size_t antenna = index / tiled_beam_tile;
-        const std::size_t tile_beam = index % tiled_beam_tile;
-        const std::size_t global_beam =
-            static_cast<std::size_t>(blockIdx.x) * tiled_beam_tile + tile_beam;
-        const auto shared_index = antenna * tiled_beam_tile + tile_beam;
-        if (global_beam < n_beams) {
-            const std::size_t tw_idx =
-                (((frequency * ((n_beams + tiled_beam_tile - 1) / tiled_beam_tile)
-                   + static_cast<std::size_t>(blockIdx.x))
-                  * n_ant
-                  + antenna)
-                     * tiled_beam_tile
-                 + tile_beam);
-            shared_weights[shared_index] = weights[tw_idx];
-        } else {
-            shared_weights[shared_index] = ComplexFloat{0.0F, 0.0F};
-        }
-    }
-
-    for (std::size_t index = linear_thread; index < tiled_time_tile * n_ant;
-         index += tiled_threads) {
-        const std::size_t tile_time = index / n_ant;
-        const std::size_t antenna = index % n_ant;
-        const std::size_t global_time =
-            static_cast<std::size_t>(blockIdx.z) * tiled_time_tile + tile_time;
-        shared_voltage[tile_time * n_ant + antenna] =
-            global_time < n_time
-                ? packed_voltage[(global_time * n_freq + frequency) * n_ant + antenna]
-                : 0U;
-    }
-    __syncthreads();
-
-    if (time >= n_time || beam >= n_beams) {
-        return;
-    }
-
-    float sum_real = 0.0F;
-    float sum_imag = 0.0F;
-    for (std::size_t antenna = 0; antenna < n_ant; ++antenna) {
-        const ComplexInt4 packed_sample =
-            unpack_complex_int4(shared_voltage[local_time * n_ant + antenna]);
-        const float sample_real = static_cast<float>(packed_sample.real);
-        const float sample_imag = static_cast<float>(packed_sample.imag);
-        const ComplexFloat weight = shared_weights[antenna * tiled_beam_tile + local_beam];
-        sum_real += weight.real * sample_real - weight.imag * sample_imag;
-        sum_imag += weight.real * sample_imag + weight.imag * sample_real;
-    }
-    intensity[(time * n_freq + frequency) * n_beams + beam] =
-        sum_real * sum_real + sum_imag * sum_imag;
-}
 
 // Scalar fp32 reference: reads fp16 fine voltages and fp16 weights with a power-of-two scale
 // per (b, f), fp32 arithmetic. Kept as the test reference for the tensor-core kernel
@@ -668,31 +599,8 @@ Fp16Weights convert_weights_fp16(const Weights& canonical_weights, const Dimensi
 }
 
 // =============================================================================
-// 4. Device Launch API Implementations (Tiled Only + Quantization)
+// 4. Device Launch API Implementations (Beamformers + Quantization)
 // =============================================================================
-
-void launch_tiled_packed_beamformer(const cudaStream_t stream, const std::uint8_t* packed_voltage,
-                                    const ComplexFloat* tiled_weights, float* intensity,
-                                    const Dimensions& dims) {
-    if (!packed_voltage || !tiled_weights || !intensity) {
-        throw std::invalid_argument("CUDA tiled beamformer pointers must not be null");
-    }
-    (void)cudaGetLastError();
-
-    const auto grid_x = (dims.n_beams + tiled_beam_tile - 1) / tiled_beam_tile;
-    const auto grid_z = (dims.n_time + tiled_time_tile - 1) / tiled_time_tile;
-    constexpr std::size_t shared_bytes =
-        tiled_max_antennas * tiled_beam_tile * sizeof(ComplexFloat)
-        + tiled_time_tile * tiled_max_antennas * sizeof(std::uint8_t);
-    const dim3 grid(static_cast<unsigned int>(grid_x),
-                    static_cast<unsigned int>(dims.n_freq),
-                    static_cast<unsigned int>(grid_z));
-    const dim3 block(tiled_beam_tile, tiled_time_tile, 1);
-    tiled_packed_voltage_beamformer_kernel<<<grid, block, shared_bytes, stream>>>(
-        packed_voltage, tiled_weights, intensity, dims.n_time, dims.n_freq, dims.n_ant,
-        dims.n_beams);
-    check_cuda(cudaGetLastError(), "tiled_packed_voltage_beamformer_kernel launch");
-}
 
 void launch_tiled_fp16_integrated_beamformer(const cudaStream_t stream,
                                              const __half2* fine_voltage,
