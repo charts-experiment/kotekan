@@ -130,4 +130,14 @@ if(CUDAToolkit_FOUND)
         ${CMAKE_CURRENT_SOURCE_DIR}/../lib/core/errors.c)
     target_link_libraries(test_beam_upchannelize_suite PRIVATE CUDA::cudart Threads::Threads)
     target_include_directories(test_beam_upchannelize_suite PRIVATE ${COMMON_INCLUDE_DIRS})
+
+    # 13. Wave 4A Multi-Beam Sub-Frame Coincidence & Transient Trigger Test Suite
+    add_executable(
+        test_transient_trigger_multibeam_suite
+        test_transient_trigger_multibeam_suite.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cuda/cudaTransientTrigger.cu
+        ${CMAKE_CURRENT_SOURCE_DIR}/../lib/core/kotekanLogging.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../lib/core/errors.c)
+    target_link_libraries(test_transient_trigger_multibeam_suite PRIVATE CUDA::cudart Threads::Threads)
+    target_include_directories(test_transient_trigger_multibeam_suite PRIVATE ${COMMON_INCLUDE_DIRS})
 endif()
