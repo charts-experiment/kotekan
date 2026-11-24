@@ -214,6 +214,7 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
     // Calibration: gains file indexed (channel, physical antenna), row 0 at 300 MHz in steps of
     // freq_step_hz unless gains_first_channel is given (sharded nodes slice the full band).
     _gains_file = config.get_default<std::string>(unique_name, "gains_file", "");
+    _sefd_weights_file = config.get_default<std::string>(unique_name, "sefd_weights_file", "");
     _gains_first_channel = config.get_default<int>(
         unique_name, "gains_first_channel",
         static_cast<int>(std::lround(
@@ -253,6 +254,9 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
         std::lock_guard<std::mutex> lock(group->group_mutex);
         if (group->gains_file.empty() && !_gains_file.empty()) {
             group->gains_file = _gains_file;
+        }
+        if (group->sefd_weights_file.empty() && !_sefd_weights_file.empty()) {
+            group->sefd_weights_file = _sefd_weights_file;
         }
         group->config.ensure_beam_capacity(static_cast<std::size_t>(_max_beams));
         group->config.site = DirectSiteLocation{site_lat_deg, site_lon_deg, site_alt_m};
@@ -741,6 +745,7 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                 reply["active_elements"] = group->config.num_active_antennas;
                 reply["active_antennas"] = group->config.num_active_antennas;
                 reply["gains_file"] = group->gains_file;
+                reply["sefd_weights_file"] = group->sefd_weights_file;
                 reply["gains_generation"] = group->gains_generation;
 
                 reply["site"] = {{"lat_deg", group->config.site.lat_deg},
@@ -997,12 +1002,17 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                         bool conj;
                     };
                     std::string target_file;
+                    std::string target_sefd;
                     std::vector<GainsCheckSpec> specs;
                     {
                         std::lock_guard<std::mutex> lk(group->group_mutex);
                         target_file = (j.contains("gains_file") && j["gains_file"].is_string())
                                           ? j["gains_file"].get<std::string>()
                                           : group->gains_file;
+                        target_sefd =
+                            (j.contains("sefd_weights_file") && j["sefd_weights_file"].is_string())
+                                ? j["sefd_weights_file"].get<std::string>()
+                                : group->sefd_weights_file;
                         for (auto* inst : group->instances) {
                             specs.push_back({inst->get_gains_first_channel(),
                                              inst->get_num_local_freq(), inst->get_num_antennas(),
@@ -1021,6 +1031,10 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                     for (const auto& s : specs) {
                         (void)charts_mvdr::load_gains_npy(target_file, s.first_chan, s.n_freq,
                                                           s.n_ant, s.subset, s.conj);
+                        if (!target_sefd.empty()) {
+                            (void)charts_mvdr::load_sefd_weights_npy(
+                                target_sefd, s.first_chan, s.n_freq, s.n_ant, s.subset);
+                        }
                     }
 
                     std::uint64_t new_gen = 0;
@@ -1028,6 +1042,7 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                     {
                         std::lock_guard<std::mutex> lk(group->group_mutex);
                         group->gains_file = target_file;
+                        group->sefd_weights_file = target_sefd;
                         group->gains_generation++;
                         new_gen = group->gains_generation;
                         n_inst = group->instances.size();
@@ -1036,6 +1051,7 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                     nlohmann::json reply;
                     reply["status"] = "ok";
                     reply["gains_file"] = target_file;
+                    reply["sefd_weights_file"] = target_sefd;
                     reply["gains_generation"] = new_gen;
                     reply["instances"] = n_inst;
                     conn.send_json_reply(reply);
@@ -1140,8 +1156,16 @@ void cudaDirectBeamTrackerCommand::upload_calibration_gains(const DirectBeamTrac
     for (int r = 0; r < _num_elements; ++r)
         elem_to_ant[r] = static_cast<int>(cfg.raw_elem_to_physical_ant(r));
     int dropped = 0;
-    const auto corr = charts_mvdr::calibration_correctors(gains, _num_local_freq, _num_antennas,
-                                                          elem_to_ant, &dropped);
+    auto corr = charts_mvdr::calibration_correctors(gains, _num_local_freq, _num_antennas,
+                                                    elem_to_ant, &dropped);
+    if (!_sefd_weights_file.empty()) {
+        const auto sefd = charts_mvdr::load_sefd_weights_npy(
+            _sefd_weights_file, _gains_first_channel, _num_local_freq, _num_antennas,
+            _gains_antennas);
+        charts_mvdr::apply_inverse_sefd_weights(
+            corr, sefd, _num_local_freq, _num_antennas, elem_to_ant, _num_pols,
+            _pol_layout == DirectPolLayout::PLANAR);
+    }
     _h_calibration_gains.resize(corr.size());
     for (std::size_t i = 0; i < corr.size(); ++i)
         _h_calibration_gains[i] = make_float2(corr[i].real(), corr[i].imag());
@@ -1589,12 +1613,16 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
 
     DirectBeamTrackerConfig current_config;
     std::string group_gains_file = _gains_file;
+    std::string group_sefd_file = _sefd_weights_file;
     std::uint64_t group_gains_gen = _applied_gains_generation;
     if (group) {
         std::lock_guard<std::mutex> glock(group->group_mutex);
         current_config = group->config;
         if (!group->gains_file.empty()) {
             group_gains_file = group->gains_file;
+        }
+        if (!group->sefd_weights_file.empty() || _applied_gains_generation != group->gains_generation) {
+            group_sefd_file = group->sefd_weights_file;
         }
         group_gains_gen = group->gains_generation;
     } else {
@@ -1697,8 +1725,10 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
     }
     if (!group_gains_file.empty()
         && (_applied_gains_generation != group_gains_gen
-            || _loaded_gains_first_channel != _gains_first_channel)) {
+            || _loaded_gains_first_channel != _gains_first_channel
+            || _sefd_weights_file != group_sefd_file)) {
         _gains_file = group_gains_file;
+        _sefd_weights_file = group_sefd_file;
         upload_calibration_gains(current_config, stream, group_gains_gen);
         _applied_gains_generation = group_gains_gen;
         subband_reloaded = true;

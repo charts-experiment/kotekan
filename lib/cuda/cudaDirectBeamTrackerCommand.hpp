@@ -30,6 +30,7 @@ struct TrackerGroup {
     std::vector<cudaDirectBeamTrackerCommand*> instances;
     bool endpoints_registered = false;
     std::string gains_file;
+    std::string sefd_weights_file;
     std::uint64_t gains_generation = 1;
 };
 
@@ -174,6 +175,7 @@ private:
 
     // Complex antenna gains (charts-utils .npy, x_obs = g x; conjugated on load when enabled); empty: none
     std::string _gains_file;
+    std::string _sefd_weights_file;
     int32_t _gains_first_channel = 0;
     int32_t _loaded_gains_first_channel = -1;
     std::vector<int> _gains_antennas;

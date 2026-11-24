@@ -279,6 +279,182 @@ std::vector<std::complex<float>> calibration_correctors(const std::vector<cplx>&
     return out;
 }
 
+std::vector<double> load_sefd_weights_npy(const std::string& path, int first_channel, int num_freq,
+                                          int num_elements,
+                                          const std::vector<int>& antenna_subset) {
+    if (first_channel < 0 || num_freq <= 0 || num_elements <= 0)
+        throw std::invalid_argument("charts_mvdr: invalid dimensions for load_sefd_weights_npy");
+    std::ifstream in(path, std::ios::binary);
+    if (!in)
+        throw std::runtime_error("charts_mvdr: cannot open SEFD weights file " + path);
+    char magic[6];
+    in.read(magic, 6);
+    if (!in || std::memcmp(magic, "\x93NUMPY", 6) != 0)
+        throw std::runtime_error("charts_mvdr: SEFD file is not a .npy file: " + path);
+    unsigned char ver[2];
+    in.read(reinterpret_cast<char*>(ver), 2);
+    uint32_t hlen = 0;
+    if (ver[0] == 1) {
+        unsigned char b[2];
+        in.read(reinterpret_cast<char*>(b), 2);
+        hlen = b[0] | (b[1] << 8);
+    } else {
+        unsigned char b[4];
+        in.read(reinterpret_cast<char*>(b), 4);
+        hlen = b[0] | (b[1] << 8) | (b[2] << 16) | (static_cast<uint32_t>(b[3]) << 24);
+    }
+    std::string header(hlen, '\0');
+    in.read(&header[0], hlen);
+    if (!in)
+        throw std::runtime_error("charts_mvdr: truncated SEFD .npy header: " + path);
+
+    auto value_of = [&](const std::string& key) {
+        const auto k = header.find("'" + key + "'");
+        if (k == std::string::npos)
+            throw std::runtime_error("charts_mvdr: SEFD .npy header without " + key + ": " + path);
+        return header.substr(header.find(':', k) + 1);
+    };
+    const std::string descr = value_of("descr");
+    int bytes = 0;
+    if (descr.find("'<f4'") == 0 || descr.find(" '<f4'") == 0)
+        bytes = 4;
+    else if (descr.find("'<f8'") == 0 || descr.find(" '<f8'") == 0)
+        bytes = 8;
+    else
+        throw std::runtime_error(
+            "charts_mvdr: SEFD weights must be little-endian float32 or float64: " + path);
+    if (value_of("fortran_order").find("False") == std::string::npos)
+        throw std::runtime_error("charts_mvdr: SEFD weights must be in C order: " + path);
+
+    const std::string shape = value_of("shape");
+    long rows = -1, cols = -1;
+    int used = 0;
+    bool is_1d = false;
+    if (std::sscanf(shape.c_str(), " (%ld, %ld%n", &rows, &cols, &used) == 2
+        && (shape.compare(used, 1, ")") == 0 || shape.compare(used, 2, ",)") == 0)) {
+        is_1d = false;
+    } else if (std::sscanf(shape.c_str(), " (%ld,%n", &cols, &used) == 1
+               && (shape.find(')', used) != std::string::npos)) {
+        rows = 1;
+        is_1d = true;
+    } else {
+        throw std::runtime_error("charts_mvdr: SEFD weights must be 1D (n_ant,) or 2D "
+                                 "(n_freq, n_ant): "
+                                 + path);
+    }
+
+    std::vector<int> col_map;
+    if (cols == num_elements) {
+        if (!antenna_subset.empty() && static_cast<long>(antenna_subset.size()) == cols) {
+            col_map = antenna_subset;
+        } else {
+            col_map.resize(cols);
+            for (long c = 0; c < cols; ++c)
+                col_map[c] = static_cast<int>(c);
+        }
+    } else if (!antenna_subset.empty() && static_cast<long>(antenna_subset.size()) == cols) {
+        col_map = antenna_subset;
+    } else if (antenna_subset.empty() && cols == 4 && num_elements == 64) {
+        col_map.assign(std::begin(kotekan::charts::constants::calibrated_antennas_sun_transit),
+                       std::end(kotekan::charts::constants::calibrated_antennas_sun_transit));
+    } else {
+        throw std::runtime_error("charts_mvdr: SEFD file " + path + " has " + std::to_string(cols)
+                                 + " columns, expected " + std::to_string(num_elements));
+    }
+
+    for (int ant : col_map) {
+        if (ant < 0 || ant >= num_elements)
+            throw std::runtime_error("charts_mvdr: antenna index out of range in SEFD file " + path);
+    }
+
+    if (!is_1d && first_channel + num_freq > rows)
+        throw std::runtime_error("charts_mvdr: SEFD file does not cover requested channels: "
+                                 + path);
+
+    std::vector<double> out(static_cast<std::size_t>(num_freq) * num_elements, 0.0);
+    if (!is_1d)
+        in.seekg(static_cast<std::streamoff>(first_channel) * cols * bytes, std::ios::cur);
+
+    const int read_rows = is_1d ? 1 : num_freq;
+    for (int f = 0; f < read_rows; ++f) {
+        for (long c = 0; c < cols; ++c) {
+            double val = 0.0;
+            if (bytes == 4) {
+                float tmp = 0.0f;
+                in.read(reinterpret_cast<char*>(&tmp), 4);
+                val = static_cast<double>(tmp);
+            } else {
+                in.read(reinterpret_cast<char*>(&val), 8);
+            }
+            const int ant = col_map[c];
+            out[static_cast<std::size_t>(f) * num_elements + ant] =
+                (std::isfinite(val) && val > 0.0) ? val : 0.0;
+        }
+    }
+    if (!in)
+        throw std::runtime_error("charts_mvdr: truncated SEFD file: " + path);
+
+    if (is_1d) {
+        for (int f = 1; f < num_freq; ++f) {
+            std::copy(out.begin(), out.begin() + num_elements,
+                      out.begin() + static_cast<std::size_t>(f) * num_elements);
+        }
+    }
+    return out;
+}
+
+void apply_inverse_sefd_weights(std::vector<std::complex<float>>& correctors,
+                                const std::vector<double>& sefd, int num_freq, int num_ant,
+                                const std::vector<int>& elem_to_ant, int num_pols,
+                                bool planar_pol) {
+    const int n_elem = static_cast<int>(elem_to_ant.size());
+    if (static_cast<long>(correctors.size()) != static_cast<long>(num_freq) * n_elem)
+        throw std::invalid_argument(
+            "charts_mvdr: correctors size mismatch in apply_inverse_sefd_weights");
+    if (static_cast<long>(sefd.size()) != static_cast<long>(num_freq) * num_ant)
+        throw std::invalid_argument("charts_mvdr: sefd size mismatch in apply_inverse_sefd_weights");
+    const int np = std::max(1, num_pols);
+
+    for (int f = 0; f < num_freq; ++f) {
+        for (int pol = 0; pol < np; ++pol) {
+            double sum_old2 = 0.0;
+            double sum_new2 = 0.0;
+            for (int e = 0; e < n_elem; ++e) {
+                const int e_pol =
+                    (np == 1) ? 0 : (planar_pol ? (e / std::max(1, n_elem / np)) : (e % np));
+                if (e_pol != pol)
+                    continue;
+                const int ant = elem_to_ant[e];
+                const std::size_t c_idx = static_cast<std::size_t>(f) * n_elem + e;
+                const std::complex<float> c = correctors[c_idx];
+                const double c_norm =
+                    static_cast<double>(c.real()) * c.real() + static_cast<double>(c.imag()) * c.imag();
+                if (c_norm <= 0.0 || ant < 0 || ant >= num_ant)
+                    continue;
+                const double s = sefd[static_cast<std::size_t>(f) * num_ant + ant];
+                if (!std::isfinite(s) || s <= 0.0) {
+                    correctors[c_idx] = std::complex<float>(0.0f, 0.0f);
+                    continue;
+                }
+                sum_old2 += c_norm;
+                const float inv_s = static_cast<float>(1.0 / s);
+                correctors[c_idx] *= inv_s;
+                sum_new2 += c_norm * static_cast<double>(inv_s) * static_cast<double>(inv_s);
+            }
+            if (sum_old2 > 0.0 && sum_new2 > 0.0) {
+                const float scale = static_cast<float>(std::sqrt(sum_old2 / sum_new2));
+                for (int e = 0; e < n_elem; ++e) {
+                    const int e_pol =
+                        (np == 1) ? 0 : (planar_pol ? (e / std::max(1, n_elem / np)) : (e % np));
+                    if (e_pol != pol)
+                        continue;
+                    correctors[static_cast<std::size_t>(f) * n_elem + e] *= scale;
+                }
+            }
+        }
+    }
+}
+
 std::vector<int64_t> window_indices(int64_t t, int64_t last_index, int half_window, int guard) {
     if (half_window < 1 || guard < 0 || guard >= half_window)
         throw std::invalid_argument("need half_window >= 1 and 0 <= guard < half_window");
