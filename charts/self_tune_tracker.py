@@ -26,6 +26,7 @@ import os
 import re
 import socket
 import struct
+import subprocess
 import sys
 import time
 import urllib.error
@@ -33,7 +34,7 @@ import urllib.parse
 import urllib.request
 import warnings
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -1599,7 +1600,20 @@ class WaterfallTailer:
         dt_med = float(np.median(np.diff(times))) if len(times) >= 2 else None
         last_ts = times[-1] if times else None
 
-        return {
+        sb0_ts = np.nanmean(clean_rel_full[:, :N_CHAN_SUBBAND], axis=1)
+        sb1_ts = np.nanmean(clean_rel_full[:, N_CHAN_SUBBAND:], axis=1)
+        both_ok = np.isfinite(sb0_ts) & np.isfinite(sb1_ts)
+        sb0_sb1_r: Optional[float] = None
+        if int(np.sum(both_ok)) >= 4:
+            s0, s1 = sb0_ts[both_ok], sb1_ts[both_ok]
+            if float(np.std(s0)) > 1e-12 and float(np.std(s1)) > 1e-12:
+                sb0_sb1_r = round(float(np.corrcoef(s0, s1)[0, 1]), 4)
+
+        bb_norm = 1.0 + np.nanmean(clean_rel_full, axis=1)
+        dt_eff = float(dt_med) if (dt_med is not None and dt_med > 0.0) else 1.024
+        adev_hdev = compute_adev_hdev_summary(bb_norm, dt_eff)
+
+        qa_out: Dict[str, Any] = {
             "resolved_run_dir": self._resolved_dir,
             "total_frames": int(self.total_aligned),
             "window_frames": int(n_t),
@@ -1640,7 +1654,42 @@ class WaterfallTailer:
                 [float(t) if t is not None else np.nan for t in self.aligned_times], dtype=np.float64
             ),
             "_recent_detrended_rel": det_res,
+            "sb0_sb1_pearson_r": sb0_sb1_r,
         }
+        qa_out.update(adev_hdev)
+        return qa_out
+
+
+def compute_adev_hdev_summary(
+    series: np.ndarray,
+    dt_s: float,
+    taus_s: Sequence[float] = (1.0, 8.0, 16.0, 60.0, 120.0, 300.0),
+) -> Dict[str, float]:
+    """Compute overlapping Allan (ADEV) and linear-drift-invariant Hadamard (HDEV) deviation."""
+    y = np.asarray(series, dtype=np.float64)
+    y = y[np.isfinite(y)]
+    n = int(y.size)
+    if n < 5 or dt_s <= 0.0:
+        return {}
+    csum = np.concatenate([[0.0], np.cumsum(y)])
+    x = np.concatenate([[0.0], np.cumsum(y) * float(dt_s)])
+    out: Dict[str, float] = {}
+    for target_tau in taus_s:
+        m = max(1, int(round(float(target_tau) / float(dt_s))))
+        tau = m * float(dt_s)
+        tag = f"{int(round(float(target_tau)))}s"
+        if 2 * m < n:
+            ybar = (csum[m:] - csum[:-m]) / float(m)
+            diffs = ybar[m:] - ybar[:-m]
+            if diffs.size >= 2:
+                avar = 0.5 * float(np.mean(diffs * diffs))
+                out[f"adev_tau_{tag}"] = round(float(np.sqrt(max(avar, 0.0))), 6)
+        if 3 * m < x.size:
+            d3 = x[3 * m :] - 3.0 * x[2 * m : -m] + 3.0 * x[m : -2 * m] - x[: -3 * m]
+            if d3.size >= 2:
+                hvar = float(np.mean(d3 * d3)) / (6.0 * tau * tau)
+                out[f"hdev_tau_{tag}"] = round(float(np.sqrt(max(hvar, 0.0))), 6)
+    return out
 
 
 def fetch_raw_rfi_channels(base_url: str) -> Tuple[List[Dict[str, Any]], bool]:
@@ -2281,6 +2330,8 @@ class EnvironmentTelemetryCollector:
         telemetry_csv: Optional[str] = None,
         include_local_hwmon: bool = True,
         timeout_s: float = 1.5,
+        alpha_t_db_per_c: float = 0.0,
+        ref_temp_c: float = 20.0,
     ) -> None:
         self.prometheus_url = prometheus_url or os.environ.get("CHARTS_PROMETHEUS_URL")
         self.prom_queries = prom_queries or {
@@ -2299,6 +2350,8 @@ class EnvironmentTelemetryCollector:
         self.telemetry_csv = telemetry_csv or os.environ.get("CHARTS_TELEMETRY_CSV")
         self.include_local_hwmon = include_local_hwmon
         self.timeout_s = float(timeout_s)
+        self.alpha_t_db_per_c = float(alpha_t_db_per_c)
+        self.ref_temp_c = float(ref_temp_c)
 
     def _poll_prometheus(self) -> Tuple[Dict[str, float], str]:
         if not self.prometheus_url:
@@ -2419,6 +2472,22 @@ class EnvironmentTelemetryCollector:
             if st != "disabled":
                 sources_status[name] = st
             metrics.update(vals)
+
+        lna_temp_c = metrics.get("ambient_temp_c")
+        if lna_temp_c is None:
+            for k, v in metrics.items():
+                if ("systin" in k or "lna_temp" in k) and isinstance(v, (int, float)):
+                    lna_temp_c = float(v)
+                    break
+        if lna_temp_c is None and isinstance(metrics.get("host_max_temp_c"), (int, float)):
+            lna_temp_c = float(metrics["host_max_temp_c"])
+
+        if lna_temp_c is not None:
+            metrics["lna_temp_c"] = round(float(lna_temp_c), 3)
+            if abs(self.alpha_t_db_per_c) > 0.0:
+                drift_db = self.alpha_t_db_per_c * (float(lna_temp_c) - self.ref_temp_c)
+                metrics["thermal_gain_drift_db"] = round(drift_db, 4)
+                metrics["thermal_gain_scale"] = round(float(10.0 ** (-drift_db / 10.0)), 6)
 
         return {
             "timestamp_unix": round(now, 3),
@@ -2647,6 +2716,108 @@ def correlate_environment_telemetry(
     return summary
 
 
+def _default_rfsoc_probe(host: str) -> Dict[str, Any]:
+    """Run non-blocking 1s ping and ARP neighbor probe for an RFSoC host."""
+    ping_ok = False
+    arp_state = "unknown"
+    try:
+        pr = subprocess.run(
+            ["ping", "-c", "1", "-W", "1", host],
+            capture_output=True,
+            text=True,
+            timeout=2.5,
+            check=False,
+        )
+        ping_ok = pr.returncode == 0
+    except Exception:
+        ping_ok = False
+    try:
+        ar = subprocess.run(
+            ["ip", "neigh", "show", host],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+        txt = (ar.stdout or "").strip()
+        if txt:
+            arp_state = txt.splitlines()[0].split()[-1]
+    except Exception:
+        pass
+    return {"host": host, "ping_ok": ping_ok, "arp_state": arp_state}
+
+
+class RfsocRecoveryWatchdog:
+    """Automated RFSoC ping/ARP & DPDK sequence-staleness recovery watchdog (OPS-6.2)."""
+
+    def __init__(
+        self,
+        rfsoc_hosts: Sequence[str] = (),
+        stale_threshold_s: float = 10.0,
+        cooldown_s: float = 120.0,
+        recovery_cmd: Optional[str] = None,
+        probe_fn: Optional[Callable[[str], Dict[str, Any]]] = None,
+        recovery_fn: Optional[Callable[[List[str]], Tuple[bool, str]]] = None,
+    ) -> None:
+        self.rfsoc_hosts = [str(h).strip() for h in rfsoc_hosts if str(h).strip()]
+        self.stale_threshold_s = float(stale_threshold_s)
+        self.cooldown_s = float(cooldown_s)
+        self.recovery_cmd = recovery_cmd
+        self.probe_fn = probe_fn or _default_rfsoc_probe
+        self.recovery_fn = recovery_fn
+        self.last_recovery_ts: float = -1.0e18
+
+    def check_and_recover(self, now: float, frame_age_s: Optional[float]) -> Dict[str, Any]:
+        """Check whether stream staleness exceeds threshold and run RFSoC recovery probes."""
+        if not self.rfsoc_hosts:
+            return {"enabled": False, "triggered": False}
+        if frame_age_s is None or float(frame_age_s) <= self.stale_threshold_s:
+            return {"enabled": True, "triggered": False, "frame_age_s": frame_age_s}
+        if (now - self.last_recovery_ts) < self.cooldown_s:
+            return {
+                "enabled": True,
+                "triggered": False,
+                "cooldown_active": True,
+                "frame_age_s": float(frame_age_s),
+            }
+
+        probes = [self.probe_fn(h) for h in self.rfsoc_hosts]
+        unhealthy = [p["host"] for p in probes if not p.get("ping_ok")]
+        recovery_ok = True
+        message = "all_hosts_ping_ok"
+        if self.recovery_fn is not None:
+            recovery_ok, message = self.recovery_fn(unhealthy or list(self.rfsoc_hosts))
+        elif self.recovery_cmd:
+            try:
+                res = subprocess.run(
+                    self.recovery_cmd,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=15.0,
+                    check=False,
+                )
+                recovery_ok = res.returncode == 0
+                message = f"cmd_rc={res.returncode}"
+            except Exception as exc:
+                recovery_ok = False
+                message = f"cmd_error:{exc}"
+        elif unhealthy:
+            recovery_ok = False
+            message = f"unreachable:{','.join(unhealthy)}"
+
+        self.last_recovery_ts = now
+        return {
+            "enabled": True,
+            "triggered": True,
+            "frame_age_s": float(frame_age_s),
+            "probes": probes,
+            "unhealthy_hosts": unhealthy,
+            "recovery_ok": bool(recovery_ok),
+            "message": message,
+        }
+
+
 class ClosedLoopDaemon:
     """Stateful closed-loop supervisor bridging GPU telemetry, waterfall QA, and calibration."""
 
@@ -2663,6 +2834,7 @@ class ClosedLoopDaemon:
         telemetry_jsonl: Optional[str] = None,
         live_waterfall_png: Optional[str] = None,
         clim_pct: float = 2.5,
+        rfsoc_watchdog: Optional[RfsocRecoveryWatchdog] = None,
     ) -> None:
         self.base_url = base_url
         self.run_dir = run_dir
@@ -2685,6 +2857,7 @@ class ClosedLoopDaemon:
         self.env_collector = env_collector or EnvironmentTelemetryCollector()
         self.live_waterfall_png = live_waterfall_png
         self.clim_pct = float(clim_pct)
+        self.rfsoc_watchdog = rfsoc_watchdog or RfsocRecoveryWatchdog()
 
         self.tailer = WaterfallTailer(run_dir=run_dir, max_frames=300)
         self.prev_rfi_gains: Optional[Tuple[np.ndarray, Optional[np.ndarray]]] = None
@@ -2847,6 +3020,15 @@ class ClosedLoopDaemon:
         if is_stale:
             cycle_actions.append(f"stale_stream(age={float(age_s):.0f}s)")
 
+        watchdog_info = self.rfsoc_watchdog.check_and_recover(now, age_s)
+        if watchdog_info.get("triggered"):
+            wmsg = (
+                f"rfsoc_watchdog(age={float(age_s):.1f}s,"
+                f"ok={watchdog_info.get('recovery_ok')},{watchdog_info.get('message')})"
+            )
+            cycle_actions.append(wmsg)
+            self._record_action(wmsg)
+
         # 2. Loop A: Pre-whitening RFI gain update (raw channel power domain when exposed)
         min_delta = 0.0 if self.prev_rfi_gains is None else 0.005
         pushed, self.prev_rfi_gains, rfi_gain_info = push_rfi_gains(
@@ -2942,7 +3124,12 @@ class ClosedLoopDaemon:
             "rfi_flagged_pct": overall_flagged_pct,
             "active_antennas_count": len(ant.get("active_physical_antennas", [])),
             "gains_generation": trk.get("gains_generation"),
+            "sb0_sb1_pearson_r": qa.get("sb0_sb1_pearson_r"),
+            "watchdog_triggered": bool(watchdog_info.get("triggered", False)),
         }
+        for k_qa, v_qa in qa.items():
+            if k_qa.startswith(("adev_tau_", "hdev_tau_")):
+                telemetry_row[k_qa] = v_qa
         telemetry_row.update(env_snap.get("metrics", {}))
         try:
             tpath = Path(self.telemetry_jsonl)
@@ -3024,6 +3211,7 @@ class ClosedLoopDaemon:
             "waterfall_qa": qa,
             "environment": env_snap,
             "calibration_watch": cal_info,
+            "rfsoc_watchdog": watchdog_info,
             "cycle_actions": cycle_actions,
             "recent_actions": list(self.action_log),
         }
@@ -3045,6 +3233,7 @@ def run_daemon(
     telemetry_jsonl: Optional[str] = None,
     live_waterfall_png: Optional[str] = None,
     clim_pct: float = 2.5,
+    rfsoc_watchdog: Optional[RfsocRecoveryWatchdog] = None,
 ) -> None:
     print(
         f"Starting closed-loop tracker daemon (url={base_url}, run_dir={run_dir}, "
@@ -3063,6 +3252,7 @@ def run_daemon(
         telemetry_jsonl=telemetry_jsonl,
         live_waterfall_png=live_waterfall_png,
         clim_pct=clim_pct,
+        rfsoc_watchdog=rfsoc_watchdog,
     )
     while True:
         try:
@@ -3241,6 +3431,11 @@ def main() -> int:
     )
     parser.add_argument("--monitor", action="store_true", help="Print live pipeline + daemon QA status")
     parser.add_argument("--monitor-follow", action="store_true", help="Continuously refresh --monitor")
+    parser.add_argument("--lna-alpha-db-per-c", type=float, default=0.0, help="LNA thermal gain-drift slope alpha_T (dB/C)")
+    parser.add_argument("--lna-ref-temp-c", type=float, default=20.0, help="Reference ambient temperature T_0 (C)")
+    parser.add_argument("--rfsoc-hosts", default="", help="Comma-separated RFSoC management IPs for staleness watchdog")
+    parser.add_argument("--stale-recovery-s", type=float, default=10.0, help="Frame staleness (s) triggering RFSoC ping/ARP check")
+    parser.add_argument("--suggest-off-beams", metavar="L,M", help="Suggest grating-lobe-safe OFF (l, m) beams for target L,M")
 
     args = parser.parse_args()
     effective_run_dir = args.run_dir or args.analyze_run
@@ -3255,17 +3450,58 @@ def main() -> int:
             args.monitor,
             args.monitor_follow,
             args.correlate_telemetry,
+            args.suggest_off_beams,
         ]
     ):
         parser.print_help()
         return 1
+
+    if args.suggest_off_beams:
+        from rfi_mitigation_tools import (
+            FREQS_MHZ,
+            PUDAHUEL_KNOWN_INTERFERERS,
+            find_optimal_off_beams,
+        )
+
+        parts = [float(x.strip()) for x in args.suggest_off_beams.split(",")]
+        if len(parts) != 2:
+            print("--suggest-off-beams expects 'L,M' floats", file=sys.stderr)
+            return 2
+        cols, rows = np.meshgrid(np.arange(8), np.arange(8))
+        pos_64 = np.column_stack([-cols.ravel() * 0.6, rows.ravel() * 0.6, np.zeros(64)])
+        cands = find_optimal_off_beams(
+            pos_64,
+            FREQS_MHZ[::4],
+            target_l=parts[0],
+            target_m=parts[1],
+            interferers=tuple(PUDAHUEL_KNOWN_INTERFERERS.values()),
+            top_k=3,
+        )
+        print(json.dumps([c.__dict__ for c in cands], indent=2))
+        if not any(
+            [
+                args.analyze_run,
+                args.push_rfi_gains,
+                args.reload_cal_gains,
+                args.check_antennas,
+                args.daemon,
+                args.monitor,
+                args.monitor_follow,
+                args.correlate_telemetry,
+            ]
+        ):
+            return 0
 
     env_collector = EnvironmentTelemetryCollector(
         prometheus_url=args.prometheus_url,
         lna_json_url=args.lna_json_url,
         rigol_host=args.rigol_host,
         telemetry_csv=args.telemetry_csv,
+        alpha_t_db_per_c=args.lna_alpha_db_per_c,
+        ref_temp_c=args.lna_ref_temp_c,
     )
+    rfsoc_hosts = [h.strip() for h in args.rfsoc_hosts.split(",") if h.strip()]
+    watchdog = RfsocRecoveryWatchdog(rfsoc_hosts=rfsoc_hosts, stale_threshold_s=args.stale_recovery_s)
 
     if args.analyze_run:
         analyze_run(
@@ -3316,6 +3552,7 @@ def main() -> int:
             telemetry_jsonl=args.telemetry_jsonl,
             live_waterfall_png=args.live_waterfall,
             clim_pct=args.clim,
+            rfsoc_watchdog=watchdog,
         )
 
     if args.monitor or args.monitor_follow:

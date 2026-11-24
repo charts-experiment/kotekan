@@ -735,6 +735,86 @@ class TestSelfTuneTrackerClosedLoop(unittest.TestCase):
             self.assertEqual(render_mock.call_count, 1)
             self.assertEqual(st2["cycle"], 2)
 
+    def test_thermal_compensator_and_rfsoc_watchdog_and_hdev_telemetry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tlog = str(Path(tmp) / "telemetry.jsonl")
+            probes_called = []
+            recoveries_called = []
+
+            def fake_probe(host: str):
+                probes_called.append(host)
+                return {"host": host, "ping_ok": False, "arp_state": "INCOMPLETE"}
+
+            def fake_recovery(hosts):
+                recoveries_called.append(list(hosts))
+                return True, f"reset:{','.join(hosts)}"
+
+            env = stt.EnvironmentTelemetryCollector(
+                include_local_hwmon=False,
+                alpha_t_db_per_c=0.05,
+                ref_temp_c=20.0,
+            )
+            watchdog = stt.RfsocRecoveryWatchdog(
+                rfsoc_hosts=["10.17.16.20", "10.17.16.21"],
+                stale_threshold_s=10.0,
+                cooldown_s=120.0,
+                probe_fn=fake_probe,
+                recovery_fn=fake_recovery,
+            )
+            daemon = stt.ClosedLoopDaemon(
+                base_url="http://127.0.0.1:12048",
+                run_dir=tmp,
+                telemetry_jsonl=tlog,
+                env_collector=env,
+                rfsoc_watchdog=watchdog,
+            )
+
+            fake_qa = {
+                "total_frames": 100,
+                "window_frames": 100,
+                "seq_gaps": 2,
+                "last_frame_age_s": 14.5,  # > 10s triggers RFSoC watchdog (<=120s so not legacy stale)
+                "last_frame_utc": "2026-11-18T03:45:37Z",
+                "sb0_sb1_pearson_r": -0.7684,
+                "adev_tau_1s": 0.0012,
+                "hdev_tau_1s": 0.0004,
+            }
+
+            def fake_get(_base: str, path: str, timeout: float = 5.0):
+                if path == "/rfi_mitigation/status":
+                    return {"enabled": True, "flagged_channels": 0, "total_channels": 672, "static_notch_bands_mhz": []}
+                if path == "/direct_tracker/status":
+                    return {"gains_generation": 1, "apply_calibration_gains": True}
+                if path == "/antenna_mask/status":
+                    return {"active_physical_antennas": [0, 4, 32, 36], "dead_antennas": 0, "saturated_antennas": 0, "antennas": []}
+                if path == "/rfi_mitigation/channels":
+                    return {"channels": []}
+                if path == "/endpoints":
+                    return {"GET": []}
+                raise AssertionError(path)
+
+            with (
+                mock.patch.object(stt, "http_get_json", side_effect=fake_get),
+                mock.patch.object(stt, "push_rfi_gains", return_value=(False, None, {"source": "none"})),
+                mock.patch.object(daemon.tailer, "poll", return_value=0),
+                mock.patch.object(daemon.tailer, "compute_qa", return_value=dict(fake_qa)),
+                mock.patch.object(env, "_poll_prometheus", return_value=({"ambient_temp_c": 30.0}, "ok")),
+            ):
+                st1 = daemon.step()
+                # Second step inside cooldown must not re-fire recovery
+                st2 = daemon.step()
+
+            self.assertEqual(probes_called, ["10.17.16.20", "10.17.16.21"])
+            self.assertEqual(recoveries_called, [["10.17.16.20", "10.17.16.21"]])
+            self.assertTrue(st1["rfsoc_watchdog"]["triggered"])
+            self.assertFalse(st2["rfsoc_watchdog"]["triggered"])
+            self.assertTrue(st2["rfsoc_watchdog"]["cooldown_active"])
+            self.assertAlmostEqual(st1["environment"]["metrics"]["thermal_gain_drift_db"], 0.5, places=4)
+            rows = [json.loads(ln) for ln in Path(tlog).read_text(encoding="utf-8").splitlines() if ln.strip()]
+            self.assertEqual(rows[0]["sb0_sb1_pearson_r"], -0.7684)
+            self.assertEqual(rows[0]["hdev_tau_1s"], 0.0004)
+            self.assertTrue(rows[0]["watchdog_triggered"])
+
 
 if __name__ == "__main__":
     unittest.main()

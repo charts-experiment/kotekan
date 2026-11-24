@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Tuple
@@ -20,6 +21,12 @@ import numpy as np
 from astropy.coordinates import EarthLocation, SkyCoord
 from astropy.time import Time
 from scipy.ndimage import uniform_filter1d
+
+_CHARTS_DIR = str(Path(__file__).resolve().parents[1])
+if _CHARTS_DIR not in sys.path:
+    sys.path.insert(0, _CHARTS_DIR)
+
+from rfi_mitigation_tools import CoherentCombCanceller  # noqa: E402
 
 from beam_io import (
     FREQS_MHZ,
@@ -190,6 +197,8 @@ def main():
     p.add_argument("--run-dir", required=True)
     p.add_argument("--target", default="auto", choices=["auto", "vela", "b0950", "b1749"])
     p.add_argument("--n-bins", type=int, default=32)
+    p.add_argument("--comb-cancel", dest="comb_cancel", action="store_true", default=True)
+    p.add_argument("--no-comb-cancel", dest="comb_cancel", action="store_false")
     args = p.parse_args()
 
     run_dir = Path(args.run_dir)
@@ -335,7 +344,25 @@ def main():
     ephem_snr_cal = float(ephem_snrs[ephem_idx])
 
     _, ephem_snr_uncal = fold_1d(dedisperse_1d(norm1, f_ch, dm_cat, cadence_s), t_rel_s, ephem_best_p, n_bins=args.n_bins)
-    _, ephem_snr_off = fold_1d(dedisperse_1d(norm2, f_ch, dm_cat, cadence_s), t_rel_s, ephem_best_p, n_bins=args.n_bins)
+    ts_off_cat = dedisperse_1d(norm2, f_ch, dm_cat, cadence_s)
+    _, ephem_snr_off = fold_1d(ts_off_cat, t_rel_s, ephem_best_p, n_bins=args.n_bins)
+
+    comb_diag: Dict[str, Any] = {"enabled": bool(args.comb_cancel), "applied": False}
+    if args.comb_cancel and len(ts_cat) >= 32:
+        try:
+            canceller = CoherentCombCanceller()
+            comb_res = canceller.cancel(ts_cat, ts_off_cat, cadence_s)
+            _, snr_after_comb = fold_1d(comb_res.cleaned_on, t_rel_s, ephem_best_p, n_bins=args.n_bins)
+            comb_diag = {
+                "enabled": True,
+                "applied": True,
+                "comb_freqs_hz": [round(float(x), 4) for x in comb_res.comb_freqs_hz],
+                "comb_suppression_db": round(float(comb_res.comb_suppression_db), 3),
+                "snr_cal_before_comb": round(float(ephem_snr_cal), 3),
+                "snr_cal_after_comb": round(float(snr_after_comb), 3),
+            }
+        except Exception as exc:
+            comb_diag["error"] = str(exc)
     _, ephem_snr_rev = fold_1d(dedisperse_1d(norm0, FREQS_MHZ[::-1][ch_idx], dm_cat, cadence_s), t_rel_s, ephem_best_p, n_bins=args.n_bins)
     ts_dm0_ep = ts_dm_cache.get(0.0)
     if ts_dm0_ep is None:
@@ -450,6 +477,7 @@ def main():
             "snr": round(float(blind_best_snr), 3),
         },
         "ephemeris_locked_check": ephem_locked_check,
+        "comb_cancellation": comb_diag,
         "periodic_rfi_fft_peaks_hz": fft_rfi_diag,
         "subband_alignment_at_cat_dm": subband_alignment,
         "channel_order_check_at_cat_dm": {
