@@ -64,7 +64,9 @@ struct TransientFrameMetrics {
 void launch_transient_detection_metrics(const float2* d_voltages, float2* d_metrics,
                                         std::size_t n_time, std::size_t n_freq,
                                         std::size_t num_beams, std::size_t max_beams_stride,
-                                        cudaStream_t stream = 0);
+                                        cudaStream_t stream = 0,
+                                        const std::uint8_t* d_rfi_mask = nullptr,
+                                        std::size_t chunk_size = 256);
 
 /**
  * @brief Host evaluation of the combined detection logic over channel metrics.

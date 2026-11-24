@@ -81,6 +81,7 @@ struct RfiMitigationConfig {
     float shoulder_sigma_threshold = 2.5f;        ///< Elevation Z-score required to flag a neighbor shoulder
     int edge_channels_to_ignore = 0;              ///< Exclude PFB roll-off channels from passband baseline
     bool enable_persistent_ema = true;            ///< Track slow cross-frame temporal median baseline (EMA)
+    bool enable_ema_freq_prewhite = true;         ///< Pre-whiten stationary passband ripple via EMA before RFI_FREQ_MAD
     float ema_alpha = 0.02f;                      ///< Exponential moving average update factor per clean frame
 
     /// Optional static frequency notch intervals [start_mhz, end_mhz]
