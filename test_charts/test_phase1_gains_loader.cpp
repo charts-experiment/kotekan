@@ -38,6 +38,31 @@ static void write_test_npy(const std::string& path, long rows, long cols, const 
     out.write(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(std::complex<double>));
 }
 
+template <typename T>
+static void write_test_real_npy(const std::string& path, long rows, long cols, bool is_1d,
+                                const std::vector<T>& data) {
+    std::ofstream out(path, std::ios::binary);
+    if (!out)
+        throw std::runtime_error("Cannot create test npy: " + path);
+    const char magic[6] = {'\x93', 'N', 'U', 'M', 'P', 'Y'};
+    out.write(magic, 6);
+    unsigned char ver[2] = {1, 0};
+    out.write(reinterpret_cast<char*>(ver), 2);
+    const std::string descr = (sizeof(T) == 4) ? "'<f4'" : "'<f8'";
+    const std::string shape = is_1d
+                                  ? ("(" + std::to_string(cols) + ",)")
+                                  : ("(" + std::to_string(rows) + ", " + std::to_string(cols) + ")");
+    std::string header = "{'descr': " + descr + ", 'fortran_order': False, 'shape': " + shape + ", }";
+    size_t total_len = 10 + header.size() + 1;
+    size_t pad = (64 - (total_len % 64)) % 64;
+    header.append(pad, ' ');
+    header.push_back('\n');
+    uint16_t hlen = static_cast<uint16_t>(header.size());
+    out.write(reinterpret_cast<char*>(&hlen), 2);
+    out.write(header.data(), header.size());
+    out.write(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(T));
+}
+
 int main() {
     std::cout << "========================================================\n";
     std::cout << "[Phase 1] Dynamic Gains Loader & Calibration Math Unit Tests\n";
@@ -355,6 +380,65 @@ int main() {
         }
         std::filesystem::remove(tmp_conj);
         std::cout << "   conjugate_gains=true conjugates, conjugate_gains=false preserves [PASS]\n";
+    }
+
+    // -------------------------------------------------------------------------
+    // 6. Inverse-SEFD / maxSNR Weighting (CAL-2.1)
+    // -------------------------------------------------------------------------
+    std::cout << "6. Testing load_sefd_weights_npy & apply_inverse_sefd_weights...\n";
+    {
+        const std::string tmp_sefd1d =
+            (std::filesystem::temp_directory_path() / "test_sefd_1d.npy").string();
+        const std::string tmp_sefd2d =
+            (std::filesystem::temp_directory_path() / "test_sefd_2d.npy").string();
+
+        // Ant 0 SEFD=100, Ant 5 SEFD=400, Ant 32 SEFD=200, Ant 37 SEFD=NaN (dropped)
+        std::vector<float> s1d = {100.0f, 400.0f, 200.0f, std::numeric_limits<float>::quiet_NaN()};
+        write_test_real_npy<float>(tmp_sefd1d, 1, 4, true, s1d);
+        const auto sefd1d =
+            charts_mvdr::load_sefd_weights_npy(tmp_sefd1d, 0, 2, 64, active_antennas);
+        assert(std::abs(sefd1d[0 * 64 + 0] - 100.0) < 1e-6);
+        assert(std::abs(sefd1d[1 * 64 + 5] - 400.0) < 1e-6);
+        assert(sefd1d[0 * 64 + 37] == 0.0);
+
+        // 2D float64 (4 chans x 4 subset ants) sliced at first_channel=1, num_freq=2
+        std::vector<double> s2d(4 * 4, 200.0);
+        for (int f = 0; f < 4; ++f) {
+            s2d[f * 4 + 0] = 100.0;
+            s2d[f * 4 + 1] = 400.0;
+            s2d[f * 4 + 2] = 200.0;
+            s2d[f * 4 + 3] = 200.0;
+        }
+        write_test_real_npy<double>(tmp_sefd2d, 4, 4, false, s2d);
+        const auto sefd2d =
+            charts_mvdr::load_sefd_weights_npy(tmp_sefd2d, 1, 2, 64, active_antennas);
+
+        auto elem_to_ant = charts_mvdr::element_to_antenna(64, "descending");
+        std::vector<std::complex<double>> g_test(2 * 64, std::complex<double>(0.0, 0.0));
+        for (int f = 0; f < 2; ++f) {
+            for (int a : active_antennas) {
+                g_test[f * 64 + a] = std::complex<double>(1.0, 0.0);
+            }
+        }
+        auto corr = charts_mvdr::calibration_correctors(g_test, 2, 64, elem_to_ant);
+        double norm_before = 0.0;
+        for (int e = 0; e < 64; ++e)
+            norm_before += std::norm(corr[e]);
+
+        charts_mvdr::apply_inverse_sefd_weights(corr, sefd2d, 2, 64, elem_to_ant, 1, false);
+        double norm_after = 0.0;
+        for (int e = 0; e < 64; ++e)
+            norm_after += std::norm(corr[e]);
+        assert(std::abs(norm_after - norm_before) < 1e-5);
+
+        // Descending order: raw e0=63 -> ant 0 (SEFD=100), raw e1=58 -> ant 5 (SEFD=400)
+        const float w0 = std::abs(corr[63]);
+        const float w5 = std::abs(corr[58]);
+        assert(std::abs((w0 / w5) - 4.0f) < 1e-5f);
+
+        std::filesystem::remove(tmp_sefd1d);
+        std::filesystem::remove(tmp_sefd2d);
+        std::cout << "   Inverse-SEFD weights (|w0|/|w5|=" << (w0 / w5) << ", norm preserved) [PASS]\n";
     }
 
     std::cout << "\n========================================================\n";

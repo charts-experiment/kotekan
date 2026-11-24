@@ -8,12 +8,22 @@ import glob
 import json
 import os
 import struct
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from charts_constants import C_LIGHT, DELTA_TIME, FREQ
+
+_CHARTS_DIR = str(Path(__file__).resolve().parents[1])
+if _CHARTS_DIR not in sys.path:
+    sys.path.insert(0, _CHARTS_DIR)
+
+from primary_beam import (  # noqa: E402
+    effective_beam_response_sq as _pb_effective_beam_response_sq,
+    super_gaussian_primary_beam,
+)
 
 FREQS_MHZ = np.asarray(FREQ, dtype=np.float64)
 N_CHAN_SB = 336
@@ -322,6 +332,31 @@ def theoretical_array_factor_sq(
     k = 2.0 * np.pi * np.asarray(freqs_mhz, dtype=np.float64) * 1e6 / C_LIGHT_MPS
     af = np.mean(np.exp(1j * k[:, None] * delays[None, :]), axis=1)
     return np.abs(af) ** 2
+
+
+def primary_beam_gain(
+    l: float,
+    m: float,
+    freqs_mhz: np.ndarray,
+    p: float = 3.0,
+) -> np.ndarray:
+    """CHARTS chromatic super-Gaussian (p=3) primary element power gain."""
+    return super_gaussian_primary_beam(l, m, freqs_mhz, p=p)
+
+
+def effective_beam_response_sq(
+    l_off: float,
+    m_off: float,
+    l_src: float,
+    m_src: float,
+    freqs_mhz: np.ndarray,
+    pos: np.ndarray = POS4,
+    primary_beam: str = "super_gaussian",
+) -> np.ndarray:
+    """Effective forward beam response |AF(off; src)|^2 * B_elem(src, nu)."""
+    return _pb_effective_beam_response_sq(
+        l_off, m_off, l_src, m_src, freqs_mhz, pos_enu=pos, primary_beam=primary_beam
+    )
 
 
 def load_jsonl(path: Path) -> List[Dict[str, Any]]:

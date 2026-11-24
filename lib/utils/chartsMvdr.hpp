@@ -85,6 +85,22 @@ std::vector<std::complex<float>> calibration_correctors(const std::vector<cplx>&
                                                         const std::vector<int>& elem_to_ant,
                                                         int* num_dropped = nullptr);
 
+/// Read per-antenna or per-(freq, antenna) SEFD weights (Jy) from a NumPy .npy file of shape
+/// (n_ant,), (n_freq, n_ant), or subset columns with antenna_subset, dtype float32 or float64,
+/// little-endian C order. Returns [num_freq][num_elements] in antenna order; invalid, <=0, or
+/// non-finite entries are returned as 0.0.
+std::vector<double> load_sefd_weights_npy(const std::string& path, int first_channel, int num_freq,
+                                          int num_elements,
+                                          const std::vector<int>& antenna_subset = {});
+
+/// Scale calibration correctors [freq][element] by 1 / SEFD[freq, elem_to_ant[e]] (zeroing
+/// invalid/non-positive SEFD elements) while preserving total per-channel (and per-pol when
+/// num_pols == 2, interleaved or planar) Frobenius norm across valid elements.
+void apply_inverse_sefd_weights(std::vector<std::complex<float>>& correctors,
+                                const std::vector<double>& sefd, int num_freq, int num_ant,
+                                const std::vector<int>& elem_to_ant, int num_pols = 1,
+                                bool planar_pol = false);
+
 /// Weight update rule: the first frame whose window holds at least min_frames frames, then
 /// frames with t % update_every == 0 (and at least min_frames frames in the window).
 inline bool should_update(int64_t t, bool has_weights, int update_every, std::size_t n_window,

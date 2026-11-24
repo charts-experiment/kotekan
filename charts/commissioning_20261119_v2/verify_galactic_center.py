@@ -22,6 +22,7 @@ from beam_io import (
     atomic_savefig,
     atomic_write_text,
     clean_channel_mask,
+    effective_beam_response_sq,
     load_dual_subband_beam_power,
     load_jsonl,
     theoretical_array_factor_sq,
@@ -123,7 +124,7 @@ def main():
                 if bid in tg:
                     af_samp[si, bid] = float(
                         np.mean(
-                            theoretical_array_factor_sq(
+                            effective_beam_response_sq(
                                 float(tg[bid]["l0"]),
                                 float(tg[bid]["m0"]),
                                 float(s_tgt["l0"]),

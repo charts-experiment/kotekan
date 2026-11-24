@@ -17,10 +17,12 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import math
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple, Union
 
 import astropy.units as u
 import matplotlib
@@ -33,11 +35,19 @@ from astropy.time import Time
 from scipy.ndimage import median_filter, uniform_filter1d
 from scipy.signal import butter, filtfilt
 
-from charts_constants import CHARTS_ANTENNA_REF_LOCATION, FREQ
+from charts_constants import CHARTS_ANTENNA_REF_LOCATION, C_LIGHT, FREQ
 from charts_utils.cal.coordinates import CHARTSArray, geometric_visibility_phase
 from charts_utils.core.antenna_indices import charts_to_kotekan_raw
 from charts_utils.core.gpu_frames import read_gpu_corr_frame_header
 from charts_utils.core.io import extract_gpu_corr_visibility, load_gpu_corr_frame
+
+_CHARTS_DIR = str(Path(__file__).resolve().parents[1])
+if _CHARTS_DIR not in sys.path:
+    sys.path.insert(0, _CHARTS_DIR)
+
+from primary_beam import super_gaussian_primary_beam  # noqa: E402
+
+C_LIGHT_MPS = float(C_LIGHT.value) if hasattr(C_LIGHT, "value") else float(C_LIGHT)
 
 ANTS = [0, 4, 32, 36]
 ANT_LABELS = ["Ant 0 (D00, SE)", "Ant 4 (D07, SW)", "Ant 32 (A10, NE)", "Ant 36 (A17, NW)"]
@@ -81,6 +91,185 @@ def solve_wals_gains_batch(fs_triu: np.ndarray, niter: int = 6) -> np.ndarray:
     ref_ph = np.exp(-1j * np.angle(u1[:, :, 0:1]))
     gains = u1 * ref_ph * np.sqrt(l1[:, :, None])
     return np.transpose(gains, (0, 2, 1)).astype(np.complex64)
+
+
+def solve_eig_spatial_filter_gains(
+    vis_triu: np.ndarray,
+    freqs_mhz: np.ndarray,
+    pos_enu: np.ndarray = POS4,
+    target_lm: Tuple[float, float] = (0.0, 0.0),
+    cone_deg: float = 25.0,
+    n_iter: int = 6,
+) -> np.ndarray:
+    """Solve complex antenna gains via covariance eigen-decomposition spatial filtering (CAL-2.2).
+
+    Separates the target (solar) rank-1 eigenmode from orthogonal horizon/RFI subspaces by
+    projecting onto eigenmodes whose dirty-beam peak lies within `cone_deg` of `target_lm`,
+    then iteratively refining diagonal noise power via WALS. Supports 2D `(N_freq, N_pairs)`
+    or 3D `(N_freq, N_pairs, N_blocks)` input.
+    """
+    arr_in = np.asarray(vis_triu, dtype=np.complex128)
+    squeezed = arr_in.ndim == 2
+    if squeezed:
+        arr_in = arr_in[:, :, None]
+    n_f, n_pairs, n_b = arr_in.shape
+    n_ant = int(round((math.sqrt(1 + 8 * n_pairs) - 1) / 2.0))
+    triu_i, triu_j = np.triu_indices(n_ant)
+
+    ll_1d = np.linspace(-0.98, 0.98, 49)
+    ll, mm = np.meshgrid(ll_1d, ll_1d)
+    disk = (ll * ll + mm * mm) <= 1.0
+    l_v = ll[disk]
+    m_v = mm[disk]
+    n_v = np.sqrt(np.maximum(0.0, 1.0 - l_v * l_v - m_v * m_v))
+    lt, mt = float(target_lm[0]), float(target_lm[1])
+    nt = math.sqrt(max(0.0, 1.0 - lt * lt - mt * mt))
+    sep_deg = np.rad2deg(np.arccos(np.clip(l_v * lt + m_v * mt + n_v * nt, -1.0, 1.0)))
+    sky_dirs = np.stack([l_v, m_v, n_v], axis=-1) # [N_sky, 3]
+    proj = sky_dirs @ np.asarray(pos_enu[:n_ant], dtype=np.float64).T # [N_sky, N_ant]
+
+    gains_out = np.zeros((n_f, n_ant, n_b), dtype=np.complex64)
+    diag_idx = np.arange(n_ant)
+
+    for fi in range(n_f):
+        k_wave = 2.0 * math.pi * float(freqs_mhz[fi]) * 1.0e6 / C_LIGHT_MPS
+        # Match localize_rfi_emitters convention: V_ij = a_i conj(a_j) with a_i = exp(-j k r_i.s)
+        steer = np.exp(-1j * k_wave * proj)
+        for bi in range(n_b):
+            R = np.zeros((n_ant, n_ant), dtype=np.complex128)
+            for p_idx, (i, j) in enumerate(zip(triu_i, triu_j)):
+                val = arr_in[fi, p_idx, bi]
+                R[i, j] = val
+                R[j, i] = np.conj(val)
+            # Zero-diag off-diagonal WALS warm-up if diagonal is missing/unpopulated
+            diag_abs = np.mean(np.abs(np.diag(R)))
+            off_abs = np.max(np.abs(R - np.diag(np.diag(R)))) if n_ant > 1 else 0.0
+            if diag_abs <= 1e-12 and off_abs > 0.0:
+                R[diag_idx, diag_idx] = off_abs * (n_ant - 1)
+                for _ in range(3):
+                    ev, evec = np.linalg.eigh(R)
+                    u1 = evec[:, -1]
+                    l1 = max(float(ev[-1]), 0.0)
+                    R[diag_idx, diag_idx] = l1 * (np.abs(u1) ** 2)
+
+            evals, evecs = np.linalg.eigh(R)
+            sigma_floor = max(0.0, float(np.min(evals)))
+            in_cone = sep_deg <= cone_deg
+            has_cone = bool(np.any(in_cone))
+            keep_modes = []
+            rejected_modes = []
+            best_mode = int(np.argmax(evals))
+            best_ratio = -1.0
+            for k_mode in range(n_ant - 1, -1, -1):
+                lam = float(evals[k_mode])
+                if lam <= 0.0:
+                    continue
+                u_k = evecs[:, k_mode]
+                dirty = np.abs(steer @ np.conj(u_k)) ** 2
+                pk_global = max(float(np.max(dirty)), 1e-30)
+                pk_cone = float(np.max(dirty[in_cone])) if has_cone else 0.0
+                ratio = pk_cone / pk_global
+                if ratio > best_ratio and lam > 1.2 * sigma_floor:
+                    best_ratio = ratio
+                    best_mode = k_mode
+                if ratio >= 0.70 and lam > 1.2 * sigma_floor:
+                    keep_modes.append((lam, u_k))
+                elif lam > 1.2 * sigma_floor:
+                    rejected_modes.append((lam, u_k))
+
+            if not keep_modes and evals[best_mode] > 0.0:
+                keep_modes.append((float(evals[best_mode]), evecs[:, best_mode]))
+                rejected_modes = [
+                    (lam, u_k) for (lam, u_k) in rejected_modes
+                    if not np.allclose(u_k, evecs[:, best_mode])
+                ]
+
+            if keep_modes and rejected_modes:
+                R_filt = R.copy()
+                for lam, u_k in rejected_modes:
+                    R_filt -= (lam - sigma_floor) * np.outer(u_k, np.conj(u_k))
+                ev_c, evec_c = np.linalg.eigh(R_filt)
+                ev_c = np.maximum(ev_c, 0.0)
+                R_filt = (evec_c * ev_c[None, :]) @ evec_c.conj().T
+            else:
+                R_filt = np.zeros((n_ant, n_ant), dtype=np.complex128)
+                for lam, u_k in keep_modes:
+                    R_filt += lam * np.outer(u_k, np.conj(u_k))
+            for _ in range(max(1, n_iter)):
+                ev, evec = np.linalg.eigh(R_filt)
+                u_sol = evec[:, -1]
+                l_sol = max(float(ev[-1]), 0.0)
+                R_filt[diag_idx, diag_idx] = l_sol * (np.abs(u_sol) ** 2)
+
+            ev, evec = np.linalg.eigh(R_filt)
+            u_sol = evec[:, -1]
+            l_sol = max(float(ev[-1]), 0.0)
+            ref_ph = np.exp(-1j * np.angle(u_sol[0]))
+            gains_out[fi, :, bi] = (u_sol * ref_ph * math.sqrt(l_sol)).astype(np.complex64)
+
+    return gains_out[:, :, 0] if squeezed else gains_out
+
+
+def solve_antenna_sefd_from_visibilities(
+    vis_triu: np.ndarray,
+    freqs_mhz: np.ndarray,
+    sun_flux_jy: Union[float, np.ndarray],
+    beam_elem: Optional[np.ndarray] = None,
+    df_hz: float = 300.0e3,
+    tau_s: float = 1.0,
+) -> np.ndarray:
+    """Solve per-antenna SEFD(nu, ant) in Jy from solar cross-correlations (BURSTT-256 Eq. 8).
+
+    Expects `vis_triu` shape `(N_freq, N_pairs)` or `(N_freq, N_pairs, N_t)`. Returns `(N_freq, N_ant)`
+    float64 array in Jy (NaN where fewer than N_ant - 1 valid cross baselines exist).
+    """
+    import math as _m
+
+    arr_in = np.asarray(vis_triu, dtype=np.complex128)
+    if arr_in.ndim == 3:
+        vis_mean = np.mean(arr_in, axis=-1)
+    else:
+        vis_mean = arr_in
+    n_f, n_pairs = vis_mean.shape
+    n_ant = int(round((_m.sqrt(1 + 8 * n_pairs) - 1) / 2.0))
+    triu_i, triu_j = np.triu_indices(n_ant)
+    diag_pairs = [idx for idx, (i, j) in enumerate(zip(triu_i, triu_j)) if i == j]
+    cross_pairs = [(idx, int(i), int(j)) for idx, (i, j) in enumerate(zip(triu_i, triu_j)) if i != j]
+
+    s_sun = np.broadcast_to(np.asarray(sun_flux_jy, dtype=np.float64), (n_f,))
+    b_el = (
+        np.ones(n_f, dtype=np.float64)
+        if beam_elem is None
+        else np.broadcast_to(np.asarray(beam_elem, dtype=np.float64), (n_f,))
+    )
+    bt_sqrt = math.sqrt(max(df_hz * tau_s, 1.0))
+
+    sefd_out = np.full((n_f, n_ant), np.nan, dtype=np.float64)
+    for fi in range(n_f):
+        autos = np.array([max(float(np.real(vis_mean[fi, dp])), 0.0) for dp in diag_pairs], dtype=np.float64)
+        rows_A = []
+        rows_b = []
+        for p_idx, i, j in cross_pairs:
+            denom = math.sqrt(max(autos[i] * autos[j], 0.0))
+            if denom <= 0.0:
+                continue
+            rho = abs(vis_mean[fi, p_idx]) / denom
+            if not (1.0e-4 < rho < 0.9999):
+                continue
+            sefd_ij = ((1.0 - rho) / rho) * float(s_sun[fi]) * float(b_el[fi]) * bt_sqrt
+            if not (np.isfinite(sefd_ij) and sefd_ij > 0.0):
+                continue
+            row = np.zeros(n_ant, dtype=np.float64)
+            row[i] = 0.5
+            row[j] = 0.5
+            rows_A.append(row)
+            rows_b.append(math.log(sefd_ij))
+        if len(rows_A) >= n_ant:
+            A_mat = np.asarray(rows_A, dtype=np.float64)
+            b_vec = np.asarray(rows_b, dtype=np.float64)
+            sol, *_ = np.linalg.lstsq(A_mat, b_vec, rcond=None)
+            sefd_out[fi] = np.exp(sol)
+    return sefd_out
 
 
 def load_aligned_corr_pair(f0_path: str, f1_path: str, raws: list[int], triu_i, triu_j) -> np.ndarray:
@@ -200,6 +389,13 @@ def main():
     p.add_argument("--min-sun-el", type=float, default=20.0)
     p.add_argument("--verify-only-gains", default=None, help="Existing gains .npy to audit for phase/delay drift only")
     p.add_argument("--gains-filename", default="gains_corr_1119_0_4_32_36_fringehp_672x64.npy")
+    p.add_argument(
+        "--method",
+        default="fringe_hp",
+        choices=["fringe_hp", "eig_spatial_filter"],
+        help="Calibration mode: temporal fringe high-pass + WALS, or covariance eigen-decomposition spatial filter",
+    )
+    p.add_argument("--save-sefd", default=None, help="Optional output path for solved per-antenna inverse-SEFD weights .npy (672x64 float32)")
     args = p.parse_args()
 
     corr_dir = Path(args.corr_dir)
@@ -404,9 +600,14 @@ def main():
     fs_unfilt = (vis_binned[:, :, solve_bins] * demod_phasor[:, :, solve_bins]).reshape(N_FREQ, 10, n_blocks, blk_sz).mean(axis=-1)
     fs_hp = (vis_hp[:, :, solve_bins] * demod_phasor[:, :, solve_bins]).reshape(N_FREQ, 10, n_blocks, blk_sz).mean(axis=-1)
 
-    print(f"[3/6] Solving WALS rank-1 complex gains across {n_blocks} blocks (blk_sz={blk_sz}) ...")
+    print(f"[3/6] Solving complex gains across {n_blocks} blocks (blk_sz={blk_sz}, method={args.method}) ...")
     gains_cube_unfilt = solve_wals_gains_batch(fs_unfilt, niter=6)
-    gains_cube_hp = solve_wals_gains_batch(fs_hp, niter=6)
+    if args.method == "eig_spatial_filter":
+        gains_cube_hp = solve_eig_spatial_filter_gains(
+            fs_unfilt, FREQS_MHZ, pos_enu=POS4, target_lm=(0.0, 0.0), cone_deg=25.0, n_iter=6
+        )
+    else:
+        gains_cube_hp = solve_wals_gains_batch(fs_hp, niter=6)
 
     unit_unfilt = gains_cube_unfilt / np.maximum(np.abs(gains_cube_unfilt), 1e-12)
     coh_unfilt_min = np.min(np.abs(np.mean(unit_unfilt[:, 1:, :], axis=-1)), axis=1)
@@ -516,6 +717,31 @@ def main():
     out_npy = out_dir / args.gains_filename
     np.save(out_npy, gains_64)
     np.save(out_dir / "gains_channel_source.npy", channel_source)
+
+    sefd_out_path = None
+    if args.save_sefd:
+        # Approximate quiet-Sun continuum flux density spectrum S_sun(nu) ~ 20 kJy * (nu/400)^0.75 * 10^4 Jy
+        sun_aa = get_sun(Time(t_bin[solve_bins], format="unix")).transform_to(
+            AltAz(obstime=Time(t_bin[solve_bins], format="unix"), location=loc)
+        )
+        alt_r = np.deg2rad(np.clip(sun_aa.alt.deg, 1.0, 90.0))
+        az_r = np.deg2rad(sun_aa.az.deg)
+        l_sun = float(np.median(np.cos(alt_r) * np.sin(az_r)))
+        m_sun = float(np.median(np.cos(alt_r) * np.cos(az_r)))
+        beam_sun = super_gaussian_primary_beam(l_sun, m_sun, FREQS_MHZ)
+        s_sun_jy = 2.0e5 * (FREQS_MHZ / 400.0) ** 0.75
+        v_for_sefd = vis_binned[:, :, solve_bins] * demod_phasor[:, :, solve_bins]
+        sefd_4 = solve_antenna_sefd_from_visibilities(
+            v_for_sefd, FREQS_MHZ, sun_flux_jy=s_sun_jy, beam_elem=beam_sun, df_hz=300.0e3, tau_s=dt_bin
+        )
+        sefd_64 = np.zeros((N_FREQ, N_TOTAL_ANTS), dtype=np.float32)
+        for k_idx, ant_id in enumerate(ANTS):
+            valid_s = np.isfinite(sefd_4[:, k_idx]) & (sefd_4[:, k_idx] > 0)
+            if np.any(valid_s):
+                sefd_64[:, ant_id] = np.interp(ch_grid, ch_grid[valid_s], sefd_4[valid_s, k_idx]).astype(np.float32)
+        sefd_out_path = Path(args.save_sefd)
+        sefd_out_path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(sefd_out_path, sefd_64)
 
     print("[5/6] Validating residuals & localizing stationary RFI emitters ...")
     V_mean_hp = np.mean(fs_hp, axis=-1)

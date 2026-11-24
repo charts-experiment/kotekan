@@ -21,11 +21,14 @@ from scipy.optimize import curve_fit
 
 from beam_io import (
     FREQS_MHZ,
+    POS4,
     atomic_savefig,
     atomic_write_text,
     clean_channel_mask,
+    effective_beam_response_sq,
     load_dual_subband_beam_power,
     load_jsonl,
+    primary_beam_gain,
     theoretical_array_factor_sq,
 )
 
@@ -315,10 +318,26 @@ def main():
             "per_subband_rel_to_on": [round(float(x), 4) if np.isfinite(x) else None for x in b_ratios_arr],
         }
 
-    # Global Cal vs Uncal broadband comparison
+    # Global Cal vs Uncal broadband comparison & primary beam roll-off model (CAL-2.3)
     p_on_tot = float(np.mean(wf[:, 0, clean]))
     p_uncal_tot = float(np.mean(wf[:, uncal_beam, clean]))
     p_off_tot = float(np.mean(wf[:, off_beam, clean]))
+
+    primary_beam_diag: Dict[str, Any] = {}
+    if mid_targets and 0 in mid_targets and off_beam in mid_targets:
+        l_on, m_on = float(mid_targets[0]["l0"]), float(mid_targets[0]["m0"])
+        l_off, m_off = float(mid_targets[off_beam]["l0"]), float(mid_targets[off_beam]["m0"])
+        b_on = primary_beam_gain(l_on, m_on, FREQS_MHZ[clean])
+        b_off = primary_beam_gain(l_off, m_off, FREQS_MHZ[clean])
+        eff_off = effective_beam_response_sq(l_off, m_off, l_on, m_on, FREQS_MHZ[clean], pos=POS4)
+        # Estimate expected primary-beam spectral tilt across 300-500 MHz
+        pb_slope = float(np.polyfit(np.log(FREQS_MHZ[clean] / 400.0), np.log(np.maximum(b_on, 1e-6)), 1)[0])
+        primary_beam_diag = {
+            "mean_primary_beam_gain_on": round(float(np.mean(b_on)), 4),
+            "mean_primary_beam_gain_off": round(float(np.mean(b_off)), 4),
+            "mean_effective_off_leakage_sq": round(float(np.mean(eff_off)), 4),
+            "primary_beam_spectral_slope_on": round(pb_slope, 4),
+        }
 
     summary = {
         "run_dir": str(run_dir),
@@ -349,6 +368,7 @@ def main():
             "cal_excess_vs_off_frac": round((p_on_tot - p_off_tot) / max(p_off_tot, 1e-12), 5),
         },
         "spatial_fan": fan_results,
+        "primary_beam_model": primary_beam_diag,
         "subbands": subbands,
     }
     atomic_write_text(run_dir / "chromaticity_verification.json", json.dumps(summary, indent=2))

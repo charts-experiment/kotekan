@@ -29,10 +29,12 @@ from beam_io import (
     atomic_savefig,
     atomic_write_text,
     clean_channel_mask,
+    effective_beam_response_sq,
     load_dual_subband_beam_power,
     load_jsonl,
     overlapping_allan_deviation,
     overlapping_hadamard_deviation,
+    primary_beam_gain,
     theoretical_array_factor_sq,
 )
 
@@ -59,6 +61,7 @@ def summarize_sun_run(run_dir: Path) -> Dict[str, Any]:
     cal_vs_uncal = p_on / np.maximum(p_uncal, 1e-12)
 
     af_n_mean, af_s_mean, sep_n_deg, sep_s_deg = None, None, None, None
+    eff_n_mean, eff_s_mean, b_sun_mean = None, None, None
     if pointing:
         mid = pointing[len(pointing) // 2]["targets"]
         b0, b1, b2 = mid[0], mid[1], mid[2]
@@ -69,6 +72,9 @@ def summarize_sun_run(run_dir: Path) -> Dict[str, Any]:
         sep_s_deg = float(np.rad2deg(np.arccos(np.clip(b0["l0"] * b2["l0"] + b0["m0"] * b2["m0"] + n0 * n2, -1.0, 1.0))))
         af_n_mean = float(np.mean(theoretical_array_factor_sq(b1["l0"], b1["m0"], b0["l0"], b0["m0"], FREQS_MHZ[clean])))
         af_s_mean = float(np.mean(theoretical_array_factor_sq(b2["l0"], b2["m0"], b0["l0"], b0["m0"], FREQS_MHZ[clean])))
+        b_sun_mean = float(np.mean(primary_beam_gain(b0["l0"], b0["m0"], FREQS_MHZ[clean])))
+        eff_n_mean = float(np.mean(effective_beam_response_sq(b1["l0"], b1["m0"], b0["l0"], b0["m0"], FREQS_MHZ[clean])))
+        eff_s_mean = float(np.mean(effective_beam_response_sq(b2["l0"], b2["m0"], b0["l0"], b0["m0"], FREQS_MHZ[clean])))
 
     dt_s = timing["cadence_s"] if timing["cadence_s"] > 0 else 1.024
     taus_target = np.geomspace(dt_s, min(300.0, max(dt_s * 4.0, (len(p_on) * dt_s) / 3.0)), 25)
@@ -132,6 +138,9 @@ def summarize_sun_run(run_dir: Path) -> Dict[str, Any]:
             "sep_off_s_deg": round(sep_s_deg, 2) if sep_s_deg is not None else None,
             "theoretical_af_sq_off_n": round(af_n_mean, 4) if af_n_mean is not None else None,
             "theoretical_af_sq_off_s": round(af_s_mean, 4) if af_s_mean is not None else None,
+            "sun_primary_beam_gain": round(b_sun_mean, 4) if b_sun_mean is not None else None,
+            "effective_beam_sq_off_n": round(eff_n_mean, 4) if eff_n_mean is not None else None,
+            "effective_beam_sq_off_s": round(eff_s_mean, 4) if eff_s_mean is not None else None,
         },
         "allan_variance": {
             "taus_s": [round(float(x), 3) for x in taus_on],
