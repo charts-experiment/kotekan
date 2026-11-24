@@ -308,6 +308,16 @@ cudaTransientTriggerCommand::cudaTransientTriggerCommand(Config& config,
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(reinterpret_cast<void**>(&_d_metrics), metrics_bytes));
     CHECK_CUDA_ERROR_NON_OO(cudaHostAlloc(reinterpret_cast<void**>(&_h_metrics_pinned),
                                           metrics_bytes, cudaHostAllocDefault));
+    if (_max_beams >= 2) {
+        CHECK_CUDA_ERROR_NON_OO(cudaMalloc(reinterpret_cast<void**>(&_d_subframe_metrics),
+                                           sizeof(TransientSubframeMetrics)));
+        CHECK_CUDA_ERROR_NON_OO(
+            cudaHostAlloc(reinterpret_cast<void**>(&_h_subframe_metrics_pinned),
+                          sizeof(TransientSubframeMetrics), cudaHostAllocDefault));
+        const std::size_t scratch_elems = 256ULL * static_cast<std::size_t>(std::min(_max_beams, 64));
+        CHECK_CUDA_ERROR_NON_OO(cudaMalloc(reinterpret_cast<void**>(&_d_subframe_chunk_power),
+                                           scratch_elems * sizeof(float)));
+    }
 
     {
         std::lock_guard<std::mutex> lock(_global_mutex);
@@ -333,6 +343,14 @@ cudaTransientTriggerCommand::cudaTransientTriggerCommand(Config& config,
             static_cast<uint32_t>(config.get_default<int>(unique_name, "min_free_disk_gb", 20));
         _shared_config.max_auto_dumps =
             static_cast<uint32_t>(config.get_default<int>(unique_name, "max_auto_dumps", 20));
+        _shared_config.enable_multibeam_veto =
+            config.get_default<bool>(unique_name, "enable_multibeam_veto", true);
+        _shared_config.min_sidelobe_confidence =
+            config.get_default<float>(unique_name, "min_sidelobe_confidence", 0.5f);
+        _shared_config.max_sidelobe_ratio =
+            config.get_default<float>(unique_name, "max_sidelobe_ratio", 0.70f);
+        _shared_config.subframe_chunk_samples = static_cast<uint32_t>(
+            std::max<int>(16, config.get_default<int>(unique_name, "subframe_chunk_samples", 256)));
 
         if (!_endpoints_registered) {
             auto& rest = restServer::instance();
@@ -365,6 +383,12 @@ cudaTransientTriggerCommand::cudaTransientTriggerCommand(Config& config,
                 reply["last_trigger_min_sk"] = _last_trigger_metrics.min_sk;
                 reply["last_trigger_max_sk"] = _last_trigger_metrics.max_sk;
                 reply["last_trigger_mean_r01"] = _last_trigger_metrics.mean_r01;
+                reply["enable_multibeam_veto"] = _shared_config.enable_multibeam_veto;
+                reply["min_sidelobe_confidence"] = _shared_config.min_sidelobe_confidence;
+                reply["max_sidelobe_ratio"] = _shared_config.max_sidelobe_ratio;
+                reply["max_sidelobe_confidence"] = _last_trigger_metrics.max_sidelobe_confidence;
+                reply["sidelobe_ratio"] = _last_trigger_metrics.sidelobe_ratio;
+                reply["peak_beam_id"] = _last_trigger_metrics.peak_beam_id;
 
                 conn.send_json_reply(reply);
             };
@@ -394,6 +418,15 @@ cudaTransientTriggerCommand::cudaTransientTriggerCommand(Config& config,
                     }
                     if (j.contains("auto_dump_enabled")) {
                         _shared_config.auto_dump_enabled = j["auto_dump_enabled"];
+                    }
+                    if (j.contains("enable_multibeam_veto")) {
+                        _shared_config.enable_multibeam_veto = j["enable_multibeam_veto"];
+                    }
+                    if (j.contains("min_sidelobe_confidence")) {
+                        _shared_config.min_sidelobe_confidence = j["min_sidelobe_confidence"];
+                    }
+                    if (j.contains("max_sidelobe_ratio")) {
+                        _shared_config.max_sidelobe_ratio = j["max_sidelobe_ratio"];
                     }
                     if (j.contains("reset_quota") && j["reset_quota"].get<bool>()) {
                         _auto_dumps_written.store(0);
@@ -456,6 +489,18 @@ cudaTransientTriggerCommand::~cudaTransientTriggerCommand() {
     if (_h_metrics_pinned) {
         cudaFreeHost(_h_metrics_pinned);
         _h_metrics_pinned = nullptr;
+    }
+    if (_d_subframe_chunk_power) {
+        cudaFree(_d_subframe_chunk_power);
+        _d_subframe_chunk_power = nullptr;
+    }
+    if (_d_subframe_metrics) {
+        cudaFree(_d_subframe_metrics);
+        _d_subframe_metrics = nullptr;
+    }
+    if (_h_subframe_metrics_pinned) {
+        cudaFreeHost(_h_subframe_metrics_pinned);
+        _h_subframe_metrics_pinned = nullptr;
     }
 }
 
@@ -544,6 +589,19 @@ cudaEvent_t cudaTransientTriggerCommand::execute(cudaPipelineState& /*pipestate*
             static_cast<std::size_t>(state->num_local_freq) * sizeof(float2);
         CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_h_metrics_pinned, _d_metrics, metrics_bytes,
                                                 cudaMemcpyDeviceToHost, stream));
+        if (state->max_beams >= 2 && _d_subframe_metrics && _h_subframe_metrics_pinned) {
+            launch_transient_subframe_coincidence(
+                reinterpret_cast<const float2*>(input_memory), _d_subframe_metrics,
+                static_cast<std::size_t>(state->samples_per_data_set),
+                static_cast<std::size_t>(state->num_local_freq),
+                static_cast<std::size_t>(state->max_beams),
+                static_cast<std::size_t>(state->max_beams),
+                static_cast<std::size_t>(current_config.subframe_chunk_samples), stream,
+                d_mask_ptr, _rfi_chunk_size, _d_subframe_chunk_power);
+            CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_h_subframe_metrics_pinned, _d_subframe_metrics,
+                                                    sizeof(TransientSubframeMetrics),
+                                                    cudaMemcpyDeviceToHost, stream));
+        }
         _pending_eval = true;
         _pending_frame_seq = frame_seq;
         _pending_config = current_config;
@@ -571,9 +629,12 @@ void cudaTransientTriggerCommand::finalize_frame() {
                                             std::chrono::system_clock::now().time_since_epoch())
                                             .count());
 
+    const TransientSubframeMetrics* sub_ptr =
+        (state->max_beams >= 2 && _h_subframe_metrics_pinned) ? _h_subframe_metrics_pinned
+                                                              : nullptr;
     TransientFrameMetrics frame_metrics = evaluate_transient_decision(
         _h_metrics_pinned, static_cast<std::size_t>(state->num_local_freq), current_config,
-        frame_seq, now_ns);
+        frame_seq, now_ns, sub_ptr);
 
     std::lock_guard<std::mutex> lock(state->state_mutex);
 

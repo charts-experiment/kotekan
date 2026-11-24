@@ -114,6 +114,9 @@ private:
     // Per-instance async metrics buffers & deferred evaluation state for finalize_frame()
     float2* _d_metrics = nullptr;
     float2* _h_metrics_pinned = nullptr;
+    float* _d_subframe_chunk_power = nullptr;
+    TransientSubframeMetrics* _d_subframe_metrics = nullptr;
+    TransientSubframeMetrics* _h_subframe_metrics_pinned = nullptr;
     bool _pending_eval = false;
     uint32_t _pending_frame_seq = 0;
     TransientTriggerConfig _pending_config;
