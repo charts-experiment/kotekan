@@ -31,6 +31,8 @@ std::mutex cudaRfiMitigationCommand::_global_mutex;
 RfiMitigationConfig cudaRfiMitigationCommand::_shared_config;
 std::uint64_t cudaRfiMitigationCommand::_config_generation = 1;
 std::uint64_t cudaRfiMitigationCommand::_ema_reset_generation = 1;
+std::vector<std::pair<double, double>> cudaRfiMitigationCommand::_solar_exempt_ranges_mhz;
+std::uint64_t cudaRfiMitigationCommand::_solar_exempt_generation = 1;
 std::vector<cudaRfiMitigationCommand*> cudaRfiMitigationCommand::_instances;
 bool cudaRfiMitigationCommand::_endpoints_registered = false;
 
@@ -88,6 +90,7 @@ cudaRfiMitigationCommand::cudaRfiMitigationCommand(Config& config, const std::st
             _h_exempt_channels[ch] = 1;
         }
     }
+    _h_base_exempt_channels = _h_exempt_channels;
 
     RfiMitigationConfig init_cfg;
     init_cfg.enabled = config.get_default<bool>(unique_name, "enabled", true);
@@ -465,6 +468,39 @@ cudaRfiMitigationCommand::cudaRfiMitigationCommand(Config& config, const std::st
                     }
                 });
 
+            rest.register_post_callback(
+                "/rfi_mitigation/solar_burst_exempt",
+                [](connectionInstance& conn, nlohmann::json& j) {
+                    try {
+                        std::vector<std::pair<double, double>> parsed_ranges;
+                        if (j.is_object() && j.contains("ranges_mhz") && j["ranges_mhz"].is_array()) {
+                            for (const auto& item : j["ranges_mhz"]) {
+                                if (item.is_array() && item.size() >= 2) {
+                                    double lo = item[0].get<double>();
+                                    double hi = item[1].get<double>();
+                                    if (lo > hi) {
+                                        std::swap(lo, hi);
+                                    }
+                                    parsed_ranges.emplace_back(lo, hi);
+                                }
+                            }
+                        }
+                        std::lock_guard<std::mutex> glk(_global_mutex);
+                        _solar_exempt_ranges_mhz = std::move(parsed_ranges);
+                        _solar_exempt_generation++;
+                        nlohmann::json reply;
+                        reply["status"] = "ok";
+                        reply["solar_exempt_ranges_count"] = _solar_exempt_ranges_mhz.size();
+                        reply["solar_exempt_generation"] = _solar_exempt_generation;
+                        conn.send_json_reply(reply);
+                    } catch (const std::exception& e) {
+                        conn.send_error(
+                            fmt::format("Error updating solar burst exempt ranges: {:s}\n",
+                                        e.what()),
+                            HTTP_RESPONSE::BAD_REQUEST);
+                    }
+                });
+
             _endpoints_registered = true;
         }
     }
@@ -720,12 +756,11 @@ cudaEvent_t cudaRfiMitigationCommand::execute(cudaPipelineState& /*pipestate*/,
                     for (int f = 0; f < _num_local_freq && f < static_cast<int>(cf.size()); ++f) {
                         if (std::find(_excision_exempt_freq_ids.begin(), _excision_exempt_freq_ids.end(), cf[f])
                             != _excision_exempt_freq_ids.end()) {
+                            _h_base_exempt_channels[f] = 1;
                             _h_exempt_channels[f] = 1;
                         }
                     }
-                    CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_d_exempt_channels, _h_exempt_channels.data(),
-                                                            _num_local_freq * sizeof(std::uint8_t),
-                                                            cudaMemcpyHostToDevice, stream));
+                    _applied_solar_exempt_gen = 0; // trigger unified upload below
                     _exempt_resolved = true;
                 }
             }
@@ -739,6 +774,8 @@ cudaEvent_t cudaRfiMitigationCommand::execute(cudaPipelineState& /*pipestate*/,
     RfiMitigationConfig cfg;
     std::uint64_t cfg_gen = 0;
     std::uint64_t ema_reset_gen = 0;
+    std::uint64_t solar_gen = 0;
+    std::vector<std::pair<double, double>> solar_ranges;
     bool upload_gains_now = false;
     std::vector<int> ema_reset_chans;
     {
@@ -746,6 +783,10 @@ cudaEvent_t cudaRfiMitigationCommand::execute(cudaPipelineState& /*pipestate*/,
         cfg = _shared_config;
         cfg_gen = _config_generation;
         ema_reset_gen = _ema_reset_generation;
+        solar_gen = _solar_exempt_generation;
+        if (_applied_solar_exempt_gen != solar_gen) {
+            solar_ranges = _solar_exempt_ranges_mhz;
+        }
         if (_pending_gains_dirty) {
             _exec_channel_gains = _pending_channel_gains;
             _pending_gains_dirty = false;
@@ -754,6 +795,25 @@ cudaEvent_t cudaRfiMitigationCommand::execute(cudaPipelineState& /*pipestate*/,
         if (!_pending_ema_reset_indices.empty()) {
             ema_reset_chans.swap(_pending_ema_reset_indices);
         }
+    }
+
+    if (_applied_solar_exempt_gen != solar_gen && _d_exempt_channels != nullptr) {
+        _h_exempt_channels = _h_base_exempt_channels;
+        if (!solar_ranges.empty()) {
+            for (int f = 0; f < _num_local_freq; ++f) {
+                const double f_mhz = (_freq_start_hz + static_cast<double>(f) * _freq_step_hz) * 1.0e-6;
+                for (const auto& rng : solar_ranges) {
+                    if (f_mhz >= rng.first && f_mhz <= rng.second) {
+                        _h_exempt_channels[f] = 1;
+                        break;
+                    }
+                }
+            }
+        }
+        CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_d_exempt_channels, _h_exempt_channels.data(),
+                                                _num_local_freq * sizeof(std::uint8_t),
+                                                cudaMemcpyHostToDevice, stream));
+        _applied_solar_exempt_gen = solar_gen;
     }
 
     if (_applied_rfi_cfg_gen != cfg_gen) {
