@@ -192,6 +192,9 @@ private:
     // Sky grid support
     bool _grid_mode_enabled = false;
     bool _compute_power_inline_only = false;
+    bool _enable_tensor_core = true;
+    DirectBeamformerMode _beamformer_mode = DirectBeamformerMode::DIRECT;
+    std::size_t _fft_2d_size = 16;
     bool _applied_grid_apply_cal = true;
     float _grid_step = 0.02f;
     std::size_t _num_grid_points = 0;

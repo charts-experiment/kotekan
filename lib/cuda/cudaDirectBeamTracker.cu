@@ -2,7 +2,9 @@
 #include "cudaDirectBeamTracker.cuh"
 #include "cudaUtils.hpp"
 
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <mma.h>
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -1327,6 +1329,431 @@ direct_beamformer_power_only_kernel(
 
 } // namespace
 
+// -----------------------------------------------------------------------------
+// GPU-4.2: Blackwell Tensor Core FP16->FP32 WMMA Beamformer (N_ELEM=64, B>=16)
+// -----------------------------------------------------------------------------
+namespace {
+
+template <bool SWAPPED_WITH_OFFSET>
+__global__ void __launch_bounds__(256, 2)
+direct_beamformer_wmma_kernel(
+    float2* __restrict__ voltages,
+    const float2* __restrict__ weights,
+    const std::uint8_t* __restrict__ packed,
+    const std::size_t n_time,
+    const std::size_t n_freq,
+    const std::size_t active_beams,
+    const std::size_t max_beams_stride) {
+
+    constexpr int T_CHUNK = 256;
+    constexpr int T_TILE = 32;
+    constexpr int B_TILE = 64;
+    constexpr int N_ELEM = 64;
+    constexpr int LD_K = 72; // 64 + 8 padding avoids bank conflicts in 16x16 WMMA loads
+
+    const int tid = static_cast<int>(threadIdx.x);
+    const int warp_id = tid >> 5;
+    const int w_t = warp_id >> 2; // 0..1 -> 32 time rows
+    const int w_b = warp_id & 3;  // 0..3 -> 64 beam cols
+
+    const std::size_t t_chunk_start = static_cast<std::size_t>(blockIdx.x) * T_CHUNK;
+    const std::size_t f = static_cast<std::size_t>(blockIdx.y);
+    const std::size_t b0 = static_cast<std::size_t>(blockIdx.z) * B_TILE;
+    if (t_chunk_start >= n_time || f >= n_freq || b0 >= active_beams) return;
+
+    __shared__ struct {
+        __half wr[B_TILE][LD_K];
+        __half wi[B_TILE][LD_K];
+        __half wi_neg[B_TILE][LD_K];
+    } smem_w;
+
+    __shared__ union {
+        struct {
+            __half er[T_TILE][LD_K];
+            __half ei[T_TILE][LD_K];
+        } in;
+        struct {
+            float r[T_TILE][B_TILE];
+            float i[T_TILE][B_TILE];
+        } out;
+    } smem_io;
+
+    // 1. Load [64 x 64] complex weights once per T_CHUNK=256 block (16 items/thread)
+    #pragma unroll
+    for (int iter = 0; iter < 16; ++iter) {
+        const int flat = tid + iter * 256;
+        const int lb = flat >> 6;
+        const int a = flat & 63;
+        const std::size_t bg = b0 + static_cast<std::size_t>(lb);
+        if (bg < active_beams) {
+            const float2 w = __ldg(&weights[(bg * n_freq + f) * N_ELEM + a]);
+            smem_w.wr[lb][a] = __float2half(w.x);
+            smem_w.wi[lb][a] = __float2half(w.y);
+            smem_w.wi_neg[lb][a] = __float2half(-w.y);
+        } else {
+            smem_w.wr[lb][a] = __float2half(0.0f);
+            smem_w.wi[lb][a] = __float2half(0.0f);
+            smem_w.wi_neg[lb][a] = __float2half(0.0f);
+        }
+    }
+    __syncthreads();
+
+    const std::size_t t_stride = n_freq * N_ELEM;
+    const std::size_t out_row_stride = n_freq * max_beams_stride;
+    const std::size_t t_chunk_end =
+        (t_chunk_start + T_CHUNK < n_time) ? (t_chunk_start + T_CHUNK) : n_time;
+
+    for (std::size_t t0 = t_chunk_start; t0 < t_chunk_end; t0 += T_TILE) {
+        // 2. Coalesced unpack of [32 x 64] int4 voltages into FP16 shared buffers (8 items/thread)
+        #pragma unroll
+        for (int iter = 0; iter < 8; ++iter) {
+            const int flat = tid + iter * 256;
+            const int lt = flat >> 6;
+            const int a = flat & 63;
+            const std::size_t tg = t0 + static_cast<std::size_t>(lt);
+            if (tg < n_time) {
+                const float2 pv = unpack_int4_byte_fmt<SWAPPED_WITH_OFFSET>(
+                    __ldg(&packed[tg * t_stride + f * N_ELEM + a]));
+                smem_io.in.er[lt][a] = __float2half(pv.x);
+                smem_io.in.ei[lt][a] = __float2half(pv.y);
+            } else {
+                smem_io.in.er[lt][a] = __float2half(0.0f);
+                smem_io.in.ei[lt][a] = __float2half(0.0f);
+            }
+        }
+        __syncthreads();
+
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 700
+        using namespace nvcuda;
+        const int t_off = w_t * 16;
+        const int b_off = w_b * 16;
+
+        wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc_r;
+        wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc_i;
+        wmma::fill_fragment(acc_r, 0.0f);
+        wmma::fill_fragment(acc_i, 0.0f);
+
+        #pragma unroll
+        for (int k = 0; k < N_ELEM; k += 16) {
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_er;
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_ei;
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> b_wr;
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> b_wi;
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> b_wi_neg;
+
+            wmma::load_matrix_sync(a_er, &smem_io.in.er[t_off][k], LD_K);
+            wmma::load_matrix_sync(a_ei, &smem_io.in.ei[t_off][k], LD_K);
+            wmma::load_matrix_sync(b_wr, &smem_w.wr[b_off][k], LD_K);
+            wmma::load_matrix_sync(b_wi, &smem_w.wi[b_off][k], LD_K);
+            wmma::load_matrix_sync(b_wi_neg, &smem_w.wi_neg[b_off][k], LD_K);
+
+            wmma::mma_sync(acc_r, a_er, b_wr, acc_r);
+            wmma::mma_sync(acc_r, a_ei, b_wi_neg, acc_r);
+            wmma::mma_sync(acc_i, a_er, b_wi, acc_i);
+            wmma::mma_sync(acc_i, a_ei, b_wr, acc_i);
+        }
+
+        __syncthreads();
+
+        wmma::store_matrix_sync(&smem_io.out.r[t_off][b_off], acc_r, B_TILE, wmma::mem_row_major);
+        wmma::store_matrix_sync(&smem_io.out.i[t_off][b_off], acc_i, B_TILE, wmma::mem_row_major);
+        __syncthreads();
+
+        // 3. Coalesced store of formed float2 beam voltages
+        #pragma unroll
+        for (int iter = 0; iter < 8; ++iter) {
+            const int flat = tid + iter * 256;
+            const int lt = flat >> 6;
+            const int lb = flat & 63;
+            const std::size_t tg = t0 + static_cast<std::size_t>(lt);
+            const std::size_t bg = b0 + static_cast<std::size_t>(lb);
+            if (tg < n_time && bg < active_beams) {
+                voltages[(tg * out_row_stride) + f * max_beams_stride + bg] =
+                    make_float2(smem_io.out.r[lt][lb], smem_io.out.i[lt][lb]);
+            }
+        }
+#else
+        // Pre-Volta scalar fallback (writes directly to voltages without aliasing smem_io.out)
+        if (tid < T_TILE) {
+            const int lt = tid;
+            const std::size_t tg = t0 + static_cast<std::size_t>(lt);
+            if (tg < n_time) {
+                for (int lb = 0; lb < B_TILE; ++lb) {
+                    const std::size_t bg = b0 + static_cast<std::size_t>(lb);
+                    if (bg < active_beams) {
+                        float sr = 0.0f, si = 0.0f;
+                        for (int a = 0; a < N_ELEM; ++a) {
+                            const float ex = __half2float(smem_io.in.er[lt][a]);
+                            const float ey = __half2float(smem_io.in.ei[lt][a]);
+                            const float wx = __half2float(smem_w.wr[lb][a]);
+                            const float wy = __half2float(smem_w.wi[lb][a]);
+                            sr = fmaf(wx, ex, fmaf(-wy, ey, sr));
+                            si = fmaf(wx, ey, fmaf(wy, ex, si));
+                        }
+                        voltages[(tg * out_row_stride) + f * max_beams_stride + bg] =
+                            make_float2(sr, si);
+                    }
+                }
+            }
+        }
+#endif
+        __syncthreads();
+    }
+}
+
+// -----------------------------------------------------------------------------
+// GPU-4.3: Separable 2D All-Sky FFT (8x8 / 16x16) & Factorized 2D DFT Kernels
+// -----------------------------------------------------------------------------
+
+template <int N_FFT, bool INVERSE>
+__device__ __forceinline__ void fft_1d_radix2_in_reg(float2 x[N_FFT]) {
+    constexpr float TWO_PI_F = 6.2831853071795864769f;
+    // Bit-reversal permutation
+    if constexpr (N_FFT == 8) {
+        constexpr int perm[8] = {0, 4, 2, 6, 1, 5, 3, 7};
+        float2 tmp[8];
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) tmp[i] = x[perm[i]];
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) x[i] = tmp[i];
+    } else {
+        constexpr int perm[16] = {0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15};
+        float2 tmp[16];
+        #pragma unroll
+        for (int i = 0; i < 16; ++i) tmp[i] = x[perm[i]];
+        #pragma unroll
+        for (int i = 0; i < 16; ++i) x[i] = tmp[i];
+    }
+
+    #pragma unroll
+    for (int len = 2; len <= N_FFT; len <<= 1) {
+        const int half_len = len >> 1;
+        const float sign = INVERSE ? 1.0f : -1.0f;
+        const float base_ang = sign * TWO_PI_F / static_cast<float>(len);
+        for (int i = 0; i < N_FFT; i += len) {
+            #pragma unroll
+            for (int j = 0; j < half_len; ++j) {
+                float s = 0.0f, c = 1.0f;
+                __sincosf(base_ang * static_cast<float>(j), &s, &c);
+                const float2 u = x[i + j];
+                const float2 v = x[i + j + half_len];
+                const float vr = fmaf(c, v.x, -s * v.y);
+                const float vi = fmaf(c, v.y, s * v.x);
+                x[i + j] = make_float2(u.x + vr, u.y + vi);
+                x[i + j + half_len] = make_float2(u.x - vr, u.y - vi);
+            }
+        }
+    }
+}
+
+template <int N_FFT, bool SWAPPED_WITH_OFFSET, bool WRITE_VOLTAGES, bool WRITE_POWER>
+__global__ void __launch_bounds__(128, 4)
+factorized_2d_fft_beamformer_kernel(
+    const std::uint8_t* __restrict__ packed,
+    float2* __restrict__ voltages,
+    float* __restrict__ power,
+    const float2* __restrict__ d_calibration_gains,
+    const float* __restrict__ d_norm_taper,
+    const std::uint8_t* __restrict__ d_rfi_mask,
+    const std::size_t n_time,
+    const std::size_t n_freq,
+    const std::size_t max_beams_stride,
+    const std::size_t time_chunk_size,
+    const std::size_t n_chunks,
+    const bool descending_order) {
+
+    constexpr int WARPS_PER_BLOCK = 4;
+    constexpr int N_BEAMS_2D = N_FFT * N_FFT;
+    constexpr int ELEMS_PER_LANE_OUT = N_BEAMS_2D / 32; // 2 (for 8x8) or 8 (for 16x16)
+
+    const int lane = static_cast<int>(threadIdx.x);
+    const int warp = static_cast<int>(threadIdx.y);
+    const std::size_t chunk_idx = static_cast<std::size_t>(blockIdx.x);
+    const std::size_t freq = static_cast<std::size_t>(blockIdx.y);
+    if (freq >= n_freq || chunk_idx >= n_chunks) return;
+
+    const bool use_mask = (d_rfi_mask != nullptr && n_chunks > 0 && time_chunk_size > 0);
+    const bool chunk_masked = use_mask && (d_rfi_mask[chunk_idx * n_freq + freq] != 0);
+    if (!WRITE_VOLTAGES && chunk_masked) return;
+
+    const std::size_t t_start = chunk_idx * time_chunk_size;
+    if (t_start >= n_time) return;
+    const std::size_t t_end = (t_start + time_chunk_size < n_time)
+                                  ? (t_start + time_chunk_size)
+                                  : n_time;
+
+    __shared__ float2 s_tile[WARPS_PER_BLOCK][N_FFT][N_FFT + 1];
+
+    // Preload per-antenna complex weights w[r] = cal_gain[f, r] * norm_taper[r] (2 elems/lane)
+    float2 w_ant[2];
+    int grid_row[2], grid_col[2];
+    #pragma unroll
+    for (int m = 0; m < 2; ++m) {
+        const int r = lane + m * 32;
+        const float tap = (d_norm_taper != nullptr) ? __ldg(&d_norm_taper[r]) : 1.0f;
+        const float2 g = (d_calibration_gains != nullptr)
+                             ? __ldg(&d_calibration_gains[freq * 64 + r])
+                             : make_float2(1.0f, 0.0f);
+        w_ant[m] = make_float2(g.x * tap, g.y * tap);
+        const int phys = descending_order ? (63 - r) : r;
+        grid_row[m] = phys >> 3;
+        grid_col[m] = phys & 7;
+    }
+
+    float p_acc[ELEMS_PER_LANE_OUT];
+    #pragma unroll
+    for (int m = 0; m < ELEMS_PER_LANE_OUT; ++m) p_acc[m] = 0.0f;
+
+    const std::size_t t_stride = n_freq * 64;
+    const std::size_t out_row_stride = n_freq * max_beams_stride;
+    constexpr int HALF_N = N_FFT >> 1;
+
+    for (std::size_t t = t_start + static_cast<std::size_t>(warp); t < t_end; t += WARPS_PER_BLOCK) {
+        // Zero tile (8 floats/lane for 16x16, 2 floats/lane for 8x8)
+        #pragma unroll
+        for (int m = 0; m < ELEMS_PER_LANE_OUT; ++m) {
+            const int idx = lane + m * 32;
+            const int rr = idx / N_FFT;
+            const int cc = idx % N_FFT;
+            s_tile[warp][rr][cc] = make_float2(0.0f, 0.0f);
+        }
+        __syncwarp();
+
+        // Populate 8x8 physical subgrid
+        const std::uint8_t* p_base = packed + t * t_stride + freq * 64;
+        #pragma unroll
+        for (int m = 0; m < 2; ++m) {
+            const int r = lane + m * 32;
+            const float2 pv = unpack_int4_byte_fmt<SWAPPED_WITH_OFFSET>(__ldg(&p_base[r]));
+            const float2 w = w_ant[m];
+            const float2 vw = make_float2(fmaf(w.x, pv.x, -w.y * pv.y),
+                                          fmaf(w.x, pv.y, w.y * pv.x));
+            s_tile[warp][grid_row[m]][grid_col[m]] = vw;
+        }
+        __syncwarp();
+
+        // 1D row FFT (East-West, exp(-j 2pi p col / N), +p => +l)
+        if (lane < 8) {
+            float2 row_vals[N_FFT];
+            #pragma unroll
+            for (int c = 0; c < N_FFT; ++c) row_vals[c] = s_tile[warp][lane][c];
+            fft_1d_radix2_in_reg<N_FFT, false>(row_vals);
+            #pragma unroll
+            for (int c = 0; c < N_FFT; ++c) {
+                s_tile[warp][lane][(c + HALF_N) & (N_FFT - 1)] = row_vals[c];
+            }
+        }
+        __syncwarp();
+
+        // 1D column FFT (North-South, exp(+j 2pi q row / N), +q => +m)
+        if (lane < N_FFT) {
+            float2 col_vals[N_FFT];
+            #pragma unroll
+            for (int r = 0; r < N_FFT; ++r) col_vals[r] = s_tile[warp][r][lane];
+            fft_1d_radix2_in_reg<N_FFT, true>(col_vals);
+            #pragma unroll
+            for (int r = 0; r < N_FFT; ++r) {
+                s_tile[warp][(r + HALF_N) & (N_FFT - 1)][lane] = col_vals[r];
+            }
+        }
+        __syncwarp();
+
+        // Coalesced store / power accumulate across all 32 lanes
+        #pragma unroll
+        for (int m = 0; m < ELEMS_PER_LANE_OUT; ++m) {
+            const int b = lane + m * 32;
+            const int q = b / N_FFT;
+            const int p = b % N_FFT;
+            const float2 v = s_tile[warp][q][p];
+            if constexpr (WRITE_VOLTAGES) {
+                if (static_cast<std::size_t>(b) < max_beams_stride) {
+                    voltages[t * out_row_stride + freq * max_beams_stride + b] = v;
+                }
+            }
+            if constexpr (WRITE_POWER) {
+                p_acc[m] = fmaf(v.x, v.x, fmaf(v.y, v.y, p_acc[m]));
+            }
+        }
+    }
+
+    if constexpr (WRITE_POWER) {
+        if (!chunk_masked) {
+            float inv_valid = 0.0f;
+            if (use_mask) {
+                std::size_t valid_samples = 0;
+                for (std::size_t c = 0; c < n_chunks; ++c) {
+                    if (d_rfi_mask[c * n_freq + freq] == 0) {
+                        const std::size_t cs = c * time_chunk_size;
+                        const std::size_t ce = (cs + time_chunk_size < n_time) ? (cs + time_chunk_size) : n_time;
+                        valid_samples += (ce > cs) ? (ce - cs) : 0;
+                    }
+                }
+                inv_valid = (valid_samples > 0) ? (1.0f / static_cast<float>(valid_samples)) : 0.0f;
+            } else {
+                inv_valid = (n_time > 0) ? (1.0f / static_cast<float>(n_time)) : 0.0f;
+            }
+            if (inv_valid > 0.0f) {
+                #pragma unroll
+                for (int m = 0; m < ELEMS_PER_LANE_OUT; ++m) {
+                    const std::size_t b = static_cast<std::size_t>(lane + m * 32);
+                    if (b < max_beams_stride && p_acc[m] > 0.0f) {
+                        atomicAdd(&power[b * n_freq + freq], p_acc[m] * inv_valid);
+                    }
+                }
+            }
+        }
+    }
+}
+
+template <bool SWAPPED_WITH_OFFSET>
+__global__ void factorized_2d_dft_beamformer_kernel(
+    const std::uint8_t* __restrict__ packed,
+    const float2* __restrict__ d_bx_weights,
+    const float2* __restrict__ d_by_weights,
+    float2* __restrict__ voltages,
+    const std::size_t n_time,
+    const std::size_t n_freq,
+    const std::size_t nx_beams,
+    const std::size_t ny_beams,
+    const std::size_t max_beams_stride,
+    const bool descending_order) {
+    // 1 thread per (p, q) output beam at (t = blockIdx.x, f = blockIdx.y) via shared 8x8 staging
+    const std::size_t t = static_cast<std::size_t>(blockIdx.x);
+    const std::size_t f = static_cast<std::size_t>(blockIdx.y);
+    const std::size_t b = static_cast<std::size_t>(threadIdx.x);
+    if (t >= n_time || f >= n_freq) return;
+
+    __shared__ float2 s_v[8][8];
+    const std::uint8_t* p_base = packed + (t * n_freq + f) * 64;
+    if (b < 64) {
+        const std::size_t phys = descending_order ? (63 - b) : b;
+        s_v[phys >> 3][phys & 7] = unpack_int4_byte_fmt<SWAPPED_WITH_OFFSET>(__ldg(&p_base[b]));
+    }
+    __syncthreads();
+
+    const std::size_t total_beams = nx_beams * ny_beams;
+    if (b < total_beams && b < max_beams_stride) {
+        const std::size_t q = b / nx_beams;
+        const std::size_t p = b % nx_beams;
+        float out_r = 0.0f, out_i = 0.0f;
+        for (int row = 0; row < 8; ++row) {
+            float xr = 0.0f, xi = 0.0f;
+            for (int col = 0; col < 8; ++col) {
+                const float2 v = s_v[row][col];
+                const float2 bx = __ldg(&d_bx_weights[(p * n_freq + f) * 8 + col]);
+                xr = fmaf(bx.x, v.x, fmaf(-bx.y, v.y, xr));
+                xi = fmaf(bx.x, v.y, fmaf(bx.y, v.x, xi));
+            }
+            const float2 by = __ldg(&d_by_weights[(q * n_freq + f) * 8 + row]);
+            out_r = fmaf(by.x, xr, fmaf(-by.y, xi, out_r));
+            out_i = fmaf(by.x, xi, fmaf(by.y, xr, out_i));
+        }
+        voltages[(t * n_freq + f) * max_beams_stride + b] = make_float2(out_r, out_i);
+    }
+}
+
+} // namespace
+
 void set_l2_persisting_weights_policy(cudaStream_t stream, const void* ptr, std::size_t bytes) {
 #if CUDART_VERSION >= 11000
     if (ptr == nullptr || bytes == 0) return;
@@ -1386,13 +1813,33 @@ void launch_direct_beamformer(
     cudaStream_t stream,
     std::size_t n_pol,
     DirectPolLayout pol_layout,
-    DirectInputFormat input_format) {
+    DirectInputFormat input_format,
+    bool enable_tensor_core) {
 
     if (num_active_beams == 0) return;
 
     const std::size_t n_elem = n_ant * std::max<std::size_t>(1, n_pol);
     const std::size_t active_beams = num_active_beams;
     const std::size_t stride_beams = std::max(max_beams_stride, active_beams);
+    const auto* packed_bytes = reinterpret_cast<const std::uint8_t*>(d_packed);
+    const bool interpolate = (d_step_weights != nullptr);
+
+    // Dispatch Blackwell/Volta+ Tensor Core WMMA kernel for stationary/large-beam regimes (GPU-4.2)
+    if (enable_tensor_core && !interpolate && n_pol == 1 && n_elem == 64
+        && active_beams >= 16 && n_time >= 16 && (n_time % 16 == 0)) {
+        const dim3 grid_wmma(static_cast<unsigned int>((n_time + 255) / 256),
+                             static_cast<unsigned int>(n_freq),
+                             static_cast<unsigned int>((active_beams + 63) / 64));
+        if (input_format == DirectInputFormat::INT4X2_SWAPPED_WITHOFFSET) {
+            direct_beamformer_wmma_kernel<true><<<grid_wmma, 256, 0, stream>>>(
+                d_voltages, d_weights, packed_bytes, n_time, n_freq, active_beams, stride_beams);
+        } else {
+            direct_beamformer_wmma_kernel<false><<<grid_wmma, 256, 0, stream>>>(
+                d_voltages, d_weights, packed_bytes, n_time, n_freq, active_beams, stride_beams);
+        }
+        CHECK_CUDA_ERROR_NON_OO(cudaGetLastError());
+        return;
+    }
 
     std::size_t b_tile = 1;
     if (beam_tile_size >= 4 && active_beams >= 4) {
@@ -1421,8 +1868,6 @@ void launch_direct_beamformer(
     }
 
     const dim3 block_dim(32, WARPS_PER_BLOCK);
-    const auto* packed_bytes = reinterpret_cast<const std::uint8_t*>(d_packed);
-    const bool interpolate = (d_step_weights != nullptr);
 
     auto launch_configured = [&](auto elem_tag, auto pol_tag, auto layout_tag,
                                  auto b_tile_tag, auto interp_tag, auto smem_tag, auto fmt_tag) {
@@ -1797,8 +2242,6 @@ void launch_direct_beamformer_power_only(
                         static_cast<unsigned int>(n_freq),
                         static_cast<unsigned int>(num_chunks));
     const dim3 block_dim(32, WARPS_PER_BLOCK);
-    const auto* packed_bytes = reinterpret_cast<const std::uint8_t*>(d_packed);
-    const bool interpolate = (d_step_weights != nullptr);
 
     auto launch_configured = [&](auto elem_tag, auto pol_tag, auto layout_tag,
                                  auto b_tile_tag, auto interp_tag, auto fmt_tag) {
@@ -1810,7 +2253,8 @@ void launch_direct_beamformer_power_only(
         constexpr bool F_O = decltype(fmt_tag)::value;
         direct_beamformer_power_only_kernel<N_E, N_P, L_O, B_T, I_P, F_O>
             <<<grid_dim, block_dim, 0, stream>>>(
-                d_power, d_weights, d_step_weights, packed_bytes, d_rfi_mask,
+                d_power, d_weights, d_step_weights,
+                reinterpret_cast<const std::uint8_t*>(d_packed), d_rfi_mask,
                 n_time, n_freq, chunk_sz, num_chunks, num_active_beams, stride_beams);
     };
 
@@ -1823,7 +2267,7 @@ void launch_direct_beamformer_power_only(
     };
 
     auto dispatch_interp = [&](auto elem_tag, auto pol_tag, auto layout_tag, auto b_tile_tag) {
-        if (interpolate) {
+        if (d_step_weights != nullptr) {
             dispatch_fmt(elem_tag, pol_tag, layout_tag, b_tile_tag, std::true_type{});
         } else {
             dispatch_fmt(elem_tag, pol_tag, layout_tag, b_tile_tag, std::false_type{});
@@ -1859,6 +2303,108 @@ void launch_direct_beamformer_power_only(
                 "Unsupported total elements (n_ant * n_pol): must be 32, 64, 128, 256, or 512");
     }
 
+    CHECK_CUDA_ERROR_NON_OO(cudaGetLastError());
+}
+
+void launch_factorized_2d_fft_beamformer(
+    const int4x2_t* d_packed,
+    float2* d_voltages,
+    float* d_power,
+    const float2* d_calibration_gains,
+    const float* d_norm_taper,
+    const std::uint8_t* d_rfi_mask,
+    std::size_t n_time,
+    std::size_t n_freq,
+    std::size_t fft_size,
+    std::size_t max_beams_stride,
+    std::size_t time_chunk_size,
+    bool descending_order,
+    cudaStream_t stream,
+    DirectInputFormat input_format) {
+
+    if (d_packed == nullptr || n_time == 0 || n_freq == 0) return;
+    if (fft_size != 8 && fft_size != 16) {
+        throw std::invalid_argument("launch_factorized_2d_fft_beamformer: fft_size must be 8 or 16");
+    }
+    const std::size_t stride_beams = std::max(max_beams_stride, fft_size * fft_size);
+    const bool write_v = (d_voltages != nullptr);
+    const bool write_p = (d_power != nullptr);
+    if (!write_v && !write_p) return;
+
+    if (write_p) {
+        CHECK_CUDA_ERROR_NON_OO(
+            cudaMemsetAsync(d_power, 0, stride_beams * n_freq * sizeof(float), stream));
+    }
+
+    const std::size_t chunk_sz = (time_chunk_size > 0) ? time_chunk_size : 256;
+    const std::size_t n_chunks = (n_time + chunk_sz - 1) / chunk_sz;
+    const dim3 grid_dim(static_cast<unsigned int>(n_chunks), static_cast<unsigned int>(n_freq));
+    const dim3 block_dim(32, 4);
+    const auto* packed_bytes = reinterpret_cast<const std::uint8_t*>(d_packed);
+
+    auto dispatch = [&](auto fft_tag, auto fmt_tag, auto v_tag, auto p_tag) {
+        constexpr int NF = decltype(fft_tag)::value;
+        constexpr bool SO = decltype(fmt_tag)::value;
+        constexpr bool WV = decltype(v_tag)::value;
+        constexpr bool WP = decltype(p_tag)::value;
+        factorized_2d_fft_beamformer_kernel<NF, SO, WV, WP><<<grid_dim, block_dim, 0, stream>>>(
+            packed_bytes, d_voltages, d_power, d_calibration_gains, d_norm_taper, d_rfi_mask,
+            n_time, n_freq, stride_beams, chunk_sz, n_chunks, descending_order);
+    };
+
+    auto dispatch_vp = [&](auto fft_tag, auto fmt_tag) {
+        if (write_v && write_p) dispatch(fft_tag, fmt_tag, std::true_type{}, std::true_type{});
+        else if (write_v) dispatch(fft_tag, fmt_tag, std::true_type{}, std::false_type{});
+        else dispatch(fft_tag, fmt_tag, std::false_type{}, std::true_type{});
+    };
+
+    auto dispatch_fmt = [&](auto fft_tag) {
+        if (input_format == DirectInputFormat::INT4X2_SWAPPED_WITHOFFSET) {
+            dispatch_vp(fft_tag, std::true_type{});
+        } else {
+            dispatch_vp(fft_tag, std::false_type{});
+        }
+    };
+
+    if (fft_size == 8) dispatch_fmt(std::integral_constant<int, 8>{});
+    else dispatch_fmt(std::integral_constant<int, 16>{});
+
+    CHECK_CUDA_ERROR_NON_OO(cudaGetLastError());
+}
+
+void launch_factorized_2d_dft_beamformer(
+    const int4x2_t* d_packed,
+    const float2* d_bx_weights,
+    const float2* d_by_weights,
+    float2* d_voltages,
+    std::size_t n_time,
+    std::size_t n_freq,
+    std::size_t nx_beams,
+    std::size_t ny_beams,
+    std::size_t max_beams_stride,
+    std::size_t /*time_chunk_size*/,
+    bool descending_order,
+    cudaStream_t stream,
+    DirectInputFormat input_format) {
+
+    if (!d_packed || !d_bx_weights || !d_by_weights || !d_voltages) return;
+    if (n_time == 0 || n_freq == 0 || nx_beams == 0 || ny_beams == 0) return;
+
+    const std::size_t total_beams = nx_beams * ny_beams;
+    const std::size_t stride_beams = std::max(max_beams_stride, total_beams);
+    const unsigned int block_threads = static_cast<unsigned int>(std::max<std::size_t>(64, std::min<std::size_t>(1024, total_beams)));
+    const dim3 grid_dim(static_cast<unsigned int>(n_time), static_cast<unsigned int>(n_freq));
+    const auto* packed_bytes = reinterpret_cast<const std::uint8_t*>(d_packed);
+
+    if (input_format == DirectInputFormat::INT4X2_SWAPPED_WITHOFFSET) {
+        factorized_2d_dft_beamformer_kernel<true><<<grid_dim, block_threads, 0, stream>>>(
+            packed_bytes, d_bx_weights, d_by_weights, d_voltages, n_time, n_freq,
+            nx_beams, ny_beams, stride_beams, descending_order);
+    } else {
+        factorized_2d_dft_beamformer_kernel<false><<<grid_dim, block_threads, 0, stream>>>(
+            packed_bytes, d_bx_weights, d_by_weights, d_voltages, n_time, n_freq,
+            nx_beams, ny_beams, stride_beams, descending_order);
+    }
     CHECK_CUDA_ERROR_NON_OO(cudaGetLastError());
 }
 

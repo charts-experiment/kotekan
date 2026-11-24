@@ -29,6 +29,21 @@ enum class DirectInputFormat : uint8_t {
     INT4X2_SWAPPED_WITHOFFSET = 1  // Swapped with offset (+8): high nibble = real + 8, low nibble = imag + 8
 };
 
+enum class DirectBeamformerMode : int {
+    DIRECT = 0,       // Arbitrary tracked sky directions (FP32 FMA / Tensor Core WMMA)
+    FFT_2D_ALLSKY = 1 // Separable 2D factorized 8x8 (64) or 16x16 (256) stationary all-sky FFT
+};
+
+inline DirectBeamformerMode parse_beamformer_mode(const std::string& s) {
+    if (s == "fft_2d_allsky" || s == "fft_2d" || s == "allsky_fft")
+        return DirectBeamformerMode::FFT_2D_ALLSKY;
+    return DirectBeamformerMode::DIRECT;
+}
+
+inline const char* beamformer_mode_to_string(DirectBeamformerMode m) {
+    return (m == DirectBeamformerMode::FFT_2D_ALLSKY) ? "fft_2d_allsky" : "direct";
+}
+
 enum class DirectTaperType : int {
     NONE = 0, // Uniform weights (first sidelobe ~ -13.2 dB)
     COSINE_PEDESTAL =
@@ -137,6 +152,9 @@ struct DirectBeamTrackerConfig {
     float grid_step = 0.02f;
     bool enable_cuda_graph = false;
     bool enable_subframe_interpolation = true;
+    bool enable_tensor_core = true;
+    DirectBeamformerMode beamformer_mode = DirectBeamformerMode::DIRECT;
+    std::size_t fft_2d_size = 16;
 
     // Fused 2D Spatial Tapering & Optional Weight-Space BiSLC
     DirectTaperType taper_type = DirectTaperType::COSINE_PEDESTAL;
@@ -371,7 +389,8 @@ void launch_direct_beamformer(const int4x2_t* d_packed, const float2* d_weights,
                               std::size_t time_unroll = 4, std::size_t beam_tile_size = 4,
                               cudaStream_t stream = nullptr, std::size_t n_pol = 1,
                               DirectPolLayout pol_layout = DirectPolLayout::INTERLEAVED,
-                              DirectInputFormat input_format = DirectInputFormat::INT4X2);
+                              DirectInputFormat input_format = DirectInputFormat::INT4X2,
+                              bool enable_tensor_core = true);
 
 inline void launch_direct_beamformer(const int4x2_t* d_packed, const float2* d_weights,
                                      float2* d_voltages, std::size_t n_time, std::size_t n_freq,
@@ -381,11 +400,38 @@ inline void launch_direct_beamformer(const int4x2_t* d_packed, const float2* d_w
                                      std::size_t beam_tile_size = 4, cudaStream_t stream = nullptr,
                                      std::size_t n_pol = 1,
                                      DirectPolLayout pol_layout = DirectPolLayout::INTERLEAVED,
-                                     DirectInputFormat input_format = DirectInputFormat::INT4X2) {
+                                     DirectInputFormat input_format = DirectInputFormat::INT4X2,
+                                     bool enable_tensor_core = true) {
     launch_direct_beamformer(d_packed, d_weights, nullptr, d_voltages, n_time, n_freq, n_ant,
                              num_active_beams, max_beams_stride, time_chunk_size, time_unroll,
-                             beam_tile_size, stream, n_pol, pol_layout, input_format);
+                             beam_tile_size, stream, n_pol, pol_layout, input_format,
+                             enable_tensor_core);
 }
+
+/**
+ * @brief Separable 2D all-sky FFT beamformer for an 8x8 array (N_FFT = 8 -> 64 beams,
+ *        or zero-padded N_FFT = 16 -> 256 oversampled beams).
+ *
+ * Applies optional per-(freq, elem) calibration correctors and scalar taper weights prior
+ * to 2D separable Cooley-Tukey FFT with centered zenith at beam (N_FFT/2, N_FFT/2).
+ */
+void launch_factorized_2d_fft_beamformer(
+    const int4x2_t* d_packed, float2* d_voltages, float* d_power,
+    const float2* d_calibration_gains, const float* d_norm_taper, const std::uint8_t* d_rfi_mask,
+    std::size_t n_time, std::size_t n_freq, std::size_t fft_size, std::size_t max_beams_stride,
+    std::size_t time_chunk_size = 256, bool descending_order = true, cudaStream_t stream = nullptr,
+    DirectInputFormat input_format = DirectInputFormat::INT4X2);
+
+/**
+ * @brief Separable two-stage factorized 2D DFT beamformer (BURSTT-256 Eq. 1-5):
+ *        B(q, p) = sum_row B_y[q, row] * (sum_col B_x[p, col] * V(row, col)).
+ */
+void launch_factorized_2d_dft_beamformer(
+    const int4x2_t* d_packed, const float2* d_bx_weights, const float2* d_by_weights,
+    float2* d_voltages, std::size_t n_time, std::size_t n_freq, std::size_t nx_beams,
+    std::size_t ny_beams, std::size_t max_beams_stride, std::size_t time_chunk_size = 256,
+    bool descending_order = true, cudaStream_t stream = nullptr,
+    DirectInputFormat input_format = DirectInputFormat::INT4X2);
 
 void set_l2_persisting_weights_policy(cudaStream_t stream, const void* ptr, std::size_t bytes);
 
