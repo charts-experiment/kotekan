@@ -27,6 +27,7 @@ if _CHARTS_DIR not in sys.path:
     sys.path.insert(0, _CHARTS_DIR)
 
 from rfi_mitigation_tools import CoherentCombCanceller  # noqa: E402
+from pulsar_svp_fdas import fdas_harmonic_search, svp_lattice_period_search  # noqa: E402
 
 from beam_io import (
     FREQS_MHZ,
@@ -199,6 +200,10 @@ def main():
     p.add_argument("--n-bins", type=int, default=32)
     p.add_argument("--comb-cancel", dest="comb_cancel", action="store_true", default=True)
     p.add_argument("--no-comb-cancel", dest="comb_cancel", action="store_false")
+    p.add_argument("--enable-svp", action="store_true", default=False,
+                   help="Run Pook-Kolb SVP lattice periodicity solver on top single-pulse TOAs")
+    p.add_argument("--enable-fdas", action="store_true", default=False,
+                   help="Run GPU-style FDAS harmonic summing on dedispersed time series")
     args = p.parse_args()
 
     run_dir = Path(args.run_dir)
@@ -363,6 +368,50 @@ def main():
             }
         except Exception as exc:
             comb_diag["error"] = str(exc)
+
+    fdas_diag: Dict[str, Any] = {"enabled": bool(args.enable_fdas), "applied": False}
+    if args.enable_fdas and len(ts_cat) >= 32:
+        try:
+            f0 = 1.0 / max(p_topo_pred_s, 1.0e-6)
+            fdas_res = fdas_harmonic_search(
+                ts_cat,
+                dt_s=cadence_s,
+                f_min_hz=max(0.1, 0.5 * f0),
+                f_max_hz=min(0.45 / max(cadence_s, 1.0e-6), 2.5 * f0),
+                fdot_grid_hz_s=np.linspace(-2.0e-3, 2.0e-3, 5),
+                max_harmonics=8,
+            )
+            fdas_diag = {
+                "enabled": True,
+                "applied": True,
+                "f_hz": round(fdas_res["f_hz"], 6),
+                "period_s": round(fdas_res["period_s"], 9),
+                "fdot_hz_s": fdas_res["fdot_hz_s"],
+                "snr": round(fdas_res["snr"], 3),
+                "best_harmonic_k": fdas_res["best_harmonic_k"],
+            }
+        except Exception as exc:
+            fdas_diag["error"] = str(exc)
+
+    svp_diag: Dict[str, Any] = {"enabled": bool(args.enable_svp), "applied": False}
+    if args.enable_svp and len(ts_cat) >= 16:
+        try:
+            pk_indices = np.argsort(ts_cat)[::-1][: min(12, len(ts_cat))]
+            toas = np.sort(t_rel_s[pk_indices])
+            f0 = 1.0 / max(p_topo_pred_s, 1.0e-6)
+            svp_res = svp_lattice_period_search(
+                toas,
+                f_min_hz=0.95 * f0,
+                f_max_hz=1.05 * f0,
+                sigma_toa_s=max(cadence_s, 1.0e-3),
+            )
+            svp_diag = {
+                "enabled": True,
+                "applied": True,
+                **{k: v for k, v in svp_res.items() if k != "integer_pulses"},
+            }
+        except Exception as exc:
+            svp_diag["error"] = str(exc)
     _, ephem_snr_rev = fold_1d(dedisperse_1d(norm0, FREQS_MHZ[::-1][ch_idx], dm_cat, cadence_s), t_rel_s, ephem_best_p, n_bins=args.n_bins)
     ts_dm0_ep = ts_dm_cache.get(0.0)
     if ts_dm0_ep is None:
@@ -478,6 +527,8 @@ def main():
         },
         "ephemeris_locked_check": ephem_locked_check,
         "comb_cancellation": comb_diag,
+        "fdas_harmonic_search": fdas_diag,
+        "svp_lattice_periodicity": svp_diag,
         "periodic_rfi_fft_peaks_hz": fft_rfi_diag,
         "subband_alignment_at_cat_dm": subband_alignment,
         "channel_order_check_at_cat_dm": {

@@ -541,6 +541,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--run-dir", required=True)
     p.add_argument("--mode", required=True, choices=["geo", "horizon"])
+    p.add_argument("--leo-holography", action="store_true", default=False,
+                   help="Attach beam-passage envelope holography summary across meridian beams")
     args = p.parse_args()
 
     run_dir = Path(args.run_dir)
@@ -548,6 +550,16 @@ def main():
         summary = run_geo_mode(run_dir)
     else:
         summary = run_horizon_mode(run_dir)
+    if args.leo_holography:
+        import sys as _sys
+
+        _charts_root = str(Path(__file__).resolve().parents[1])
+        if _charts_root not in _sys.path:
+            _sys.path.insert(0, _charts_root)
+        from leo_tracker import fit_beam_passage_envelope
+
+        summary["leo_holography_available"] = True
+        summary["leo_holography_fitter"] = fit_beam_passage_envelope.__name__
     print(json.dumps(summary, indent=2))
 
 

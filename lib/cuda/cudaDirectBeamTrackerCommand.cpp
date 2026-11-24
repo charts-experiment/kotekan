@@ -562,6 +562,70 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                 rest.register_post_callback("/beam_tracker/set_celestial_target", set_celestial_cb);
             }
 
+            // 2b. Non-sidereal LEO / SGP4-TLE Frame Trajectory Target
+            auto set_tle_cb = [group](connectionInstance& conn, nlohmann::json& j) {
+                try {
+                    std::lock_guard<std::mutex> lk(group->group_mutex);
+                    const std::size_t beam_id = j.value("beam_id", std::size_t{0});
+                    if (beam_id >= group->config.max_beams) {
+                        conn.send_error("beam_id exceeds configured max_beams",
+                                        HTTP_RESPONSE::BAD_REQUEST);
+                        return;
+                    }
+                    if (!j.contains("l0") || !j.contains("m0")) {
+                        conn.send_error("Missing l0 or m0 for set_tle_target",
+                                        HTTP_RESPONSE::BAD_REQUEST);
+                        return;
+                    }
+                    const float l0 = j["l0"].get<float>();
+                    const float m0 = j["m0"].get<float>();
+                    const double frame_dur_s = j.value(
+                        "frame_duration_s",
+                        static_cast<double>(group->config.samples_per_data_set)
+                            * charts::constants::fpga_time_resolution_s);
+
+                    float l1 = l0;
+                    float m1 = m0;
+                    if (j.contains("l1") || j.contains("m1")) {
+                        l1 = j.value("l1", l0);
+                        m1 = j.value("m1", m0);
+                    } else if (j.contains("dl_dt") || j.contains("dm_dt")) {
+                        l1 = l0 + static_cast<float>(j.value("dl_dt", 0.0) * frame_dur_s);
+                        m1 = m0 + static_cast<float>(j.value("dm_dt", 0.0) * frame_dur_s);
+                    }
+
+                    const float r0_sq = l0 * l0 + m0 * m0;
+                    const float r1_sq = l1 * l1 + m1 * m1;
+                    if (r0_sq > 1.0001f || r1_sq > 1.0001f) {
+                        conn.send_error("TLE direction cosines exceed horizon (l^2 + m^2 > 1)",
+                                        HTTP_RESPONSE::BAD_REQUEST);
+                        return;
+                    }
+                    const float n0 = std::sqrt(std::max(0.0f, 1.0f - r0_sq));
+                    const float n1 = std::sqrt(std::max(0.0f, 1.0f - r1_sq));
+
+                    auto& tgt = group->config.targets[beam_id];
+                    tgt.direction = DirectDirection3D{l0, m0, n0};
+                    tgt.direction_end = DirectDirection3D{l1, m1, n1};
+                    tgt.celestial.is_set = false;
+                    tgt.grid_index = -1;
+                    tgt.tle_name = j.value("tle_name", std::string{});
+                    tgt.norad_id = j.value("norad_id", 0);
+                    if (j.contains("calibrated")) {
+                        tgt.calibrated = j["calibrated"].get<bool>();
+                    }
+                    group->config.config_generation++;
+
+                    conn.send_text_reply(fmt::format("TLE target set for beam {:d}\n", beam_id));
+                } catch (const std::exception& e) {
+                    conn.send_error(e.what(), HTTP_RESPONSE::BAD_REQUEST);
+                }
+            };
+            rest.register_post_callback(group->rest_prefix + "/set_tle_target", set_tle_cb);
+            if (group->rest_prefix == "/direct_tracker") {
+                rest.register_post_callback("/beam_tracker/set_tle_target", set_tle_cb);
+            }
+
             // 3. Enable Beams
             auto enable_beams_cb = [group](connectionInstance& conn, nlohmann::json& j) {
                 try {
@@ -975,6 +1039,12 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                         t["ra_deg"] = group->config.targets[b].celestial.ra_deg;
                         t["dec_deg"] = group->config.targets[b].celestial.dec_deg;
                     }
+                    if (!group->config.targets[b].tle_name.empty()) {
+                        t["tle_name"] = group->config.targets[b].tle_name;
+                    }
+                    if (group->config.targets[b].norad_id > 0) {
+                        t["norad_id"] = group->config.targets[b].norad_id;
+                    }
                     targets.push_back(t);
                 }
                 reply["targets"] = targets;
@@ -1003,6 +1073,12 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                     if (group->config.targets[b].celestial.is_set) {
                         t["ra_deg"] = group->config.targets[b].celestial.ra_deg;
                         t["dec_deg"] = group->config.targets[b].celestial.dec_deg;
+                    }
+                    if (!group->config.targets[b].tle_name.empty()) {
+                        t["tle_name"] = group->config.targets[b].tle_name;
+                    }
+                    if (group->config.targets[b].norad_id > 0) {
+                        t["norad_id"] = group->config.targets[b].norad_id;
                     }
                     targets.push_back(t);
                 }

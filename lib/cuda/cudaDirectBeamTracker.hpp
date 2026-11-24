@@ -127,6 +127,8 @@ struct DirectBeamTarget {
     DirectDirection3D direction{0.0f, 0.0f, 1.0f};
     DirectDirection3D direction_end{0.0f, 0.0f, 1.0f};
     DirectCelestialTarget celestial;
+    std::string tle_name;
+    int norad_id = 0;
     int grid_index = -1;
     bool calibrated = true;
 };
