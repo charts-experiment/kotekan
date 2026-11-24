@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace kotekan {
@@ -83,10 +84,12 @@ private:
     std::vector<int> _current_active_raw;
     std::vector<int> _excision_exempt_freq_ids;
     std::vector<std::uint8_t> _h_exempt_channels;
+    std::vector<std::uint8_t> _h_base_exempt_channels;
     bool _exempt_resolved = false;
     std::uint64_t _applied_mask_gen = 0;
     std::uint64_t _applied_rfi_cfg_gen = 0;
     std::uint64_t _applied_ema_reset_gen = 1;
+    std::uint64_t _applied_solar_exempt_gen = 0;
     std::uint64_t _frame_counter = 0;
 
     // Device buffers
@@ -120,6 +123,8 @@ private:
     static RfiMitigationConfig _shared_config;
     static std::uint64_t _config_generation;
     static std::uint64_t _ema_reset_generation;
+    static std::vector<std::pair<double, double>> _solar_exempt_ranges_mhz;
+    static std::uint64_t _solar_exempt_generation;
     static std::vector<cudaRfiMitigationCommand*> _instances;
     static bool _endpoints_registered;
 };

@@ -1876,6 +1876,14 @@ def _in_manual_notch(f_mhz: float, manual_notches: List[List[float]], margin: fl
     return any((pair[0] - margin) <= f_mhz <= (pair[1] + margin) for pair in manual_notches)
 
 
+def _in_protected_solar_range(
+    f_mhz: float, solar_protected_ranges_mhz: Optional[Sequence[Sequence[float]]]
+) -> bool:
+    if not solar_protected_ranges_mhz:
+        return False
+    return any(len(r) >= 2 and float(r[0]) <= f_mhz <= float(r[1]) for r in solar_protected_ranges_mhz)
+
+
 def update_managed_notches(
     channels: List[Dict[str, Any]],
     slow_occ: Optional[np.ndarray],
@@ -1886,6 +1894,7 @@ def update_managed_notches(
     promote_streak: int = 5,
     demote_streak: int = 5,
     max_managed: int = MAX_AUTO_NOTCH_CHANNELS,
+    solar_protected_ranges_mhz: Optional[Sequence[Sequence[float]]] = None,
 ) -> Tuple[List[List[float]], bool, Dict[str, Any]]:
     """Cluster- and shoulder-aware hysteresis manager for persistent RFI static notches."""
     manual_notches: List[List[float]] = []
@@ -1967,6 +1976,10 @@ def update_managed_notches(
         )
 
         if severe_persistent:
+            if _in_protected_solar_range(f_mhz, solar_protected_ranges_mhz):
+                bad_streaks[f_mhz] = 0
+                clean_streaks[f_mhz] = 0
+                continue
             bad_streaks[f_mhz] = bad_streaks.get(f_mhz, 0) + 1
             clean_streaks[f_mhz] = 0
             if (
@@ -2867,6 +2880,8 @@ class ClosedLoopDaemon:
         self.notch_bad_streaks: Dict[float, int] = {}
         self.notch_clean_streaks: Dict[float, int] = {}
         self.managed_notch_freqs: set[float] = set()
+        self.solar_protected_ranges_mhz: List[List[float]] = []
+        self.last_solar_burst_info: Dict[str, Any] = {"classification": "NONE"}
         if os.path.isfile(self.status_json):
             try:
                 prev = json.loads(Path(self.status_json).read_text(encoding="utf-8"))
@@ -3066,8 +3081,36 @@ class ClosedLoopDaemon:
                     if err.code != 404:
                         raise
 
-        # 4. Loop C: Cluster/shoulder-aware persistent-RFI static-notch hysteresis
+        # 4. Loop C: Cluster/shoulder-aware persistent-RFI static-notch hysteresis (protected from Solar Radio Bursts)
         notch_info: Dict[str, Any] = {"managed_count": len(self.managed_notch_freqs)}
+        if recent_wf is not None and recent_freqs is not None and recent_times is not None and recent_wf.shape[0] >= 4:
+            try:
+                from solar_burst_guard import classify_solar_radio_burst
+
+                sun_el = float(env_snap.get("metrics", {}).get("sun_el_deg", qa.get("sun_el_deg", 0.0)) or 0.0) if "env_snap" in locals() else 0.0
+                if sun_el > 10.0 and recent_wf.ndim == 3 and recent_wf.shape[1] >= 1:
+                    sun_spec = recent_wf[:, 0, :]
+                    off_spec = recent_wf[:, -1, :] if recent_wf.shape[1] >= 2 else None
+                    sb_res = classify_solar_radio_burst(
+                        sun_spec, off_spec, recent_freqs, recent_times, sun_el_deg=sun_el
+                    )
+                    self.last_solar_burst_info = sb_res
+                    self.solar_protected_ranges_mhz = list(sb_res.get("protected_ranges_mhz", []))
+                    if sb_res.get("is_solar_burst"):
+                        msg = (
+                            f"SOLAR_RADIO_BURST ({sb_res['burst_type']}, "
+                            f"df/dt={sb_res['drift_rate_mhz_s']:.2f} MHz/s, "
+                            f"protected={self.solar_protected_ranges_mhz})"
+                        )
+                        cycle_actions.append(msg)
+                        self._record_action(msg)
+                        http_post_json(
+                            self.base_url,
+                            "/rfi_mitigation/solar_burst_exempt",
+                            {"ranges_mhz": self.solar_protected_ranges_mhz},
+                        )
+            except Exception:
+                pass
         if self.auto_notch and has_raw_channels:
             existing_notches = rfi.get("static_notch_bands_mhz", [])
             new_notches, notch_changed, notch_info = update_managed_notches(
@@ -3077,6 +3120,7 @@ class ClosedLoopDaemon:
                 self.notch_bad_streaks,
                 self.notch_clean_streaks,
                 self.managed_notch_freqs,
+                solar_protected_ranges_mhz=self.solar_protected_ranges_mhz,
             )
             if notch_changed:
                 http_post_json(
@@ -3358,6 +3402,37 @@ def print_monitor(
         if not follow:
             break
         time.sleep(max(5.0, interval_s))
+
+
+def evaluate_mutual_coupling_diagnostics(
+    cov_matrices: np.ndarray,
+    positions_m: np.ndarray,
+    weights: Optional[np.ndarray] = None,
+    delays_ns: Optional[np.ndarray] = None,
+    measured_lm: Optional[np.ndarray] = None,
+    expected_lm: Optional[np.ndarray] = None,
+    t_rec_k: float = 50.0,
+    t_loss_k: float = 5.0,
+    t_sky_k: float = 20.0,
+) -> Dict[str, Any]:
+    """Run CAL-2.4 mutual coupling noise (p_mc, T_mc) & azimuth/tilt self-calibration diagnostics."""
+    from spatial_calibration import compute_mutual_coupling_noise, fit_array_azimuth_and_tilt
+
+    mc = compute_mutual_coupling_noise(
+        cov_matrices, weights=weights, t_rec_k=t_rec_k, t_loss_k=t_loss_k, t_sky_k=t_sky_k
+    )
+    geom: Dict[str, float] = {}
+    if delays_ns is not None or (measured_lm is not None and expected_lm is not None):
+        geom = fit_array_azimuth_and_tilt(
+            positions_m, delays_ns=delays_ns, measured_lm=measured_lm, expected_lm=expected_lm
+        )
+    return {
+        "mean_p_mc": mc["mean_p_mc"],
+        "mean_t_mc_k": mc["mean_t_mc_k"],
+        "max_t_mc_k": mc["max_t_mc_k"],
+        "resonant_spike_indices": mc["resonant_spike_indices"],
+        "geometry": geom,
+    }
 
 
 def main() -> int:
