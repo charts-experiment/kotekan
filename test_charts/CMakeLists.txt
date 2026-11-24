@@ -121,4 +121,13 @@ if(CUDAToolkit_FOUND)
                                                 ${COMMON_TEST_SRCS})
     target_link_libraries(test_wave3_gpu_scaling_suite PRIVATE CUDA::cudart Threads::Threads)
     target_include_directories(test_wave3_gpu_scaling_suite PRIVATE ${COMMON_INCLUDE_DIRS})
+
+    # 12. Wave 3B Beam Upchannelizer Test Suite
+    add_executable(
+        test_beam_upchannelize_suite
+        test_beam_upchannelize_suite.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cuda/cudaBeamUpchannelize.cu
+        ${CMAKE_CURRENT_SOURCE_DIR}/../lib/core/kotekanLogging.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../lib/core/errors.c)
+    target_link_libraries(test_beam_upchannelize_suite PRIVATE CUDA::cudart Threads::Threads)
+    target_include_directories(test_beam_upchannelize_suite PRIVATE ${COMMON_INCLUDE_DIRS})
 endif()
