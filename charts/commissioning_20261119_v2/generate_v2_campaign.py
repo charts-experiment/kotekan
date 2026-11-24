@@ -11,9 +11,10 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import astropy.units as u
 import numpy as np
@@ -22,6 +23,16 @@ from astropy.coordinates import AltAz, EarthLocation, SkyCoord, get_sun
 from astropy.time import Time
 
 from charts_constants import CHARTS_ALTITUDE_M, CHARTS_LATITUDE_DEG, CHARTS_LONGITUDE_DEG
+
+_CHARTS_DIR = str(Path(__file__).resolve().parents[1])
+if _CHARTS_DIR not in sys.path:
+    sys.path.insert(0, _CHARTS_DIR)
+
+from rfi_mitigation_tools import (  # noqa: E402
+    FREQS_MHZ,
+    PUDAHUEL_KNOWN_INTERFERERS,
+    find_optimal_off_beams,
+)
 
 V2_DATA_ROOT = Path("/data/commissioning_20261119_v2")
 V2_SCRIPT_DIR = Path("/home/fpalma/kotekan/charts/commissioning_20261119_v2")
@@ -632,9 +643,42 @@ def patch_tracker_solar_m0(cfg: Dict[str, Any], m0_val: float) -> None:
                 cmd["source_m0_7"] = round(m0_val - 0.122, 4)
 
 
+def select_grating_safe_off_lm(
+    target_l: float,
+    target_m: float,
+    positions_m: np.ndarray | None = None,
+    interferers: Tuple[Tuple[float, float], ...] | None = None,
+    min_sep_deg: float = 18.0,
+) -> Tuple[float, float]:
+    """Select an OFF (l, m) coordinate minimizing grating-lobe leakage across 300-501 MHz."""
+    pos = np.asarray(build_antenna_positions(), dtype=np.float64)[ACTIVE_ANTENNAS] if positions_m is None else np.asarray(positions_m, dtype=np.float64)
+    inter = (
+        tuple(PUDAHUEL_KNOWN_INTERFERERS.values())
+        if interferers is None
+        else tuple(interferers)
+    )
+    cands = find_optimal_off_beams(
+        pos,
+        FREQS_MHZ[::4],
+        target_l=float(target_l),
+        target_m=float(target_m),
+        interferers=inter,
+        min_sep_deg=min_sep_deg,
+        max_zenith_deg=65.0,
+        grid_n=49,
+        top_k=1,
+    )
+    return round(cands[0].l0, 4), round(cands[0].m0, 4)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--rebuild-beam-configs", action="store_true", help="Rebuild YAML configs only, preserving manifest timing")
+    p.add_argument(
+        "--optimize-off-beams",
+        action="store_true",
+        help="Use grating-lobe-safe OFF-beam coordinates via find_optimal_off_beams()",
+    )
     p.add_argument(
         "--generate-continuation-20261121",
         action="store_true",
@@ -661,6 +705,13 @@ def main():
     rfi_locs = load_rfi_targets()
     rfi_425 = rfi_locs.get("RFI_425.4", {}).get("peak_el_ge_25", {"l": 0.008, "m": -0.9031})
     rfi_472 = rfi_locs.get("RFI_472.5", {}).get("peak_el_ge_25", {"l": -0.5035, "m": -0.1838})
+
+    solar_chr_off_l, solar_chr_off_m = (
+        select_grating_safe_off_lm(0.0005, 0.2356) if args.optimize_off_beams else (0.0, -0.70)
+    )
+    cena_off_l, cena_off_m = (
+        select_grating_safe_off_lm(0.0, -0.1691) if args.optimize_off_beams else (-0.55, 0.45)
+    )
 
     configs: Dict[str, Dict[str, Any]] = {
         "00_phase1_corr_cal.yaml": build_corr_config(
@@ -842,7 +893,7 @@ def main():
                 {"l0": 0.0872, "m0": -0.1691},                              # 2: Cen A +5 deg E (updated live)
                 {"l0": -0.0872, "m0": -0.1691},                             # 3: Cen A -5 deg W (updated live)
                 {"l0": 0.56, "m0": 0.21},                                   # 4: Sun simultaneous monitor (updated live)
-                {"l0": -0.55, "m0": 0.45},                                  # 5: Deep OFF
+                {"l0": cena_off_l, "m0": cena_off_m},                       # 5: Deep OFF
             ],
             rfi_enabled=True,
             rfi_blank_voltages=True,
@@ -869,7 +920,7 @@ def main():
                 {"l0": 0.0005, "m0": 0.3056},                               # 6: N +4 deg
                 {"l0": 0.0005, "m0": 0.1136},                               # 7: S -7 deg
                 {"l0": 0.0005, "m0": 0.2356},                               # 8: Uncalibrated Tracked Sun ON
-                {"l0": 0.0, "m0": -0.70},                                   # 9: Deep South OFF (~58 deg from Sun)
+                {"l0": solar_chr_off_l, "m0": solar_chr_off_m},             # 9: Deep South OFF (grating-safe when optimized)
             ],
             rfi_enabled=True,
             rfi_blank_voltages=True,
