@@ -115,4 +115,10 @@ if(CUDAToolkit_FOUND)
                                                    ${COMMON_TEST_SRCS})
     target_link_libraries(test_pirate_beam_quantize_suite PRIVATE CUDA::cudart Threads::Threads)
     target_include_directories(test_pirate_beam_quantize_suite PRIVATE ${COMMON_INCLUDE_DIRS})
+
+    # 11. Wave 3A Blackwell MMA & 2D FFT GPU Scaling Test Suite
+    add_executable(test_wave3_gpu_scaling_suite test_wave3_gpu_scaling_suite.cpp
+                                                ${COMMON_TEST_SRCS})
+    target_link_libraries(test_wave3_gpu_scaling_suite PRIVATE CUDA::cudart Threads::Threads)
+    target_include_directories(test_wave3_gpu_scaling_suite PRIVATE ${COMMON_INCLUDE_DIRS})
 endif()

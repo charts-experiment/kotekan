@@ -171,6 +171,21 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
     _grid_mode_enabled = config.get_default<bool>(unique_name, "enable_grid_mode", false);
     _compute_power_inline_only =
         config.get_default<bool>(unique_name, "compute_power_inline_only", false);
+    _enable_tensor_core = config.get_default<bool>(unique_name, "enable_tensor_core", true);
+    _beamformer_mode = parse_beamformer_mode(
+        config.get_default<std::string>(unique_name, "beamformer_mode", "direct"));
+    _fft_2d_size =
+        static_cast<std::size_t>(config.get_default<int>(unique_name, "fft_2d_size", 16));
+    if (_beamformer_mode == DirectBeamformerMode::FFT_2D_ALLSKY) {
+        if (_fft_2d_size != 8 && _fft_2d_size != 16) {
+            FATAL_ERROR("cudaDirectBeamTrackerCommand: fft_2d_size must be 8 or 16 (got {:d})",
+                        _fft_2d_size);
+        }
+        if (static_cast<std::size_t>(_max_beams) < _fft_2d_size * _fft_2d_size) {
+            FATAL_ERROR("cudaDirectBeamTrackerCommand: max_beams ({:d}) must be >= fft_2d_size^2 ({:d}) for fft_2d_allsky mode",
+                        _max_beams, _fft_2d_size * _fft_2d_size);
+        }
+    }
     _grid_step = config.get_default<float>(unique_name, "grid_step", 0.02f);
     const bool enable_subframe_interp =
         config.get_default<bool>(unique_name, "enable_subframe_interpolation", true);
@@ -267,6 +282,9 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
 
         group->config.enable_grid_mode = _grid_mode_enabled;
         group->config.compute_power_inline_only = _compute_power_inline_only;
+        group->config.enable_tensor_core = _enable_tensor_core;
+        group->config.beamformer_mode = _beamformer_mode;
+        group->config.fft_2d_size = _fft_2d_size;
         group->config.grid_step = _grid_step;
         group->config.enable_cuda_graph = _enable_cuda_graph;
         group->config.enable_subframe_interpolation = enable_subframe_interp;
@@ -741,6 +759,9 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                 reply["grid_mode_enabled"] = group->config.enable_grid_mode;
                 reply["grid_points"] = group->config.num_grid_points;
                 reply["compute_power_inline_only"] = group->config.compute_power_inline_only;
+                reply["enable_tensor_core"] = group->config.enable_tensor_core;
+                reply["beamformer_mode"] = beamformer_mode_to_string(group->config.beamformer_mode);
+                reply["fft_2d_size"] = group->config.fft_2d_size;
                 reply["spacing_m"] = group->config.spacing_m;
                 reply["active_elements"] = group->config.num_active_antennas;
                 reply["active_antennas"] = group->config.num_active_antennas;
@@ -1775,7 +1796,18 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
     }
 
     auto launch_beamformer_pass = [&]() {
-        if (_compute_power_inline_only) {
+        if (_beamformer_mode == DirectBeamformerMode::FFT_2D_ALLSKY) {
+            const float2* cal_ptr =
+                current_config.apply_calibration_gains ? _d_calibration_gains : nullptr;
+            launch_factorized_2d_fft_beamformer(
+                reinterpret_cast<const int4x2_t*>(input_memory),
+                _compute_power_inline_only ? nullptr : reinterpret_cast<float2*>(output_memory),
+                _d_beam_power, cal_ptr, _d_norm_taper, d_mask_ptr,
+                static_cast<std::size_t>(_samples_per_data_set),
+                static_cast<std::size_t>(_num_local_freq), _fft_2d_size,
+                static_cast<std::size_t>(_max_beams), _time_chunk_size,
+                (_antenna_order != "ascending"), stream, input_format);
+        } else if (_compute_power_inline_only) {
             launch_direct_beamformer_power_only(
                 reinterpret_cast<const int4x2_t*>(input_memory), _d_weights, step_weights_ptr,
                 _d_beam_power, static_cast<std::size_t>(_samples_per_data_set),
@@ -1791,7 +1823,7 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
                 static_cast<std::size_t>(_num_local_freq), static_cast<std::size_t>(_num_antennas),
                 active_beams, static_cast<std::size_t>(_max_beams), _time_chunk_size, _time_unroll,
                 _beam_tile_size, stream, static_cast<std::size_t>(_num_pols), _pol_layout,
-                input_format);
+                input_format, _enable_tensor_core);
         }
     };
 
@@ -1824,7 +1856,8 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
 
     // Launch reduction kernel (unless already reduced inline) & copy to pinned host buffer
     if (_d_beam_power && _h_beam_power) {
-        if (!_compute_power_inline_only) {
+        if (!_compute_power_inline_only
+            && _beamformer_mode != DirectBeamformerMode::FFT_2D_ALLSKY) {
             launch_reduce_beam_power(reinterpret_cast<const float2*>(output_memory), _d_beam_power,
                                      static_cast<std::size_t>(_samples_per_data_set),
                                      static_cast<std::size_t>(_num_local_freq), active_beams,
