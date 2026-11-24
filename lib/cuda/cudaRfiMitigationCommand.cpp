@@ -130,6 +130,8 @@ cudaRfiMitigationCommand::cudaRfiMitigationCommand(Config& config, const std::st
         0, config.get_default<int>(unique_name, "edge_channels_to_ignore", 0));
     init_cfg.enable_persistent_ema =
         config.get_default<bool>(unique_name, "enable_persistent_ema", true);
+    init_cfg.enable_ema_freq_prewhite =
+        config.get_default<bool>(unique_name, "enable_ema_freq_prewhite", true);
     init_cfg.ema_alpha = std::min<float>(
         1.0f, std::max<float>(1.0e-4f, config.get_default<float>(unique_name, "ema_alpha", 0.02f)));
 
@@ -195,6 +197,7 @@ cudaRfiMitigationCommand::cudaRfiMitigationCommand(Config& config, const std::st
                 reply["shoulder_sigma_threshold"] = cfg.shoulder_sigma_threshold;
                 reply["edge_channels_to_ignore"] = cfg.edge_channels_to_ignore;
                 reply["enable_persistent_ema"] = cfg.enable_persistent_ema;
+                reply["enable_ema_freq_prewhite"] = cfg.enable_ema_freq_prewhite;
                 reply["ema_alpha"] = cfg.ema_alpha;
                 nlohmann::json notch_arr = nlohmann::json::array();
                 for (const auto& [lo_mhz, hi_mhz] : cfg.static_notch_bands_mhz) {
@@ -358,6 +361,9 @@ cudaRfiMitigationCommand::cudaRfiMitigationCommand(Config& config, const std::st
                         if (j.contains("enable_persistent_ema"))
                             _shared_config.enable_persistent_ema =
                                 j["enable_persistent_ema"].get<bool>();
+                        if (j.contains("enable_ema_freq_prewhite"))
+                            _shared_config.enable_ema_freq_prewhite =
+                                j["enable_ema_freq_prewhite"].get<bool>();
                         if (j.contains("ema_alpha"))
                             _shared_config.ema_alpha = std::min<float>(
                                 1.0f, std::max<float>(1.0e-4f, j["ema_alpha"].get<float>()));

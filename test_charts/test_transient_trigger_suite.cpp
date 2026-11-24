@@ -411,6 +411,104 @@ bool test_benchmark_latency_throughput() {
     return pass;
 }
 
+// ============================================================================
+// Test 6: RFI-Masked Gaussian Noise SK Neutrality & Fully-Masked Channel (FIX-1.3)
+// ============================================================================
+bool test_rfi_masked_sk_neutrality() {
+    std::cout << "\n======================================================\n";
+    std::cout << "[Test 6/6] RFI-Masked SK Neutrality & Fully-Masked Channel\n";
+    std::cout << "======================================================\n";
+
+    const std::size_t M = 15360;
+    const std::size_t n_freq = 336;
+    const std::size_t max_beams = 2;
+    const std::size_t chunk_size = 256;
+    const std::size_t n_chunks = M / chunk_size; // 60 chunks
+    const std::size_t total_elements = M * n_freq * max_beams;
+
+    std::vector<float2> h_voltages(total_elements);
+    std::mt19937 rng(2026);
+    std::normal_distribution<float> dist(0.0f, 1.0f);
+    for (std::size_t i = 0; i < total_elements; ++i) {
+        h_voltages[i] = make_float2(dist(rng), dist(rng));
+    }
+
+    // Blank 40% of chunks across channels 0..n_freq-2, and 100% of chunks on channel n_freq-1
+    std::vector<uint8_t> h_mask(n_chunks * n_freq, 0);
+    for (std::size_t f = 0; f < n_freq - 1; ++f) {
+        for (std::size_t c = 0; c < 24; ++c) {
+            h_mask[c * n_freq + f] = 1;
+            for (std::size_t t = c * chunk_size; t < (c + 1) * chunk_size; ++t) {
+                const std::size_t idx = (t * n_freq + f) * max_beams;
+                h_voltages[idx] = make_float2(0.0f, 0.0f);
+                h_voltages[idx + 1] = make_float2(0.0f, 0.0f);
+            }
+        }
+    }
+    for (std::size_t c = 0; c < n_chunks; ++c) {
+        h_mask[c * n_freq + (n_freq - 1)] = 1;
+    }
+    for (std::size_t t = 0; t < M; ++t) {
+        const std::size_t idx = (t * n_freq + (n_freq - 1)) * max_beams;
+        h_voltages[idx] = make_float2(0.0f, 0.0f);
+        h_voltages[idx + 1] = make_float2(0.0f, 0.0f);
+    }
+
+    float2 *d_voltages = nullptr, *d_metrics = nullptr;
+    uint8_t* d_mask = nullptr;
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_voltages, total_elements * sizeof(float2)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_metrics, n_freq * sizeof(float2)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_mask, h_mask.size() * sizeof(uint8_t)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_voltages, h_voltages.data(),
+                                       total_elements * sizeof(float2), cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(
+        cudaMemcpy(d_mask, h_mask.data(), h_mask.size() * sizeof(uint8_t), cudaMemcpyHostToDevice));
+
+    kotekan::TransientTriggerConfig config;
+    config.sk_threshold = 0.08f;
+    config.rfi_threshold = 0.30f;
+    config.min_flagged_channels = 8;
+
+    // 1. Without RFI mask: zeroed chunks inflate SK to ~1/(1-0.4) = 1.67 and fire false trigger
+    kotekan::launch_transient_detection_metrics(d_voltages, d_metrics, M, n_freq, 2, max_beams, 0,
+                                                nullptr, chunk_size);
+    CHECK_CUDA_ERROR_NON_OO(cudaDeviceSynchronize());
+    std::vector<float2> h_unmasked(n_freq);
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(h_unmasked.data(), d_metrics, n_freq * sizeof(float2),
+                                       cudaMemcpyDeviceToHost));
+    const auto dec_unmasked =
+        kotekan::evaluate_transient_decision(h_unmasked.data(), n_freq, config, 0, 0);
+
+    // 2. With RFI mask: SK remains ~1.0 and no false trigger fires
+    kotekan::launch_transient_detection_metrics(d_voltages, d_metrics, M, n_freq, 2, max_beams, 0,
+                                                d_mask, chunk_size);
+    CHECK_CUDA_ERROR_NON_OO(cudaDeviceSynchronize());
+    std::vector<float2> h_masked(n_freq);
+    CHECK_CUDA_ERROR_NON_OO(
+        cudaMemcpy(h_masked.data(), d_metrics, n_freq * sizeof(float2), cudaMemcpyDeviceToHost));
+    const auto dec_masked =
+        kotekan::evaluate_transient_decision(h_masked.data(), n_freq, config, 0, 0);
+
+    const float last_sk = h_masked[n_freq - 1].x;
+    const float last_r01 = h_masked[n_freq - 1].y;
+    std::cout << "  - Unmasked SK (40% zeroed): mean=" << std::fixed << std::setprecision(4)
+              << dec_unmasked.mean_sk << " trigger=" << (dec_unmasked.trigger_fired ? "YES" : "NO")
+              << "\n";
+    std::cout << "  - Masked SK   (40% zeroed): mean=" << dec_masked.mean_sk
+              << " trigger=" << (dec_masked.trigger_fired ? "YES" : "NO") << "\n";
+    std::cout << "  - Fully-masked channel:     SK=" << last_sk << " R01=" << last_r01 << "\n";
+
+    cudaFree(d_voltages);
+    cudaFree(d_metrics);
+    cudaFree(d_mask);
+
+    const bool pass = dec_unmasked.trigger_fired && (!dec_masked.trigger_fired)
+                      && (std::abs(dec_masked.mean_sk - 1.0f) < 0.03f)
+                      && (std::abs(last_sk - 1.0f) < 1e-5f) && (std::abs(last_r01) < 1e-5f);
+    std::cout << "  => Test 6 Result: " << (pass ? "PASSED" : "FAILED") << "\n";
+    return pass;
+}
+
 } // namespace
 
 int main() {
@@ -424,18 +522,20 @@ int main() {
     bool p3 = test_rfi_spatial_coincidence_suppression();
     bool p4 = test_ring_buffer_extraction();
     bool p5 = test_benchmark_latency_throughput();
+    bool p6 = test_rfi_masked_sk_neutrality();
 
     std::cout << "\n================================================================\n";
     std::cout << "  SUITE EXECUTION SUMMARY                                       \n";
     std::cout << "================================================================\n";
-    std::cout << "  [1/5] Gaussian Noise Baseline:        " << (p1 ? "PASSED" : "FAILED") << "\n";
-    std::cout << "  [2/5] Celestial Transient Injection:  " << (p2 ? "PASSED" : "FAILED") << "\n";
-    std::cout << "  [3/5] Common-Mode RFI Suppression:    " << (p3 ? "PASSED" : "FAILED") << "\n";
-    std::cout << "  [4/5] VRAM Ring Buffer Extraction:    " << (p4 ? "PASSED" : "FAILED") << "\n";
-    std::cout << "  [5/5] Latency & Throughput Benchmark: " << (p5 ? "PASSED" : "FAILED") << "\n";
+    std::cout << "  [1/6] Gaussian Noise Baseline:        " << (p1 ? "PASSED" : "FAILED") << "\n";
+    std::cout << "  [2/6] Celestial Transient Injection:  " << (p2 ? "PASSED" : "FAILED") << "\n";
+    std::cout << "  [3/6] Common-Mode RFI Suppression:    " << (p3 ? "PASSED" : "FAILED") << "\n";
+    std::cout << "  [4/6] VRAM Ring Buffer Extraction:    " << (p4 ? "PASSED" : "FAILED") << "\n";
+    std::cout << "  [5/6] Latency & Throughput Benchmark: " << (p5 ? "PASSED" : "FAILED") << "\n";
+    std::cout << "  [6/6] RFI-Masked SK Neutrality:       " << (p6 ? "PASSED" : "FAILED") << "\n";
     std::cout << "================================================================\n";
 
-    if (p1 && p2 && p3 && p4 && p5) {
+    if (p1 && p2 && p3 && p4 && p5 && p6) {
         std::cout << "\n>>> ALL TRANSIENT TRIGGER TESTS PASSED SUCCESSFULLY! <<<\n\n";
         return 0;
     } else {

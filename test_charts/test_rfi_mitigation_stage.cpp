@@ -937,6 +937,109 @@ int main() {
     std::printf("  Result: [PASSED] Conditional frequency shoulders and clean-window MAD verified!\n\n");
     std::fflush(stdout);
 
+    // >>> TEST 7: 1.029 MHz Coax Standing-Wave Pre-Whitening via Persistent EMA (RFI-3.1) <<<
+    std::printf(">>> TEST 7: 1.029 MHz Standing-Wave Passband Pre-Whitening (RFI-3.1) <<<\n");
+    cudaMemset(d_static_notch, 0, n_freq * sizeof(std::uint8_t));
+    cudaMemset(d_channel_gains, 0, n_freq * sizeof(float));
+    cudaMemset(d_ema_power, 0, n_freq * sizeof(float));
+    cudaMemset(d_ema_mad, 0, n_freq * sizeof(float));
+
+    // Synthesize +-12% 1.029 MHz standing wave (0.972 us delay across 0.3 MHz channels)
+    std::vector<int4x2_t> h_sw_clean(frame_elems, pack_int4x2_signed(0, 0));
+    constexpr float sw_period_ch = 1.029f / 0.3f; // ~3.43 channels/cycle
+    for (std::size_t t = 0; t < n_time; ++t) {
+        for (std::size_t f = 0; f < n_freq; ++f) {
+            const float sw_amp =
+                1.0f + 0.12f * std::sin(2.0f * 3.14159265f * static_cast<float>(f) / sw_period_ch);
+            const std::size_t base = (t * n_freq + f) * n_elem;
+            for (int a = 0; a < num_active; ++a) {
+                const float sig = ant_sigmas[a] * passband_scale[f] * sw_amp;
+                const int re = static_cast<int>(std::round(norm(rng) * sig));
+                const int im = static_cast<int>(std::round(norm(rng) * sig));
+                h_sw_clean[base + active_raw[a]] = pack_int4x2_signed(re, im);
+            }
+        }
+    }
+
+    RfiMitigationConfig cfg_sw = cfg_bench;
+    cfg_sw.enable_persistent_ema = true;
+    cfg_sw.ema_alpha = 0.25f;
+    cfg_sw.enable_ema_freq_prewhite = true;
+    cfg_sw.enable_freq_mad_check = true;
+    cfg_sw.mad_sigma_threshold = 6.0f;
+
+    cudaMemcpy(d_voltages, h_sw_clean.data(), frame_elems * sizeof(int4x2_t), cudaMemcpyHostToDevice);
+    for (int step = 0; step < 12; ++step) {
+        launch_inspect_rfi_chunks(d_voltages, d_active_antennas, num_active, d_chunk_power,
+                                  d_chunk_sk, d_chunk_sat_frac, n_time, n_freq, n_elem, chunk_size,
+                                  1, nullptr, false);
+        launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_chunk_sat_frac, d_static_notch,
+                                  d_channel_gains, d_chunk_rfi_mask, d_channel_stats, n_chunks,
+                                  n_freq, num_active, chunk_size, cfg_sw, nullptr, nullptr,
+                                  d_ema_power, d_ema_mad);
+    }
+
+    // Inject moderate +22% narrowband emitter at ch=180 (inside the +-12% standing wave)
+    const std::size_t f_mod_cw = 180;
+    std::vector<int4x2_t> h_sw_cw = h_sw_clean;
+    const float sw_180 =
+        1.0f + 0.12f * std::sin(2.0f * 3.14159265f * static_cast<float>(f_mod_cw) / sw_period_ch);
+    for (std::size_t t = 0; t < n_time; ++t) {
+        const std::size_t base = (t * n_freq + f_mod_cw) * n_elem;
+        for (int a = 0; a < num_active; ++a) {
+            const float sig = ant_sigmas[a] * passband_scale[f_mod_cw] * sw_180 * 1.15f; // ~+32% power
+            const int re = static_cast<int>(std::round(norm(rng) * sig));
+            const int im = static_cast<int>(std::round(norm(rng) * sig));
+            h_sw_cw[base + active_raw[a]] = pack_int4x2_signed(re, im);
+        }
+    }
+
+    cudaMemcpy(d_voltages, h_sw_cw.data(), frame_elems * sizeof(int4x2_t), cudaMemcpyHostToDevice);
+    launch_inspect_rfi_chunks(d_voltages, d_active_antennas, num_active, d_chunk_power, d_chunk_sk,
+                              d_chunk_sat_frac, n_time, n_freq, n_elem, chunk_size, 1, nullptr,
+                              false);
+
+    // 7A: Pre-whitening OFF -> standing wave inflates local_mad, hiding moderate CW emitter
+    RfiMitigationConfig cfg_sw_off = cfg_sw;
+    cfg_sw_off.enable_ema_freq_prewhite = false;
+    cfg_sw_off.ema_alpha = 0.0f; // Freeze EMA snapshot during A/B comparison
+    cfg_sw_off.enable_persistent_ema = false;
+    launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_chunk_sat_frac, d_static_notch,
+                              d_channel_gains, d_chunk_rfi_mask, d_channel_stats, n_chunks, n_freq,
+                              num_active, chunk_size, cfg_sw_off, nullptr, nullptr, d_ema_power,
+                              d_ema_mad);
+    cudaDeviceSynchronize();
+    std::vector<RfiChannelStats> h_sw_off_stats(n_freq);
+    cudaMemcpy(h_sw_off_stats.data(), d_channel_stats, n_freq * sizeof(RfiChannelStats),
+               cudaMemcpyDeviceToHost);
+
+    // 7B: Pre-whitening ON -> standing wave normalized out, moderate CW catches cleanly
+    launch_evaluate_rfi_flags(d_chunk_power, d_chunk_sk, d_chunk_sat_frac, d_static_notch,
+                              d_channel_gains, d_chunk_rfi_mask, d_channel_stats, n_chunks, n_freq,
+                              num_active, chunk_size, cfg_sw, nullptr, nullptr, d_ema_power,
+                              d_ema_mad);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h_stats.data(), d_channel_stats, n_freq * sizeof(RfiChannelStats),
+               cudaMemcpyDeviceToHost);
+
+    int sw_false_alarms = 0;
+    for (std::size_t f = 10; f < n_freq - 10; ++f) {
+        if (f == f_mod_cw) continue;
+        if ((h_stats[f].flag_bits & RFI_FREQ_MAD) != 0) sw_false_alarms++;
+    }
+    std::printf("  1.029 MHz standing-wave ch=%zu: prewhite_off z=%.2f (flags=0x%02x) -> prewhite_on z=%.2f (flags=0x%02x), false_alarms=%d\n",
+                f_mod_cw, h_sw_off_stats[f_mod_cw].freq_mad_z, h_sw_off_stats[f_mod_cw].flag_bits,
+                h_stats[f_mod_cw].freq_mad_z, h_stats[f_mod_cw].flag_bits, sw_false_alarms);
+    if ((h_stats[f_mod_cw].flag_bits & RFI_FREQ_MAD) == 0
+        || h_stats[f_mod_cw].freq_mad_z <= h_sw_off_stats[f_mod_cw].freq_mad_z + 2.0f
+        || sw_false_alarms > 2) {
+        std::printf("  Result: [FAILED] EMA standing-wave pre-whitening did not improve CW sensitivity!\n");
+        std::fflush(stdout);
+        return 1;
+    }
+    std::printf("  Result: [PASSED] 1.029 MHz standing-wave pre-whitening verified!\n\n");
+    std::fflush(stdout);
+
     cudaFree(d_ema_power);
     cudaFree(d_ema_mad);
 

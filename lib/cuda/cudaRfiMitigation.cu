@@ -212,8 +212,8 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
     bool enable_saturation_check, float sat_fraction_thresh, bool enable_morphology_sir,
     bool enable_freq_shoulder, int freq_shoulder_half_width, float shoulder_sigma_thresh,
     int edge_channels_to_ignore, const std::uint8_t* __restrict__ d_exempt_channels,
-    bool enable_persistent_ema, float ema_alpha, float* __restrict__ d_ema_power,
-    float* __restrict__ d_ema_mad) {
+    bool enable_persistent_ema, bool enable_ema_freq_prewhite, float ema_alpha,
+    float* __restrict__ d_ema_power, float* __restrict__ d_ema_mad) {
 
     __shared__ float s_chan_med[MAX_SHARED_FREQ];
     __shared__ float s_chan_mad[MAX_SHARED_FREQ];
@@ -221,6 +221,7 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
     __shared__ float s_chan_mad_sk[MAX_SHARED_FREQ];
     __shared__ float s_chan_local_med[MAX_SHARED_FREQ];
     __shared__ float s_chan_local_mad[MAX_SHARED_FREQ];
+    __shared__ float s_chan_ema_norm[MAX_SHARED_FREQ];
     __shared__ float s_chan_ref_med[MAX_SHARED_FREQ];
     __shared__ float s_chan_burst_sigma[MAX_SHARED_FREQ];
     __shared__ float s_chan_freq_z[MAX_SHARED_FREQ];
@@ -272,6 +273,7 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
         float local_sk_center = 1.0f;
         float local_med = 0.0f;
         float local_mad = 0.0f;
+        float ema_norm_f = 1.0f;
 
         // Skip edge channels near PFB roll-off from triggering passband false alarms
         const bool is_edge = (f < edge_channels_to_ignore) || (f >= n_f - edge_channels_to_ignore);
@@ -280,17 +282,23 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
             float win_buf[MAX_FREQ_WINDOW];
             float p_orig[MAX_FREQ_WINDOW];
             float sk_win_buf[MAX_FREQ_WINDOW];
+            float pw_ema_win[MAX_FREQ_WINDOW];
+            float ema_valid_buf[MAX_FREQ_WINDOW];
             int half_w = freq_win_half;
             if (2 * half_w + 1 > MAX_FREQ_WINDOW)
                 half_w = (MAX_FREQ_WINDOW - 1) / 2;
             const int target_n = min(2 * half_w + 1, MAX_FREQ_WINDOW);
+            const bool try_ema_prewhite =
+                enable_ema_freq_prewhite && enable_persistent_ema && (d_ema_power != nullptr);
 
             // Prefer unnotched channels expanded symmetrically around f so dense static notches
             // (e.g. 424-430 MHz) neither shrink nor bias the passband reference.
             bool skip_notched = (d_static_notch != nullptr);
             int count = 0;
+            int ema_valid_count = 0;
             for (int pass = 0; pass < 2; ++pass) {
                 count = 0;
+                ema_valid_count = 0;
                 for (int d = 0; count < target_n && (f - d >= 0 || f + d < n_f); ++d) {
                     const int offsets[2] = {-d, d};
                     const int n_off = (d == 0) ? 1 : 2;
@@ -304,12 +312,37 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
                         p_orig[count] = pw;
                         win_buf[count] = pw;
                         sk_win_buf[count] = s_chan_med_sk[idx];
+                        float pw_ema = 0.0f;
+                        if (try_ema_prewhite) {
+                            const float raw_ema = d_ema_power[idx];
+                            if (raw_ema > 0.0f) {
+                                pw_ema = prewhite_power(raw_ema, d_channel_gains, idx);
+                                if (pw_ema > 0.0f) {
+                                    ema_valid_buf[ema_valid_count++] = pw_ema;
+                                }
+                            }
+                        }
+                        pw_ema_win[count] = pw_ema;
                         count++;
                     }
                 }
                 if (count >= 3 || !skip_notched)
                     break;
                 skip_notched = false;
+            }
+            if (try_ema_prewhite && ema_valid_count >= 3) {
+                const float ema_ref_med = device_median_small(ema_valid_buf, ema_valid_count);
+                if (ema_ref_med > 0.0f) {
+                    for (int i = 0; i < count; ++i) {
+                        const float norm_i = (pw_ema_win[i] > 0.0f) ? pw_ema_win[i] : ema_ref_med;
+                        p_orig[i] /= norm_i;
+                        win_buf[i] = p_orig[i];
+                    }
+                    const float raw_ema_f = d_ema_power[f];
+                    const float pw_ema_f =
+                        (raw_ema_f > 0.0f) ? prewhite_power(raw_ema_f, d_channel_gains, f) : 0.0f;
+                    ema_norm_f = (pw_ema_f > 0.0f) ? pw_ema_f : ema_ref_med;
+                }
             }
             const float prelim_med = device_median_small(win_buf, count);
             const float raw_sk_med = device_median_small(sk_win_buf, count);
@@ -347,12 +380,13 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
             }
             const float eff_sigma = fmaxf(local_mad, 0.05f * fmaxf(local_med, 1.0e-3f));
 
-            const float p_target = prewhite_power(chan_med_p, d_channel_gains, f);
+            const float p_target = prewhite_power(chan_med_p, d_channel_gains, f) / ema_norm_f;
             freq_z = (p_target - local_med) / eff_sigma;
             if (enable_freq_mad && freq_z >= mad_sigma_thresh) {
                 is_freq_mad_outlier = true;
             }
         }
+        s_chan_ema_norm[f] = ema_norm_f;
 
         const bool is_static_notch = (d_static_notch != nullptr && d_static_notch[f] != 0);
         const bool is_exempt = (d_exempt_channels != nullptr && d_exempt_channels[f] != 0);
@@ -461,8 +495,9 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
         const float ref_med_p = s_chan_ref_med[f];
         const float burst_eff_sigma = s_chan_burst_sigma[f];
         const float freq_z = s_chan_freq_z[f];
+        const float ema_norm_f = (s_chan_ema_norm[f] > 0.0f) ? s_chan_ema_norm[f] : 1.0f;
         const float shoulder_freq_sigma = fmaxf(local_mad, 0.04f * fmaxf(local_med, 1.0e-3f));
-        const float p_med_corr = prewhite_power(chan_med_p, d_channel_gains, f);
+        const float p_med_corr = prewhite_power(chan_med_p, d_channel_gains, f) / ema_norm_f;
         const float chan_shoulder_freq_z =
             (local_med > 0.0f) ? ((p_med_corr - local_med) / shoulder_freq_sigma) : 0.0f;
 
@@ -493,7 +528,7 @@ __global__ void __launch_bounds__(512, 2) evaluate_rfi_flags_fused_kernel(
                 const float p = d_chunk_power[idx];
                 const float burst_z_chunk =
                     (burst_eff_sigma > 0.0f) ? ((p - ref_med_p) / burst_eff_sigma) : 0.0f;
-                const float p_corr = prewhite_power(p, d_channel_gains, f);
+                const float p_corr = prewhite_power(p, d_channel_gains, f) / ema_norm_f;
                 const float chunk_shoulder_freq_z =
                     (local_med > 0.0f) ? ((p_corr - local_med) / shoulder_freq_sigma) : 0.0f;
                 const bool spectral_shoulder =
@@ -685,8 +720,8 @@ void launch_evaluate_rfi_flags(const float* __restrict__ d_chunk_power,
         cfg.enable_freq_mad_check, cfg.freq_window_half_width, cfg.mad_sigma_threshold,
         cfg.enable_saturation_check, cfg.saturation_fraction_threshold, cfg.enable_morphology_sir,
         cfg.enable_freq_shoulder_check, cfg.freq_shoulder_half_width, cfg.shoulder_sigma_threshold,
-        cfg.edge_channels_to_ignore, d_exempt_channels, cfg.enable_persistent_ema, cfg.ema_alpha,
-        d_ema_power, d_ema_mad);
+        cfg.edge_channels_to_ignore, d_exempt_channels, cfg.enable_persistent_ema,
+        cfg.enable_ema_freq_prewhite, cfg.ema_alpha, d_ema_power, d_ema_mad);
 }
 
 void launch_blank_rfi_chunks(int4x2_t* __restrict__ d_voltages,

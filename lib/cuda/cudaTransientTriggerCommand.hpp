@@ -14,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace kotekan {
@@ -41,16 +42,17 @@ public:
     int32_t samples_per_data_set = 0;
     int32_t max_beams = 2;
 
-    // GPU VRAM Buffers (single instance shared across buffer_depth commands!)
+    // GPU VRAM Buffers (single instance shared across buffer_depth commands)
     float2* d_ring_buffer = nullptr;
-    float2* d_metrics = nullptr;
 
-    // Pinned Host Buffers
-    float2* h_metrics_pinned = nullptr;
+    // Pinned Host Dump Staging Buffer
     float2* h_dump_pinned = nullptr;
 
-    // Dedicated Stream for non-blocking candidate dumps
+    // Dedicated Stream and joinable worker for non-blocking candidate dumps
     cudaStream_t dump_stream = nullptr;
+    std::atomic<bool> dump_in_flight{false};
+    std::mutex dump_thread_mutex;
+    std::thread dump_worker;
 
     // Ring buffer sizing
     uint32_t ring_buffer_depth = 16;
@@ -86,6 +88,7 @@ public:
 
     cudaEvent_t execute(cudaPipelineState& pipestate,
                         const std::vector<cudaEvent_t>& pre_events) override;
+    void finalize_frame() override;
 
     static void set_shared_config(const TransientTriggerConfig& config);
     static TransientTriggerConfig get_shared_config();
@@ -102,9 +105,18 @@ private:
     int32_t _samples_per_data_set;
     int32_t _buffer_depth;
     int32_t _max_beams;
+    std::size_t _rfi_chunk_size = 256;
 
     std::string _gpu_mem_cleaned_beams;
     std::string _gpu_mem_output;
+    std::string _gpu_mem_rfi_mask;
+
+    // Per-instance async metrics buffers & deferred evaluation state for finalize_frame()
+    float2* _d_metrics = nullptr;
+    float2* _h_metrics_pinned = nullptr;
+    bool _pending_eval = false;
+    uint32_t _pending_frame_seq = 0;
+    TransientTriggerConfig _pending_config;
 
     // Thread-safe shared configuration and telemetry across all stages
     static std::mutex _global_mutex;

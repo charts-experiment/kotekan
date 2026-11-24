@@ -41,7 +41,10 @@ transient_detection_metrics_kernel(
     std::size_t n_time,
     std::size_t n_freq,
     std::size_t num_beams,
-    std::size_t max_beams_stride) {
+    std::size_t max_beams_stride,
+    const std::uint8_t* __restrict__ d_rfi_mask,
+    std::size_t chunk_size,
+    std::size_t n_chunks) {
 
     const std::size_t f = blockIdx.x;
     if (f >= n_freq) return;
@@ -49,6 +52,7 @@ transient_detection_metrics_kernel(
     const int tid = threadIdx.x;
     const int warp_id = tid / 32;
     const int lane_id = tid % 32;
+    const bool use_mask = (d_rfi_mask != nullptr && n_chunks > 0 && chunk_size > 0);
 
     double acc_s1_0 = 0.0;
     double acc_s2_0 = 0.0;
@@ -56,8 +60,11 @@ transient_detection_metrics_kernel(
     double acc_cr   = 0.0;
     double acc_ci   = 0.0;
 
-    // Strided accumulation across all M time samples
+    // Strided accumulation across unmasked time samples
     for (std::size_t t = tid; t < n_time; t += 256) {
+        if (use_mask && d_rfi_mask[(t / chunk_size) * n_freq + f] != 0) {
+            continue;
+        }
         const std::size_t idx = (t * n_freq + f) * max_beams_stride;
         const float2 y0 = d_voltages[idx];
         const double p0 = static_cast<double>(y0.x) * static_cast<double>(y0.x) +
@@ -121,25 +128,36 @@ transient_detection_metrics_kernel(
             ci   = warp_reduce_sum_double(ci);
         }
 
-        // Thread 0 computes final channel metrics
+        // Thread 0 computes final channel metrics over unmasked sample count
         if (lane_id == 0) {
-            const double M = static_cast<double>(n_time);
-            constexpr double EPS = 1.0e-12;
-
-            // Spectral Kurtosis on Beam 0
-            double sk = 1.0;
-            if (s1_0 > EPS && M > 1.0) {
-                const double factor = (M + 1.0) / (M - 1.0);
-                sk = factor * ((M * s2_0) / (s1_0 * s1_0 + EPS) - 1.0);
+            std::size_t valid_samples = n_time;
+            if (use_mask) {
+                valid_samples = 0;
+                for (std::size_t c = 0; c < n_chunks; ++c) {
+                    if (d_rfi_mask[c * n_freq + f] == 0) {
+                        const std::size_t cs = c * chunk_size;
+                        const std::size_t ce =
+                            (cs + chunk_size < n_time) ? (cs + chunk_size) : n_time;
+                        valid_samples += (ce > cs) ? (ce - cs) : 0;
+                    }
+                }
             }
 
-            // Normalized Inter-Beam Cross-Correlation
+            const double M = static_cast<double>(valid_samples);
+            constexpr double EPS = 1.0e-12;
+
+            double sk = 1.0;
             double r01 = 0.0;
-            if (num_beams >= 2 && s1_0 > EPS && s1_1 > EPS) {
-                const double cross_mag = sqrt(cr * cr + ci * ci);
-                const double denom = sqrt(s1_0 * s1_1) + EPS;
-                r01 = cross_mag / denom;
-                if (r01 > 1.0) r01 = 1.0;
+            if (valid_samples >= 32 && s1_0 > EPS) {
+                const double factor = (M + 1.0) / (M - 1.0);
+                sk = factor * ((M * s2_0) / (s1_0 * s1_0 + EPS) - 1.0);
+
+                if (num_beams >= 2 && s1_1 > EPS) {
+                    const double cross_mag = sqrt(cr * cr + ci * ci);
+                    const double denom = sqrt(s1_0 * s1_1) + EPS;
+                    r01 = cross_mag / denom;
+                    if (r01 > 1.0) r01 = 1.0;
+                }
             }
 
             d_metrics[f] = make_float2(static_cast<float>(sk), static_cast<float>(r01));
@@ -156,12 +174,15 @@ void launch_transient_detection_metrics(
     std::size_t n_freq,
     std::size_t num_beams,
     std::size_t max_beams_stride,
-    cudaStream_t stream) {
+    cudaStream_t stream,
+    const std::uint8_t* d_rfi_mask,
+    std::size_t chunk_size) {
 
     if (n_freq == 0 || n_time == 0 || d_voltages == nullptr || d_metrics == nullptr) {
         return;
     }
 
+    const std::size_t n_chunks = (chunk_size > 0) ? ((n_time + chunk_size - 1) / chunk_size) : 0;
     dim3 grid(static_cast<unsigned int>(n_freq), 1, 1);
     dim3 block(256, 1, 1);
 
@@ -171,7 +192,10 @@ void launch_transient_detection_metrics(
         n_time,
         n_freq,
         num_beams,
-        max_beams_stride);
+        max_beams_stride,
+        d_rfi_mask,
+        chunk_size,
+        n_chunks);
 }
 
 } // namespace kotekan

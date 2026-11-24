@@ -836,6 +836,77 @@ def running_median_1d(arr: np.ndarray, half_width: int = 16) -> np.ndarray:
     return out
 
 
+def fit_standing_wave_ripple(
+    clean_spec: np.ndarray,
+    env: np.ndarray,
+    valid_mask: np.ndarray,
+    channel_bw_mhz: float = CHANNEL_WIDTH_HZ * 1.0e-6,
+    tau_range_us: Tuple[float, float] = (0.85, 1.15),
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Fit dominant coax standing-wave sinusoid (e.g. 1.029 MHz / 0.972 us) on clean residuals."""
+    n_ch = len(clean_spec)
+    ones = np.ones(n_ch, dtype=np.float64)
+    if n_ch < 32 or np.sum(valid_mask) < 24:
+        return ones, {"applied": False}
+
+    ratio = clean_spec / np.maximum(env, 1e-12) - 1.0
+    v = np.asarray(valid_mask, dtype=bool) & np.isfinite(ratio)
+    if np.sum(v) < 24:
+        return ones, {"applied": False}
+
+    med = float(np.median(ratio[v]))
+    mad = max(float(1.4826 * np.median(np.abs(ratio[v] - med))), 1e-4)
+    inliers = v & (np.abs(ratio - med) <= 3.5 * mad)
+    if np.sum(inliers) < 24:
+        return ones, {"applied": False}
+
+    f_mhz = np.arange(n_ch, dtype=np.float64) * channel_bw_mhz
+    f_in = f_mhz[inliers]
+    y_in = ratio[inliers]
+    var0 = float(np.var(y_in))
+    if var0 <= 1e-8:
+        return ones, {"applied": False}
+
+    best_sse = np.inf
+    best_tau = 0.0
+    best_coef = np.zeros(3, dtype=np.float64)
+
+    def _eval_grid(taus: np.ndarray) -> None:
+        nonlocal best_sse, best_tau, best_coef
+        for tau in taus:
+            ang = 2.0 * np.pi * tau * f_in
+            design = np.column_stack((np.ones_like(f_in), np.cos(ang), np.sin(ang)))
+            coef, _, _, _ = np.linalg.lstsq(design, y_in, rcond=None)
+            res = y_in - design @ coef
+            sse = float(np.dot(res, res))
+            if sse < best_sse:
+                best_sse = sse
+                best_tau = float(tau)
+                best_coef = coef
+
+    _eval_grid(np.linspace(tau_range_us[0], tau_range_us[1], 121))
+    _eval_grid(np.linspace(max(tau_range_us[0], best_tau - 0.006), min(tau_range_us[1], best_tau + 0.006), 49))
+
+    amp = float(np.hypot(best_coef[1], best_coef[2]))
+    var_ratio = (best_sse / max(len(y_in), 1)) / var0
+    if amp < 0.01 or amp > 0.35 or var_ratio > 0.90:
+        return ones, {"applied": False, "amp": amp, "tau_us": best_tau, "var_ratio": var_ratio}
+
+    full_ang = 2.0 * np.pi * best_tau * f_mhz
+    ripple = np.clip(
+        1.0 + best_coef[1] * np.cos(full_ang) + best_coef[2] * np.sin(full_ang),
+        0.65,
+        1.35,
+    )
+    return ripple, {
+        "applied": True,
+        "tau_us": round(best_tau, 5),
+        "period_mhz": round(1.0 / max(best_tau, 1e-9), 4),
+        "amp": round(amp, 4),
+        "var_ratio": round(var_ratio, 4),
+    }
+
+
 def compute_smooth_rfi_gains(
     spectrum: np.ndarray, clean_mask: Optional[np.ndarray] = None
 ) -> np.ndarray:
@@ -852,11 +923,13 @@ def compute_smooth_rfi_gains(
     clean_spec = np.interp(idx, idx[valid], spectrum[valid])
 
     env = running_median_1d(clean_spec, half_width=16)
-    ref = float(np.median(env))
+    ripple, _ = fit_standing_wave_ripple(clean_spec, env, valid)
+    env_whitened = env * ripple
+    ref = float(np.median(env_whitened))
     if ref <= 0.0:
         return np.ones(len(spectrum), dtype=np.float32)
 
-    gains = np.sqrt(np.clip(env / ref, 0.0625, 16.0))
+    gains = np.sqrt(np.clip(env_whitened / ref, 0.0625, 16.0))
     return gains.astype(np.float32)
 
 
