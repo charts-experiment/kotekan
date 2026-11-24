@@ -623,6 +623,272 @@ bool test_performance_benchmark() {
     return passed;
 }
 
+// ============================================================================
+// Test 7: Weight-Space BiSLC + Sub-Frame Interpolation Null Stability (FIX-1.2)
+// ============================================================================
+bool test_weight_bislc_subframe_interpolation() {
+    std::cout << "\n======================================================\n";
+    std::cout << "[Test 7/8] Weight-BiSLC + Sub-Frame Interpolation Null Lock\n";
+    std::cout << "======================================================\n";
+
+    const std::size_t n_ant = 64;
+    const std::size_t n_freq = 4;
+    const std::size_t n_time = 15360;
+    const std::size_t num_beams = 2;
+
+    kotekan::DirectBeamTrackerConfig cfg;
+    cfg.set_antenna_grid(n_ant, 1, 0.6f, kotekan::DirectPolLayout::INTERLEAVED, true, 8);
+
+    std::vector<double> freqs = {320.0e6, 360.0e6, 400.0e6, 440.0e6};
+    std::vector<double> wavenumbers(n_freq);
+    for (std::size_t f = 0; f < n_freq; ++f) {
+        wavenumbers[f] = TWO_PI * freqs[f] / SPEED_OF_LIGHT;
+    }
+
+    // Beam 0 tracks across the frame; Beam 1 is a stationary interferer at (0.35, 0.15)
+    std::vector<kotekan::DirectDirection3D> dirs_start(num_beams), dirs_end(num_beams);
+    dirs_start[0] = {0.0f, 0.0f, 1.0f};
+    dirs_end[0] = {0.06f, 0.02f, std::sqrt(1.0f - 0.06f * 0.06f - 0.02f * 0.02f)};
+    const float il = 0.35f, im = 0.15f, in = std::sqrt(1.0f - il * il - im * im);
+    dirs_start[1] = {il, im, in};
+    dirs_end[1] = {il, im, in};
+
+    // Synthesize broadband complex Gaussian interferer from (il, im, in) (avoids CW 4-bit harmonic spurs)
+    std::mt19937 rng_interf(999);
+    std::normal_distribution<double> gdist(0.0, 2.2);
+    std::vector<kotekan::int4x2_t> h_packed(n_time * n_freq * n_ant);
+    for (std::size_t t = 0; t < n_time; ++t) {
+        for (std::size_t f = 0; f < n_freq; ++f) {
+            const double zr = gdist(rng_interf);
+            const double zi = gdist(rng_interf);
+            const double k = wavenumbers[f];
+            for (std::size_t a = 0; a < n_ant; ++a) {
+                const float3 pos = cfg.antenna_positions[a];
+                const double ph = -k * (pos.x * il + pos.y * im + pos.z * in);
+                const double cp = std::cos(ph), sp = std::sin(ph);
+                int vr = static_cast<int>(std::lround(zr * cp - zi * sp));
+                int vi = static_cast<int>(std::lround(zr * sp + zi * cp));
+                vr = std::max(-7, std::min(7, vr));
+                vi = std::max(-7, std::min(7, vi));
+                h_packed[(t * n_freq + f) * n_ant + a].val =
+                    static_cast<uint8_t>((vr & 0x0F) | ((vi & 0x0F) << 4));
+            }
+        }
+    }
+
+    kotekan::int4x2_t* d_packed = nullptr;
+    float2 *d_volt = nullptr, *d_w = nullptr, *d_dw = nullptr;
+    kotekan::DirectDirection3D *d_d0 = nullptr, *d_d1 = nullptr;
+    double* d_k = nullptr;
+    float3* d_pos = nullptr;
+    float* d_taper = nullptr;
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_packed, h_packed.size() * sizeof(kotekan::int4x2_t)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_volt, n_time * n_freq * num_beams * sizeof(float2)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_w, num_beams * n_freq * n_ant * sizeof(float2)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_dw, num_beams * n_freq * n_ant * sizeof(float2)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_d0, num_beams * sizeof(kotekan::DirectDirection3D)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_d1, num_beams * sizeof(kotekan::DirectDirection3D)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_k, n_freq * sizeof(double)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_pos, n_ant * sizeof(float3)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_taper, n_ant * sizeof(float)));
+
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_packed, h_packed.data(),
+                                       h_packed.size() * sizeof(kotekan::int4x2_t),
+                                       cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_d0, dirs_start.data(),
+                                       num_beams * sizeof(kotekan::DirectDirection3D),
+                                       cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_d1, dirs_end.data(),
+                                       num_beams * sizeof(kotekan::DirectDirection3D),
+                                       cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(
+        cudaMemcpy(d_k, wavenumbers.data(), n_freq * sizeof(double), cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_pos, cfg.antenna_positions.data(), n_ant * sizeof(float3),
+                                       cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_taper, cfg.normalized_taper_weights.data(),
+                                       n_ant * sizeof(float), cudaMemcpyHostToDevice));
+
+    cudaStream_t stream;
+    CHECK_CUDA_ERROR_NON_OO(cudaStreamCreate(&stream));
+
+    kotekan::launch_generate_steering_weights_tapered(
+        d_w, d_dw, d_d0, d_d1, d_k, d_pos, d_taper, nullptr, num_beams, n_freq, n_ant, n_time,
+        true, 1.0e-4f, stream, ~0ULL);
+    kotekan::launch_direct_beamformer(d_packed, d_w, d_dw, d_volt, n_time, n_freq, n_ant, num_beams,
+                                      num_beams, 256, 4, 4, stream);
+    CHECK_CUDA_ERROR_NON_OO(cudaStreamSynchronize(stream));
+
+    std::vector<float2> h_volt(n_time * n_freq * num_beams);
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(h_volt.data(), d_volt, h_volt.size() * sizeof(float2),
+                                       cudaMemcpyDeviceToHost));
+
+    double p_start = 0.0, p_end = 0.0, p_ref = 0.0;
+    for (std::size_t f = 0; f < n_freq; ++f) {
+        for (std::size_t t = 0; t < 256; ++t) {
+            const float2 v0 = h_volt[(t * n_freq + f) * num_beams + 0];
+            const float2 v1 = h_volt[(t * n_freq + f) * num_beams + 1];
+            p_start += v0.x * v0.x + v0.y * v0.y;
+            p_ref += v1.x * v1.x + v1.y * v1.y;
+        }
+        for (std::size_t t = n_time - 256; t < n_time; ++t) {
+            const float2 v0 = h_volt[(t * n_freq + f) * num_beams + 0];
+            p_end += v0.x * v0.x + v0.y * v0.y;
+        }
+    }
+    const double leak_start_db = 10.0 * std::log10((p_start + 1e-12) / (p_ref + 1e-12));
+    const double leak_end_db = 10.0 * std::log10((p_end + 1e-12) / (p_ref + 1e-12));
+    std::cout << "  - Interferer leakage at frame start: " << std::fixed << std::setprecision(2)
+              << leak_start_db << " dB\n";
+    std::cout << "  - Interferer leakage at frame end:   " << leak_end_db << " dB\n";
+
+    cudaFree(d_packed);
+    cudaFree(d_volt);
+    cudaFree(d_w);
+    cudaFree(d_dw);
+    cudaFree(d_d0);
+    cudaFree(d_d1);
+    cudaFree(d_k);
+    cudaFree(d_pos);
+    cudaFree(d_taper);
+    cudaStreamDestroy(stream);
+
+    const bool passed = (leak_start_db < -25.0) && (leak_end_db < -25.0);
+    std::cout << "  -> Result: " << (passed ? "PASSED [OK]" : "FAILED [X]") << "\n";
+    return passed;
+}
+
+// ============================================================================
+// Test 8: O(1) Sky Grid Lookup & Power-Only Kernel Parity (FIX-1.4 & FIX-1.5)
+// ============================================================================
+bool test_sky_grid_o1_and_power_only_parity() {
+    std::cout << "\n======================================================\n";
+    std::cout << "[Test 8/8] O(1) Sky Grid Lookup & Power-Only Kernel Parity\n";
+    std::cout << "======================================================\n";
+
+    const auto grid_idx = kotekan::build_sky_grid_index(0.02f);
+    std::mt19937 rng(77);
+    std::uniform_real_distribution<float> dist(-1.15f, 1.15f);
+    bool grid_ok = !grid_idx.directions.empty();
+    for (int i = 0; i < 250; ++i) {
+        const float l = dist(rng);
+        const float m = dist(rng);
+        const int ref_i = kotekan::lookup_nearest_sky_grid(l, m, grid_idx.directions);
+        const int o1_i = kotekan::lookup_nearest_sky_grid_o1(l, m, grid_idx);
+        const float2 pr = grid_idx.directions[ref_i];
+        const float2 po = grid_idx.directions[o1_i];
+        const float dr = (pr.x - l) * (pr.x - l) + (pr.y - m) * (pr.y - m);
+        const float do1 = (po.x - l) * (po.x - l) + (po.y - m) * (po.y - m);
+        if (std::abs(dr - do1) > 1.0e-7f) {
+            grid_ok = false;
+            break;
+        }
+    }
+
+    // Power-only kernel vs direct_beamformer + reduce_beam_power parity (with RFI mask)
+    const std::size_t n_ant = 64, n_freq = 4, n_time = 512, num_beams = 4, chunk_sz = 128;
+    const std::size_t n_chunks = n_time / chunk_sz;
+    std::vector<kotekan::int4x2_t> h_packed(n_time * n_freq * n_ant);
+    std::uniform_int_distribution<int> vdist(-6, 6);
+    for (auto& px : h_packed) {
+        px.val = static_cast<uint8_t>((vdist(rng) & 0x0F) | ((vdist(rng) & 0x0F) << 4));
+    }
+    std::vector<uint8_t> h_mask(n_chunks * n_freq, 0);
+    h_mask[1 * n_freq + 2] = 1;
+    h_mask[3 * n_freq + 0] = 1;
+
+    kotekan::DirectBeamTrackerConfig cfg;
+    cfg.set_antenna_grid(n_ant, 1, 0.6f, kotekan::DirectPolLayout::INTERLEAVED, true, 8);
+    std::vector<kotekan::DirectDirection3D> dirs(num_beams);
+    for (std::size_t b = 0; b < num_beams; ++b) {
+        const float l = -0.3f + 0.2f * static_cast<float>(b);
+        dirs[b] = {l, 0.1f, std::sqrt(1.0f - l * l - 0.01f)};
+    }
+    std::vector<double> wavenums(n_freq);
+    for (std::size_t f = 0; f < n_freq; ++f) {
+        wavenums[f] = TWO_PI * (300.0e6 + f * 10.0e6) / SPEED_OF_LIGHT;
+    }
+
+    kotekan::int4x2_t* d_packed = nullptr;
+    float2 *d_volt = nullptr, *d_w = nullptr;
+    float *d_p_ref = nullptr, *d_p_only = nullptr, *d_taper = nullptr;
+    uint8_t* d_mask = nullptr;
+    kotekan::DirectDirection3D* d_dirs = nullptr;
+    double* d_k = nullptr;
+    float3* d_pos = nullptr;
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_packed, h_packed.size() * sizeof(kotekan::int4x2_t)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_volt, n_time * n_freq * num_beams * sizeof(float2)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_w, num_beams * n_freq * n_ant * sizeof(float2)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_p_ref, num_beams * n_freq * sizeof(float)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_p_only, num_beams * n_freq * sizeof(float)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_taper, n_ant * sizeof(float)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_mask, h_mask.size() * sizeof(uint8_t)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_dirs, num_beams * sizeof(kotekan::DirectDirection3D)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_k, n_freq * sizeof(double)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_pos, n_ant * sizeof(float3)));
+
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_packed, h_packed.data(),
+                                       h_packed.size() * sizeof(kotekan::int4x2_t),
+                                       cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(
+        cudaMemcpy(d_mask, h_mask.data(), h_mask.size(), cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_dirs, dirs.data(),
+                                       num_beams * sizeof(kotekan::DirectDirection3D),
+                                       cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(
+        cudaMemcpy(d_k, wavenums.data(), n_freq * sizeof(double), cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_pos, cfg.antenna_positions.data(), n_ant * sizeof(float3),
+                                       cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_taper, cfg.normalized_taper_weights.data(),
+                                       n_ant * sizeof(float), cudaMemcpyHostToDevice));
+
+    cudaStream_t stream;
+    CHECK_CUDA_ERROR_NON_OO(cudaStreamCreate(&stream));
+
+    kotekan::launch_generate_steering_weights_tapered(d_w, d_dirs, d_k, d_pos, d_taper, nullptr,
+                                                      num_beams, n_freq, n_ant, false, 1.0e-4f,
+                                                      stream);
+    kotekan::launch_direct_beamformer(d_packed, d_w, d_volt, n_time, n_freq, n_ant, num_beams,
+                                      num_beams, chunk_sz, 4, 4, stream);
+    kotekan::launch_reduce_beam_power(d_volt, d_p_ref, n_time, n_freq, num_beams, num_beams, stream,
+                                      1, d_mask, chunk_sz);
+    kotekan::launch_direct_beamformer_power_only(d_packed, d_w, nullptr, d_p_only, n_time, n_freq,
+                                                 n_ant, num_beams, num_beams, chunk_sz, 4, 4,
+                                                 stream, 1, kotekan::DirectPolLayout::INTERLEAVED,
+                                                 kotekan::DirectInputFormat::INT4X2, d_mask);
+    CHECK_CUDA_ERROR_NON_OO(cudaStreamSynchronize(stream));
+
+    std::vector<float> p_ref(num_beams * n_freq), p_only(num_beams * n_freq);
+    CHECK_CUDA_ERROR_NON_OO(
+        cudaMemcpy(p_ref.data(), d_p_ref, p_ref.size() * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA_ERROR_NON_OO(
+        cudaMemcpy(p_only.data(), d_p_only, p_only.size() * sizeof(float), cudaMemcpyDeviceToHost));
+
+    double max_rel_err = 0.0;
+    for (std::size_t i = 0; i < p_ref.size(); ++i) {
+        const double rel = std::abs(p_ref[i] - p_only[i]) / std::max(1.0f, p_ref[i]);
+        max_rel_err = std::max(max_rel_err, rel);
+    }
+
+    std::cout << "  - O(1) sky grid parity:          " << (grid_ok ? "OK" : "FAIL") << "\n";
+    std::cout << "  - Power-only max rel error:      " << std::scientific << max_rel_err << "\n";
+
+    cudaFree(d_packed);
+    cudaFree(d_volt);
+    cudaFree(d_w);
+    cudaFree(d_p_ref);
+    cudaFree(d_p_only);
+    cudaFree(d_taper);
+    cudaFree(d_mask);
+    cudaFree(d_dirs);
+    cudaFree(d_k);
+    cudaFree(d_pos);
+    cudaStreamDestroy(stream);
+
+    const bool passed = grid_ok && (max_rel_err < 1.0e-4);
+    std::cout << "  -> Result: " << (passed ? "PASSED [OK]" : "FAILED [X]") << "\n";
+    return passed;
+}
+
 } // namespace
 
 int main() {
@@ -638,6 +904,8 @@ int main() {
     all_passed &= test_multibeam_gpu_vs_cpu();
     all_passed &= test_masked_normalization_with_interpolation();
     all_passed &= test_performance_benchmark();
+    all_passed &= test_weight_bislc_subframe_interpolation();
+    all_passed &= test_sky_grid_o1_and_power_only_parity();
 
     std::cout << "\n==============================================================\n";
     if (all_passed) {

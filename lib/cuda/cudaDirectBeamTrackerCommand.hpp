@@ -189,9 +189,13 @@ private:
 
     // Sky grid support
     bool _grid_mode_enabled = false;
+    bool _compute_power_inline_only = false;
+    bool _applied_grid_apply_cal = true;
     float _grid_step = 0.02f;
     std::size_t _num_grid_points = 0;
+    SkyGridIndex _sky_grid_index;
     std::vector<float2> _h_grid_lms;
+    std::vector<DirectDirection3D> _h_directions_scratch;
     float2* _d_grid_weights = nullptr;
     float2* _d_grid_lms = nullptr;
 

@@ -16,20 +16,29 @@
 namespace kotekan {
 
 std::vector<float2> generate_sky_grid_directions(float step) {
-    std::vector<float2> grid;
-    if (step <= 0.0f) step = 0.02f;
+    return build_sky_grid_index(step).directions;
+}
 
-    const int n_steps = static_cast<int>(std::ceil(2.0f / step));
-    for (int i = 0; i <= n_steps; ++i) {
+SkyGridIndex build_sky_grid_index(float step) {
+    SkyGridIndex idx;
+    if (step <= 0.0f) step = 0.02f;
+    idx.step = step;
+    idx.n_steps = static_cast<int>(std::ceil(2.0f / step));
+    const int side = idx.n_steps + 1;
+    idx.offset_lut.assign(static_cast<std::size_t>(side) * side, -1);
+
+    for (int i = 0; i <= idx.n_steps; ++i) {
         const float l = -1.0f + i * step;
-        for (int j = 0; j <= n_steps; ++j) {
+        for (int j = 0; j <= idx.n_steps; ++j) {
             const float m = -1.0f + j * step;
             if (l * l + m * m <= 1.0f) {
-                grid.push_back(make_float2(l, m));
+                idx.offset_lut[static_cast<std::size_t>(i) * side + j] =
+                    static_cast<int>(idx.directions.size());
+                idx.directions.push_back(make_float2(l, m));
             }
         }
     }
-    return grid;
+    return idx;
 }
 
 int lookup_nearest_sky_grid(float l, float m, const std::vector<float2>& grid_directions) {
@@ -48,6 +57,46 @@ int lookup_nearest_sky_grid(float l, float m, const std::vector<float2>& grid_di
         }
     }
     return best_idx;
+}
+
+int lookup_nearest_sky_grid_o1(float l, float m, const SkyGridIndex& grid_index) {
+    if (grid_index.directions.empty() || grid_index.step <= 0.0f) return -1;
+
+    const int n_steps = grid_index.n_steps;
+    const int side = n_steps + 1;
+    const int i0 = std::max(0, std::min(n_steps, static_cast<int>(std::lround((l + 1.0f) / grid_index.step))));
+    const int j0 = std::max(0, std::min(n_steps, static_cast<int>(std::lround((m + 1.0f) / grid_index.step))));
+
+    // When (l, m) is inside the unit disk and its rounded cell is valid, the global nearest
+    // grid point is strictly within the 3x3 neighborhood (dist <= step/sqrt(2) < 1.5*step).
+    if (l * l + m * m <= 1.0f && grid_index.offset_lut[static_cast<std::size_t>(i0) * side + j0] >= 0) {
+        float min_dist_sq = 1e9f;
+        int best_idx = -1;
+
+        for (int di = -1; di <= 1; ++di) {
+            const int ii = i0 + di;
+            if (ii < 0 || ii > n_steps) continue;
+            for (int dj = -1; dj <= 1; ++dj) {
+                const int jj = j0 + dj;
+                if (jj < 0 || jj > n_steps) continue;
+                const int g_idx = grid_index.offset_lut[static_cast<std::size_t>(ii) * side + jj];
+                if (g_idx < 0) continue;
+                const float2 pt = grid_index.directions[static_cast<std::size_t>(g_idx)];
+                const float dl = pt.x - l;
+                const float dm = pt.y - m;
+                const float d2 = dl * dl + dm * dm;
+                if (d2 < min_dist_sq || (d2 == min_dist_sq && g_idx < best_idx)) {
+                    min_dist_sq = d2;
+                    best_idx = g_idx;
+                }
+            }
+        }
+        if (best_idx >= 0) {
+            return best_idx;
+        }
+    }
+
+    return lookup_nearest_sky_grid(l, m, grid_index.directions);
 }
 
 namespace {
@@ -227,52 +276,26 @@ __global__ void generate_steering_weights_tapered_kernel(
     }
 }
 
-/**
- * @brief Fused Weight-Space BiSLC Kernel:
- *        Computes A_{i,j}(f) = sum_a (norm_taper[a]^2 * exp(+j * k(f) * x_a . (s_i - s_j))),
- *        inverts M(f) = (A(f) + eps*I)^-1 in shared memory, and updates W(f) <- M(f) * W(f).
- *        Eliminates intra-block race conditions via s_factors staging.
- */
 template <int MAX_B>
-__global__ void __launch_bounds__(256)
-fuse_weight_space_bislc_kernel(
-    float2* __restrict__ weights,
+__device__ void build_and_invert_bislc_matrix(
+    float2 (&s_aug)[MAX_B][2 * MAX_B],
+    float2 (&s_factors)[MAX_B],
+    std::size_t& s_pivot_row,
+    float2& s_pivot_val,
+    bool& s_singular,
     const DirectDirection3D* __restrict__ directions,
-    const double* __restrict__ wavenumbers,
+    const double k,
     const float3* __restrict__ antenna_positions,
     const float* __restrict__ norm_taper,
+    const float inv_diag,
     const std::size_t B,
-    const std::size_t n_freq,
     const std::size_t n_elem,
-    const float diag_loading) {
-
-    const std::size_t f = blockIdx.x;
-    if (f >= n_freq || B <= 1 || B > MAX_B) return;
-
-    const unsigned int tid = threadIdx.x;
-    const double k = __ldg(&wavenumbers[f]);
-
-    __shared__ float2 s_aug[MAX_B][2 * MAX_B];
-    __shared__ std::size_t s_pivot_row;
-    __shared__ float2 s_pivot_val;
-    __shared__ bool s_singular;
-    __shared__ float2 s_factors[MAX_B];
-    __shared__ float s_diag_pow;
+    const float diag_loading,
+    const std::uint64_t beam_calibration_mask,
+    const unsigned int tid) {
 
     if (tid == 0) {
         s_singular = false;
-        if (norm_taper != nullptr) {
-            float diag_sum = 0.0f;
-            for (std::size_t a = 0; a < n_elem; ++a) {
-                const float t_a = __ldg(&norm_taper[a]);
-                if (t_a > 0.0f) {
-                    diag_sum = fmaf(t_a, t_a, diag_sum);
-                }
-            }
-            s_diag_pow = (diag_sum > 0.0f) ? diag_sum : 1.0f;
-        } else {
-            s_diag_pow = 1.0f;
-        }
     }
     __syncthreads();
 
@@ -280,34 +303,39 @@ fuse_weight_space_bislc_kernel(
     for (std::size_t idx = tid; idx < total_pairs; idx += blockDim.x) {
         const std::size_t i = idx / B;
         const std::size_t j = idx % B;
+        const bool cal_i = (i >= 64) || (((beam_calibration_mask >> i) & 1ULL) != 0ULL);
+        const bool cal_j = (j >= 64) || (((beam_calibration_mask >> j) & 1ULL) != 0ULL);
 
-        float2 a_val = make_float2(s_diag_pow, 0.0f);
+        float2 a_val = make_float2(1.0f, 0.0f);
         if (i != j) {
-            const DirectDirection3D di = directions[i];
-            const DirectDirection3D dj = directions[j];
-            const double dl = static_cast<double>(di.x - dj.x);
-            const double dm = static_cast<double>(di.y - dj.y);
-            const double dn = static_cast<double>(di.z - dj.z);
+            if (!cal_i || !cal_j) {
+                a_val = make_float2(0.0f, 0.0f);
+            } else {
+                const DirectDirection3D di = directions[i];
+                const DirectDirection3D dj = directions[j];
+                const double dl = static_cast<double>(di.x - dj.x);
+                const double dm = static_cast<double>(di.y - dj.y);
+                const double dn = static_cast<double>(di.z - dj.z);
 
-            float sum_r = 0.0f;
-            float sum_i = 0.0f;
-            for (std::size_t a = 0; a < n_elem; ++a) {
-                const float t_a = (norm_taper != nullptr) ? __ldg(&norm_taper[a]) : 0.0f;
-                if (t_a <= 0.0f) continue;
-                const float w_pow = t_a * t_a;
-                const float3 pos = antenna_positions[a];
-                const double delay_m = static_cast<double>(pos.x) * dl +
-                                       static_cast<double>(pos.y) * dm +
-                                       static_cast<double>(pos.z) * dn;
-                const float phase = static_cast<float>(k * delay_m);
-                float s, c;
-                __sincosf(phase, &s, &c);
-                sum_r = fmaf(w_pow, c, sum_r);
-                sum_i = fmaf(w_pow, s, sum_i);
+                float sum_r = 0.0f;
+                float sum_i = 0.0f;
+                for (std::size_t a = 0; a < n_elem; ++a) {
+                    const float t_a = (norm_taper != nullptr) ? __ldg(&norm_taper[a]) : 0.0f;
+                    if (t_a <= 0.0f) continue;
+                    const float3 pos = antenna_positions[a];
+                    const double delay_m = static_cast<double>(pos.x) * dl +
+                                           static_cast<double>(pos.y) * dm +
+                                           static_cast<double>(pos.z) * dn;
+                    const float phase = static_cast<float>(k * delay_m);
+                    float s, c;
+                    __sincosf(phase, &s, &c);
+                    sum_r = fmaf(t_a, c, sum_r);
+                    sum_i = fmaf(t_a, s, sum_i);
+                }
+                a_val = make_float2(sum_r * inv_diag, sum_i * inv_diag);
             }
-            a_val = make_float2(sum_r, sum_i);
         }
-        s_aug[i][j] = (i == j) ? make_float2(a_val.x + diag_loading, a_val.y) : a_val;
+        s_aug[i][j] = (i == j && cal_i) ? make_float2(a_val.x + diag_loading, a_val.y) : a_val;
         s_aug[i][B + j] = (i == j) ? make_float2(1.0f, 0.0f) : make_float2(0.0f, 0.0f);
     }
     __syncthreads();
@@ -368,6 +396,83 @@ fuse_weight_space_bislc_kernel(
         }
         __syncthreads();
     }
+}
+
+/**
+ * @brief Fused Weight-Space BiSLC Kernel:
+ *        Computes unit-diagonal normalized A_{i,j}(f), inverts M(f) = (A(f) + eps*I)^-1
+ *        excluding uncalibrated control beams, updates W(f) <- M(f) * W(f), and when
+ *        sub-frame motion is active updates step_weights from (W_clean_1 / W_clean_0)^(1/n_time).
+ */
+template <int MAX_B>
+__global__ void __launch_bounds__(256)
+fuse_weight_space_bislc_kernel(
+    float2* __restrict__ weights,
+    float2* __restrict__ step_weights,
+    const DirectDirection3D* __restrict__ directions_start,
+    const DirectDirection3D* __restrict__ directions_end,
+    const double* __restrict__ wavenumbers,
+    const float3* __restrict__ antenna_positions,
+    const float* __restrict__ norm_taper,
+    const float2* __restrict__ calibration_gains,
+    const std::size_t B,
+    const std::size_t n_freq,
+    const std::size_t n_elem,
+    const std::size_t n_time,
+    const float diag_loading,
+    const std::uint64_t beam_calibration_mask) {
+
+    const std::size_t f = blockIdx.x;
+    if (f >= n_freq || B <= 1 || B > MAX_B) return;
+
+    const unsigned int tid = threadIdx.x;
+    const double k = __ldg(&wavenumbers[f]);
+
+    __shared__ float2 s_aug[MAX_B][2 * MAX_B];
+    __shared__ std::size_t s_pivot_row;
+    __shared__ float2 s_pivot_val;
+    __shared__ bool s_singular;
+    __shared__ float2 s_factors[MAX_B];
+    __shared__ float s_diag_pow;
+    __shared__ bool s_any_moving;
+
+    if (tid == 0) {
+        if (norm_taper != nullptr) {
+            float diag_sum = 0.0f;
+            for (std::size_t a = 0; a < n_elem; ++a) {
+                const float t_a = __ldg(&norm_taper[a]);
+                if (t_a > 0.0f) {
+                    diag_sum += t_a;
+                }
+            }
+            s_diag_pow = (diag_sum > 0.0f) ? diag_sum : 1.0f;
+        } else {
+            s_diag_pow = 1.0f;
+        }
+
+        bool moving = false;
+        if (step_weights != nullptr && directions_end != nullptr && n_time > 0) {
+            for (std::size_t b = 0; b < B; ++b) {
+                const DirectDirection3D d0 = directions_start[b];
+                const DirectDirection3D d1 = directions_end[b];
+                if (fabsf(d1.x - d0.x) > 1.0e-7f || fabsf(d1.y - d0.y) > 1.0e-7f
+                    || fabsf(d1.z - d0.z) > 1.0e-7f) {
+                    moving = true;
+                    break;
+                }
+            }
+        }
+        s_any_moving = moving;
+    }
+    __syncthreads();
+
+    const float inv_diag = (s_diag_pow > 0.0f) ? (1.0f / s_diag_pow) : 0.0f;
+
+    build_and_invert_bislc_matrix<MAX_B>(
+        s_aug, s_factors, s_pivot_row, s_pivot_val, s_singular,
+        directions_start, k, antenna_positions, norm_taper, inv_diag,
+        B, n_elem, diag_loading, beam_calibration_mask, tid);
+    if (s_singular) return;
 
     const std::size_t fe_stride = n_freq * n_elem;
     for (std::size_t a = tid; a < n_elem; a += blockDim.x) {
@@ -385,6 +490,81 @@ fuse_weight_space_bislc_kernel(
                 si = fmaf(mij.x, wj.y, fmaf(mij.y, wj.x, si));
             }
             weights[i * fe_stride + f * n_elem + a] = make_float2(sr, si);
+        }
+    }
+    __syncthreads();
+
+    if (!s_any_moving) return;
+
+    // Recompute end-of-frame M_1(f) and W_clean_1 = M_1 * W_1 so BiSLC nulls stay stationary
+    build_and_invert_bislc_matrix<MAX_B>(
+        s_aug, s_factors, s_pivot_row, s_pivot_val, s_singular,
+        directions_end, k, antenna_positions, norm_taper, inv_diag,
+        B, n_elem, diag_loading, beam_calibration_mask, tid);
+
+    const float inv_n_time = 1.0f / static_cast<float>(n_time);
+    for (std::size_t a = tid; a < n_elem; a += blockDim.x) {
+        if (s_singular) {
+            for (std::size_t i = 0; i < B; ++i) {
+                step_weights[i * fe_stride + f * n_elem + a] = make_float2(1.0f, 0.0f);
+            }
+            continue;
+        }
+        const float amp = (norm_taper != nullptr) ? __ldg(&norm_taper[a]) : 1.0f;
+        const float3 pos = antenna_positions[a];
+        const float2 cal_g = (calibration_gains != nullptr)
+                                 ? __ldg(&calibration_gains[f * n_elem + a])
+                                 : make_float2(1.0f, 0.0f);
+
+        float2 w_end[MAX_B];
+        for (std::size_t b = 0; b < B; ++b) {
+            if (amp <= 0.0f) {
+                w_end[b] = make_float2(0.0f, 0.0f);
+                continue;
+            }
+            const DirectDirection3D dir1 = directions_end[b];
+            const double delay_m1 = static_cast<double>(pos.x) * dir1.x +
+                                    static_cast<double>(pos.y) * dir1.y +
+                                    static_cast<double>(pos.z) * dir1.z;
+            const float phase1 = static_cast<float>(k * delay_m1);
+            float s1, c1;
+            __sincosf(phase1, &s1, &c1);
+            float wr = c1 * amp;
+            float wi = s1 * amp;
+            const bool apply_cal =
+                (calibration_gains != nullptr)
+                && (b >= 64 || ((beam_calibration_mask >> b) & 1ULL) != 0ULL);
+            if (apply_cal) {
+                const float cr = fmaf(-wi, cal_g.y, wr * cal_g.x);
+                const float ci = fmaf(wr, cal_g.y, wi * cal_g.x);
+                wr = cr;
+                wi = ci;
+            }
+            w_end[b] = make_float2(wr, wi);
+        }
+
+        for (std::size_t i = 0; i < B; ++i) {
+            float sr = 0.0f;
+            float si = 0.0f;
+            for (std::size_t j = 0; j < B; ++j) {
+                const float2 mij = s_aug[i][B + j];
+                const float2 wj = w_end[j];
+                sr = fmaf(mij.x, wj.x, fmaf(-mij.y, wj.y, sr));
+                si = fmaf(mij.x, wj.y, fmaf(mij.y, wj.x, si));
+            }
+            const float2 w0 = weights[i * fe_stride + f * n_elem + a];
+            const float a0 = hypotf(w0.x, w0.y);
+            const float a1 = hypotf(sr, si);
+            if (a0 > 1.0e-6f && a1 > 1.0e-6f && fabsf(a1 - a0) <= 0.25f * fmaxf(a0, a1)) {
+                const float cross_re = fmaf(sr, w0.x, si * w0.y);
+                const float cross_im = fmaf(si, w0.x, -sr * w0.y);
+                const float dphi = atan2f(cross_im, cross_re) * inv_n_time;
+                float sd, cd;
+                __sincosf(dphi, &sd, &cd);
+                step_weights[i * fe_stride + f * n_elem + a] = make_float2(cd, sd);
+            } else {
+                step_weights[i * fe_stride + f * n_elem + a] = make_float2(1.0f, 0.0f);
+            }
         }
     }
 }
@@ -847,6 +1027,304 @@ direct_beamformer_blackwell_kernel(
     }
 }
 
+template <
+    int N_ELEM,
+    int N_POL,
+    int POL_LAYOUT,
+    int B_TILE,
+    bool INTERPOLATE,
+    bool SWAPPED_WITH_OFFSET = false>
+__global__ void __launch_bounds__(128, 4)
+direct_beamformer_power_only_kernel(
+    float* __restrict__ power,
+    const float2* __restrict__ weights,
+    const float2* __restrict__ step_weights,
+    const std::uint8_t* __restrict__ packed,
+    const std::uint8_t* __restrict__ d_rfi_mask,
+    const std::size_t n_time,
+    const std::size_t n_freq,
+    const std::size_t time_chunk_size,
+    const std::size_t n_chunks,
+    const std::size_t num_active_beams,
+    const std::size_t max_beams_stride) {
+
+    constexpr int WARPS_PER_BLOCK = 4;
+    constexpr int TIME_UNROLL = 4;
+    constexpr unsigned int ELEM_PER_LANE = static_cast<unsigned int>(N_ELEM / 32);
+    constexpr unsigned int full_mask = 0xFFFFFFFFu;
+
+    const unsigned int lane = threadIdx.x;
+    const unsigned int warp_in_block = threadIdx.y;
+
+    const std::size_t tile_idx = blockIdx.x;
+    const std::size_t freq = blockIdx.y;
+    const std::size_t chunk_idx = blockIdx.z;
+    if (freq >= n_freq) return;
+
+    const bool use_mask = (d_rfi_mask != nullptr && n_chunks > 0 && time_chunk_size > 0);
+    if (use_mask && d_rfi_mask[chunk_idx * n_freq + freq] != 0) {
+        return;
+    }
+
+    const std::size_t c_start = chunk_idx * time_chunk_size;
+    if (c_start >= n_time) return;
+    const std::size_t c_end = (c_start + time_chunk_size < n_time)
+                                  ? (c_start + time_chunk_size)
+                                  : n_time;
+
+    const std::size_t c_len = c_end - c_start;
+    const std::size_t per_warp = (c_len + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+    const std::size_t t_start = c_start + static_cast<std::size_t>(warp_in_block) * per_warp;
+    if (t_start >= c_end) return;
+    const std::size_t t_end = (t_start + per_warp < c_end) ? (t_start + per_warp) : c_end;
+
+    const std::size_t b_base = tile_idx * B_TILE;
+    const unsigned int active_in_tile =
+        (b_base >= num_active_beams)
+            ? 0U
+            : ((b_base + B_TILE <= num_active_beams)
+                   ? B_TILE
+                   : static_cast<unsigned int>(num_active_beams - b_base));
+    if (active_in_tile == 0U) return;
+
+    const unsigned int elem_base = lane * ELEM_PER_LANE;
+
+    float w_r[B_TILE][ELEM_PER_LANE];
+    float w_i[B_TILE][ELEM_PER_LANE];
+    float dw_r[B_TILE][ELEM_PER_LANE];
+    float dw_i[B_TILE][ELEM_PER_LANE];
+    float w_amp[B_TILE][ELEM_PER_LANE];
+
+    #pragma unroll
+    for (int b = 0; b < B_TILE; ++b) {
+        const std::size_t b_curr = b_base + b;
+        const std::size_t w_offset = (b_curr < num_active_beams)
+                                         ? ((b_curr * n_freq + freq) * N_ELEM + elem_base)
+                                         : 0;
+        #pragma unroll
+        for (unsigned int a = 0; a < ELEM_PER_LANE; ++a) {
+            if (b < active_in_tile) {
+                const float2 w = __ldg(&weights[w_offset + a]);
+                const float amp = hypotf(w.x, w.y);
+                w_amp[b][a] = amp;
+                if constexpr (INTERPOLATE) {
+                    const float2 dw = __ldg(&step_weights[w_offset + a]);
+                    if (amp > 1.0e-12f) {
+                        const float phi0 = atan2f(w.y, w.x);
+                        const float dphi = atan2f(dw.y, dw.x);
+                        const double phi_exact_d = static_cast<double>(phi0) +
+                                                  static_cast<double>(t_start) * static_cast<double>(dphi);
+                        const double cycles = round(phi_exact_d * (1.0 / (2.0 * 3.14159265358979323846)));
+                        const float phi_red = static_cast<float>(phi_exact_d - cycles * (2.0 * 3.14159265358979323846));
+                        float s0, c0;
+                        __sincosf(phi_red, &s0, &c0);
+                        w_r[b][a] = c0 * amp;
+                        w_i[b][a] = s0 * amp;
+                        float sd, cd;
+                        __sincosf(dphi, &sd, &cd);
+                        dw_r[b][a] = cd;
+                        dw_i[b][a] = sd;
+                    } else {
+                        w_r[b][a] = 0.0f;
+                        w_i[b][a] = 0.0f;
+                        dw_r[b][a] = 1.0f;
+                        dw_i[b][a] = 0.0f;
+                    }
+                } else {
+                    w_r[b][a] = w.x;
+                    w_i[b][a] = w.y;
+                }
+            } else {
+                w_amp[b][a] = 0.0f;
+                w_r[b][a] = 0.0f;
+                w_i[b][a] = 0.0f;
+                if constexpr (INTERPOLATE) {
+                    dw_r[b][a] = 1.0f;
+                    dw_i[b][a] = 0.0f;
+                }
+            }
+        }
+    }
+
+    const std::size_t t_stride = n_freq * N_ELEM;
+    const std::uint8_t* packed_ptr = packed + (t_start * n_freq + freq) * N_ELEM;
+    float p_acc[B_TILE] = {0.0f};
+    std::size_t t = t_start;
+
+    for (; t + (TIME_UNROLL - 1) < t_end; t += TIME_UNROLL) {
+        float s_r[B_TILE][TIME_UNROLL][N_POL] = {0.0f};
+        float s_i[B_TILE][TIME_UNROLL][N_POL] = {0.0f};
+
+        #pragma unroll
+        for (int k = 0; k < TIME_UNROLL; ++k) {
+            float2 p_vec[ELEM_PER_LANE];
+            load_and_unpack_contiguous<ELEM_PER_LANE, SWAPPED_WITH_OFFSET>(
+                packed_ptr + k * t_stride, lane, p_vec);
+
+            #pragma unroll
+            for (unsigned int a = 0; a < ELEM_PER_LANE; ++a) {
+                const float2 p = p_vec[a];
+                constexpr bool IS_INTERLEAVED_DUAL = (N_POL == 2 && POL_LAYOUT == 0);
+                constexpr bool IS_PLANAR_DUAL = (N_POL == 2 && POL_LAYOUT == 1);
+                const int pol = IS_INTERLEAVED_DUAL
+                                    ? static_cast<int>(a & 1U)
+                                    : (IS_PLANAR_DUAL ? static_cast<int>(lane >> 4U) : 0);
+
+                #pragma unroll
+                for (int b = 0; b < B_TILE; ++b) {
+                    const float wr = w_r[b][a];
+                    const float wi = w_i[b][a];
+                    s_r[b][k][pol] = fmaf(wr, p.x, fmaf(-wi, p.y, s_r[b][k][pol]));
+                    s_i[b][k][pol] = fmaf(wr, p.y, fmaf(wi, p.x, s_i[b][k][pol]));
+
+                    if constexpr (INTERPOLATE) {
+                        const float dwr = dw_r[b][a];
+                        const float dwi = dw_i[b][a];
+                        w_r[b][a] = fmaf(-wi, dwi, wr * dwr);
+                        w_i[b][a] = fmaf(wr, dwi, wi * dwr);
+                    }
+                }
+            }
+        }
+
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            #pragma unroll
+            for (int b = 0; b < B_TILE; ++b) {
+                #pragma unroll
+                for (int k = 0; k < TIME_UNROLL; ++k) {
+                    #pragma unroll
+                    for (int p = 0; p < N_POL; ++p) {
+                        s_r[b][k][p] += __shfl_down_sync(full_mask, s_r[b][k][p], offset);
+                        s_i[b][k][p] += __shfl_down_sync(full_mask, s_i[b][k][p], offset);
+                    }
+                }
+            }
+        }
+
+        if (lane == 0) {
+            #pragma unroll
+            for (int k = 0; k < TIME_UNROLL; ++k) {
+                #pragma unroll
+                for (int b = 0; b < B_TILE; ++b) {
+                    if (b < active_in_tile) {
+                        #pragma unroll
+                        for (int p = 0; p < N_POL; ++p) {
+                            p_acc[b] = fmaf(s_r[b][k][p], s_r[b][k][p],
+                                            fmaf(s_i[b][k][p], s_i[b][k][p], p_acc[b]));
+                        }
+                    }
+                }
+            }
+        }
+
+        if constexpr (INTERPOLATE) {
+            #pragma unroll
+            for (int b = 0; b < B_TILE; ++b) {
+                #pragma unroll
+                for (unsigned int a = 0; a < ELEM_PER_LANE; ++a) {
+                    const float amp = w_amp[b][a];
+                    if (amp > 1.0e-12f) {
+                        const float norm_sq = fmaf(w_r[b][a], w_r[b][a], w_i[b][a] * w_i[b][a]);
+                        if (norm_sq > 0.0f) {
+                            const float renorm = amp * rsqrtf(norm_sq);
+                            w_r[b][a] *= renorm;
+                            w_i[b][a] *= renorm;
+                        }
+                    }
+                }
+            }
+        }
+
+        packed_ptr += TIME_UNROLL * t_stride;
+    }
+
+    for (; t < t_end; ++t) {
+        float s_r[B_TILE][N_POL] = {0.0f};
+        float s_i[B_TILE][N_POL] = {0.0f};
+
+        float2 p_vec[ELEM_PER_LANE];
+        load_and_unpack_contiguous<ELEM_PER_LANE, SWAPPED_WITH_OFFSET>(packed_ptr, lane, p_vec);
+
+        #pragma unroll
+        for (unsigned int a = 0; a < ELEM_PER_LANE; ++a) {
+            const float2 p = p_vec[a];
+            constexpr bool IS_INTERLEAVED_DUAL = (N_POL == 2 && POL_LAYOUT == 0);
+            constexpr bool IS_PLANAR_DUAL = (N_POL == 2 && POL_LAYOUT == 1);
+            const int pol = IS_INTERLEAVED_DUAL
+                                ? static_cast<int>(a & 1U)
+                                : (IS_PLANAR_DUAL ? static_cast<int>(lane >> 4U) : 0);
+
+            #pragma unroll
+            for (int b = 0; b < B_TILE; ++b) {
+                const float wr = w_r[b][a];
+                const float wi = w_i[b][a];
+                s_r[b][pol] = fmaf(wr, p.x, fmaf(-wi, p.y, s_r[b][pol]));
+                s_i[b][pol] = fmaf(wr, p.y, fmaf(wi, p.x, s_i[b][pol]));
+
+                if constexpr (INTERPOLATE) {
+                    const float dwr = dw_r[b][a];
+                    const float dwi = dw_i[b][a];
+                    w_r[b][a] = fmaf(-wi, dwi, wr * dwr);
+                    w_i[b][a] = fmaf(wr, dwi, wi * dwr);
+                }
+            }
+        }
+
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            #pragma unroll
+            for (int b = 0; b < B_TILE; ++b) {
+                #pragma unroll
+                for (int p = 0; p < N_POL; ++p) {
+                    s_r[b][p] += __shfl_down_sync(full_mask, s_r[b][p], offset);
+                    s_i[b][p] += __shfl_down_sync(full_mask, s_i[b][p], offset);
+                }
+            }
+        }
+
+        if (lane == 0) {
+            #pragma unroll
+            for (int b = 0; b < B_TILE; ++b) {
+                if (b < active_in_tile) {
+                    #pragma unroll
+                    for (int p = 0; p < N_POL; ++p) {
+                        p_acc[b] = fmaf(s_r[b][p], s_r[b][p],
+                                        fmaf(s_i[b][p], s_i[b][p], p_acc[b]));
+                    }
+                }
+            }
+        }
+
+        packed_ptr += t_stride;
+    }
+
+    if (lane == 0) {
+        float inv_valid = 0.0f;
+        if (use_mask) {
+            std::size_t valid_samples = 0;
+            for (std::size_t c = 0; c < n_chunks; ++c) {
+                if (d_rfi_mask[c * n_freq + freq] == 0) {
+                    const std::size_t cs = c * time_chunk_size;
+                    const std::size_t ce = (cs + time_chunk_size < n_time) ? (cs + time_chunk_size) : n_time;
+                    valid_samples += (ce > cs) ? (ce - cs) : 0;
+                }
+            }
+            inv_valid = (valid_samples > 0) ? (1.0f / static_cast<float>(valid_samples)) : 0.0f;
+        } else {
+            inv_valid = (n_time > 0) ? (1.0f / static_cast<float>(n_time)) : 0.0f;
+        }
+        if (inv_valid > 0.0f) {
+            #pragma unroll
+            for (int b = 0; b < B_TILE; ++b) {
+                if (b < active_in_tile && p_acc[b] > 0.0f) {
+                    atomicAdd(&power[(b_base + b) * n_freq + freq], p_acc[b] * inv_valid);
+                }
+            }
+        }
+    }
+}
+
 } // namespace
 
 void set_l2_persisting_weights_policy(cudaStream_t stream, const void* ptr, std::size_t bytes) {
@@ -1072,16 +1550,19 @@ void launch_generate_steering_weights_tapered(
         const unsigned int f_grid = static_cast<unsigned int>(n_freq);
         if (num_beams <= 8) {
             fuse_weight_space_bislc_kernel<8><<<f_grid, 256, 0, stream>>>(
-                d_weights, d_directions_start, d_wavenumbers,
-                d_antenna_positions, d_norm_taper, num_beams, n_freq, n_elem, bislc_diag_loading);
+                d_weights, d_step_weights, d_directions_start, d_directions_end, d_wavenumbers,
+                d_antenna_positions, d_norm_taper, d_calibration_gains, num_beams, n_freq, n_elem,
+                n_time, bislc_diag_loading, beam_calibration_mask);
         } else if (num_beams <= 16) {
             fuse_weight_space_bislc_kernel<16><<<f_grid, 256, 0, stream>>>(
-                d_weights, d_directions_start, d_wavenumbers,
-                d_antenna_positions, d_norm_taper, num_beams, n_freq, n_elem, bislc_diag_loading);
+                d_weights, d_step_weights, d_directions_start, d_directions_end, d_wavenumbers,
+                d_antenna_positions, d_norm_taper, d_calibration_gains, num_beams, n_freq, n_elem,
+                n_time, bislc_diag_loading, beam_calibration_mask);
         } else {
             fuse_weight_space_bislc_kernel<32><<<f_grid, 256, 0, stream>>>(
-                d_weights, d_directions_start, d_wavenumbers,
-                d_antenna_positions, d_norm_taper, num_beams, n_freq, n_elem, bislc_diag_loading);
+                d_weights, d_step_weights, d_directions_start, d_directions_end, d_wavenumbers,
+                d_antenna_positions, d_norm_taper, d_calibration_gains, num_beams, n_freq, n_elem,
+                n_time, bislc_diag_loading, beam_calibration_mask);
         }
     }
 }
@@ -1269,6 +1750,116 @@ void launch_reduce_beam_power(
     reduce_beam_power_kernel<BLOCK_THREADS><<<grid, BLOCK_THREADS, 0, stream>>>(
         d_voltages, d_power, n_time, n_freq, active_beams, max_beams_stride, n_pol,
         d_rfi_mask, chunk_size, n_chunks);
+}
+
+void launch_direct_beamformer_power_only(
+    const int4x2_t* d_packed,
+    const float2* d_weights,
+    const float2* d_step_weights,
+    float* d_power,
+    std::size_t n_time,
+    std::size_t n_freq,
+    std::size_t n_ant,
+    std::size_t num_active_beams,
+    std::size_t max_beams_stride,
+    std::size_t time_chunk_size,
+    std::size_t /*time_unroll*/,
+    std::size_t beam_tile_size,
+    cudaStream_t stream,
+    std::size_t n_pol,
+    DirectPolLayout pol_layout,
+    DirectInputFormat input_format,
+    const std::uint8_t* d_rfi_mask) {
+
+    const std::size_t stride_beams = std::max(max_beams_stride, num_active_beams);
+    if (stride_beams == 0 || n_freq == 0 || d_power == nullptr) return;
+
+    CHECK_CUDA_ERROR_NON_OO(
+        cudaMemsetAsync(d_power, 0, stride_beams * n_freq * sizeof(float), stream));
+
+    if (num_active_beams == 0 || n_time == 0 || d_packed == nullptr || d_weights == nullptr) {
+        return;
+    }
+
+    const std::size_t n_elem = n_ant * std::max<std::size_t>(1, n_pol);
+    std::size_t b_tile = 1;
+    if (beam_tile_size >= 4 && num_active_beams >= 4) {
+        b_tile = (n_elem <= 128) ? 4 : 2;
+    } else if (beam_tile_size >= 2 && num_active_beams >= 2) {
+        b_tile = (n_elem <= 256) ? 2 : 1;
+    }
+
+    constexpr int WARPS_PER_BLOCK = 4;
+    const std::size_t chunk_sz = (time_chunk_size > 0) ? time_chunk_size : 256;
+    const std::size_t num_chunks = (n_time + chunk_sz - 1) / chunk_sz;
+    const std::size_t num_beam_tiles = (num_active_beams + b_tile - 1) / b_tile;
+    const dim3 grid_dim(static_cast<unsigned int>(num_beam_tiles),
+                        static_cast<unsigned int>(n_freq),
+                        static_cast<unsigned int>(num_chunks));
+    const dim3 block_dim(32, WARPS_PER_BLOCK);
+    const auto* packed_bytes = reinterpret_cast<const std::uint8_t*>(d_packed);
+    const bool interpolate = (d_step_weights != nullptr);
+
+    auto launch_configured = [&](auto elem_tag, auto pol_tag, auto layout_tag,
+                                 auto b_tile_tag, auto interp_tag, auto fmt_tag) {
+        constexpr int N_E = decltype(elem_tag)::value;
+        constexpr int N_P = decltype(pol_tag)::value;
+        constexpr int L_O = decltype(layout_tag)::value;
+        constexpr int B_T = decltype(b_tile_tag)::value;
+        constexpr bool I_P = decltype(interp_tag)::value;
+        constexpr bool F_O = decltype(fmt_tag)::value;
+        direct_beamformer_power_only_kernel<N_E, N_P, L_O, B_T, I_P, F_O>
+            <<<grid_dim, block_dim, 0, stream>>>(
+                d_power, d_weights, d_step_weights, packed_bytes, d_rfi_mask,
+                n_time, n_freq, chunk_sz, num_chunks, num_active_beams, stride_beams);
+    };
+
+    auto dispatch_fmt = [&](auto elem_tag, auto pol_tag, auto layout_tag, auto b_tile_tag, auto interp_tag) {
+        if (input_format == DirectInputFormat::INT4X2_SWAPPED_WITHOFFSET) {
+            launch_configured(elem_tag, pol_tag, layout_tag, b_tile_tag, interp_tag, std::true_type{});
+        } else {
+            launch_configured(elem_tag, pol_tag, layout_tag, b_tile_tag, interp_tag, std::false_type{});
+        }
+    };
+
+    auto dispatch_interp = [&](auto elem_tag, auto pol_tag, auto layout_tag, auto b_tile_tag) {
+        if (interpolate) {
+            dispatch_fmt(elem_tag, pol_tag, layout_tag, b_tile_tag, std::true_type{});
+        } else {
+            dispatch_fmt(elem_tag, pol_tag, layout_tag, b_tile_tag, std::false_type{});
+        }
+    };
+
+    auto dispatch_b_tile = [&](auto elem_tag, auto pol_tag, auto layout_tag) {
+        if (b_tile == 4) dispatch_interp(elem_tag, pol_tag, layout_tag, std::integral_constant<int, 4>{});
+        else if (b_tile == 2) dispatch_interp(elem_tag, pol_tag, layout_tag, std::integral_constant<int, 2>{});
+        else dispatch_interp(elem_tag, pol_tag, layout_tag, std::integral_constant<int, 1>{});
+    };
+
+    auto dispatch_pol = [&](auto elem_tag) {
+        if (n_pol == 2) {
+            if (pol_layout == DirectPolLayout::PLANAR) {
+                dispatch_b_tile(elem_tag, std::integral_constant<int, 2>{}, std::integral_constant<int, 1>{});
+            } else {
+                dispatch_b_tile(elem_tag, std::integral_constant<int, 2>{}, std::integral_constant<int, 0>{});
+            }
+        } else {
+            dispatch_b_tile(elem_tag, std::integral_constant<int, 1>{}, std::integral_constant<int, 0>{});
+        }
+    };
+
+    switch (n_elem) {
+        case 32:  dispatch_pol(std::integral_constant<int, 32>{}); break;
+        case 64:  dispatch_pol(std::integral_constant<int, 64>{}); break;
+        case 128: dispatch_pol(std::integral_constant<int, 128>{}); break;
+        case 256: dispatch_pol(std::integral_constant<int, 256>{}); break;
+        case 512: dispatch_pol(std::integral_constant<int, 512>{}); break;
+        default:
+            throw std::invalid_argument(
+                "Unsupported total elements (n_ant * n_pol): must be 32, 64, 128, 256, or 512");
+    }
+
+    CHECK_CUDA_ERROR_NON_OO(cudaGetLastError());
 }
 
 } // namespace kotekan

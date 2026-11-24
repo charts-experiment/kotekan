@@ -169,6 +169,8 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
     _cuda_graph_execs.resize(ring_slots, nullptr);
 
     _grid_mode_enabled = config.get_default<bool>(unique_name, "enable_grid_mode", false);
+    _compute_power_inline_only =
+        config.get_default<bool>(unique_name, "compute_power_inline_only", false);
     _grid_step = config.get_default<float>(unique_name, "grid_step", 0.02f);
     const bool enable_subframe_interp =
         config.get_default<bool>(unique_name, "enable_subframe_interpolation", true);
@@ -260,6 +262,7 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
         group->config.num_active_beams = std::min(init_beams, group->config.max_beams);
 
         group->config.enable_grid_mode = _grid_mode_enabled;
+        group->config.compute_power_inline_only = _compute_power_inline_only;
         group->config.grid_step = _grid_step;
         group->config.enable_cuda_graph = _enable_cuda_graph;
         group->config.enable_subframe_interpolation = enable_subframe_interp;
@@ -733,6 +736,7 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
                 }
                 reply["grid_mode_enabled"] = group->config.enable_grid_mode;
                 reply["grid_points"] = group->config.num_grid_points;
+                reply["compute_power_inline_only"] = group->config.compute_power_inline_only;
                 reply["spacing_m"] = group->config.spacing_m;
                 reply["active_elements"] = group->config.num_active_antennas;
                 reply["active_antennas"] = group->config.num_active_antennas;
@@ -1058,8 +1062,10 @@ cudaDirectBeamTrackerCommand::cudaDirectBeamTrackerCommand(Config& config,
     set_name("cudaDirectBeamTrackerCommand");
 
     gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_voltage, true, false, true));
-    gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_formed_beams, false, true, true));
-    device.register_gpu_memory_name(_gpu_mem_formed_beams);
+    if (!_compute_power_inline_only) {
+        gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_formed_beams, false, true, true));
+        device.register_gpu_memory_name(_gpu_mem_formed_beams);
+    }
     if (!_gpu_mem_beam_power.empty()) {
         gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_beam_power, false, true, true));
         device.register_gpu_memory_name(_gpu_mem_beam_power);
@@ -1235,8 +1241,12 @@ void cudaDirectBeamTrackerCommand::allocate_device_buffers() {
             static_cast<std::size_t>(_num_elements) * static_cast<std::size_t>(_num_local_freq)
             * static_cast<std::size_t>(_samples_per_data_set) * sizeof(int4x2_t);
         const std::size_t output_frame_bytes =
-            static_cast<std::size_t>(_num_local_freq) * static_cast<std::size_t>(_samples_per_data_set)
-            * static_cast<std::size_t>(_max_beams) * static_cast<std::size_t>(_num_pols) * sizeof(float2);
+            _compute_power_inline_only
+                ? 0
+                : static_cast<std::size_t>(_num_local_freq)
+                      * static_cast<std::size_t>(_samples_per_data_set)
+                      * static_cast<std::size_t>(_max_beams) * static_cast<std::size_t>(_num_pols)
+                      * sizeof(float2);
 
         const std::size_t needed_bytes =
             static_cast<std::size_t>(_gpu_buffer_depth) * (input_frame_bytes + output_frame_bytes)
@@ -1313,8 +1323,10 @@ void cudaDirectBeamTrackerCommand::allocate_device_buffers() {
     }
 
     if (_grid_mode_enabled) {
-        _h_grid_lms = generate_sky_grid_directions(_grid_step);
+        _sky_grid_index = build_sky_grid_index(_grid_step);
+        _h_grid_lms = _sky_grid_index.directions;
         _num_grid_points = _h_grid_lms.size();
+        _applied_grid_apply_cal = cfg.apply_calibration_gains;
 
         {
             std::lock_guard<std::mutex> reg_lock(_registry_mutex);
@@ -1491,8 +1503,10 @@ void cudaDirectBeamTrackerCommand::update_weights_if_needed(const DirectBeamTrac
         std::min(cfg.num_active_beams, static_cast<std::size_t>(_max_beams));
     const std::uint64_t beam_cal_mask =
         (_d_calibration_gains != nullptr) ? cfg.effective_beam_calibration_mask() : 0ULL;
-    const bool cal_changed = (_applied_beam_calibration_mask != beam_cal_mask);
+    const bool cal_changed = (_applied_beam_calibration_mask != beam_cal_mask)
+                             || (_applied_grid_apply_cal != cfg.apply_calibration_gains);
     _applied_beam_calibration_mask = beam_cal_mask;
+    _applied_grid_apply_cal = cfg.apply_calibration_gains;
 
     // Only copy antenna taper weights to device when the mask / taper generation actually changed
     if (mask_changed) {
@@ -1500,10 +1514,9 @@ void cudaDirectBeamTrackerCommand::update_weights_if_needed(const DirectBeamTrac
                                                 _num_elements * sizeof(float),
                                                 cudaMemcpyHostToDevice, stream));
     }
+    const bool grid_has_cal = (cfg.apply_calibration_gains && _d_calibration_gains != nullptr);
     if ((mask_changed || cal_changed) && _grid_mode_enabled && _d_grid_weights != nullptr) {
-        const float2* grid_cal_ptr =
-            (cfg.apply_calibration_gains && _d_calibration_gains != nullptr) ? _d_calibration_gains
-                                                                             : nullptr;
+        const float2* grid_cal_ptr = grid_has_cal ? _d_calibration_gains : nullptr;
         launch_precompute_sky_grid_tapered(
             _d_grid_weights, _d_grid_lms, _d_wavenumbers, _d_antenna_positions, _d_norm_taper,
             grid_cal_ptr, _num_grid_points, _num_local_freq, _num_elements, stream);
@@ -1511,15 +1524,31 @@ void cudaDirectBeamTrackerCommand::update_weights_if_needed(const DirectBeamTrac
 
     if (_grid_mode_enabled && !_h_grid_lms.empty()) {
         const std::size_t beam_stride = static_cast<std::size_t>(_num_local_freq) * _num_elements;
+        _h_directions_scratch.resize(active_beams);
         for (std::size_t b = 0; b < active_beams; ++b) {
             int g_idx = cfg.targets[b].grid_index;
             if (g_idx < 0 || g_idx >= static_cast<int>(_num_grid_points)) {
-                g_idx = lookup_nearest_sky_grid(cfg.targets[b].direction.x,
-                                                cfg.targets[b].direction.y, _h_grid_lms);
+                g_idx = lookup_nearest_sky_grid_o1(cfg.targets[b].direction.x,
+                                                   cfg.targets[b].direction.y, _sky_grid_index);
             }
-            CHECK_CUDA_ERROR_NON_OO(
-                cudaMemcpyAsync(_d_weights + b * beam_stride, _d_grid_weights + g_idx * beam_stride,
-                                beam_stride * sizeof(float2), cudaMemcpyDeviceToDevice, stream));
+            const bool beam_wants_cal = (b >= 64) || (((beam_cal_mask >> b) & 1ULL) != 0ULL);
+            if (!grid_has_cal || beam_wants_cal) {
+                CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(
+                    _d_weights + b * beam_stride, _d_grid_weights + g_idx * beam_stride,
+                    beam_stride * sizeof(float2), cudaMemcpyDeviceToDevice, stream));
+            } else {
+                const float2 lm = _h_grid_lms[static_cast<std::size_t>(g_idx)];
+                const float tsq = lm.x * lm.x + lm.y * lm.y;
+                const float nz = (tsq <= 1.0f) ? std::sqrt(1.0f - tsq) : 0.0f;
+                _h_directions_scratch[b] = DirectDirection3D{lm.x, lm.y, nz};
+                CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(
+                    _d_directions + b, &_h_directions_scratch[b], sizeof(DirectDirection3D),
+                    cudaMemcpyHostToDevice, stream));
+                launch_generate_steering_weights_tapered(
+                    _d_weights + b * beam_stride, nullptr, _d_directions + b, nullptr,
+                    _d_wavenumbers, _d_antenna_positions, _d_norm_taper, nullptr, 1,
+                    _num_local_freq, _num_elements, 0, false, 0.0f, stream, 0ULL);
+            }
         }
     } else if (active_beams > 0) {
         std::vector<DirectDirection3D> h_dirs(active_beams);
@@ -1585,13 +1614,19 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
     void* input_memory =
         device.get_gpu_memory_array(_gpu_mem_voltage, gpu_frame_id, _gpu_buffer_depth, input_bytes);
 
-    const std::size_t output_bytes = static_cast<std::size_t>(_num_local_freq)
-                                     * static_cast<std::size_t>(_samples_per_data_set)
-                                     * static_cast<std::size_t>(_max_beams)
-                                     * static_cast<std::size_t>(_num_pols) * sizeof(float2);
-    void* output_memory = device.get_gpu_memory_array(_gpu_mem_formed_beams, gpu_frame_id,
-                                                      _gpu_buffer_depth, output_bytes);
-    if (!input_memory || !output_memory) {
+    const std::size_t output_bytes =
+        _compute_power_inline_only
+            ? 0
+            : static_cast<std::size_t>(_num_local_freq)
+                  * static_cast<std::size_t>(_samples_per_data_set)
+                  * static_cast<std::size_t>(_max_beams) * static_cast<std::size_t>(_num_pols)
+                  * sizeof(float2);
+    void* output_memory =
+        _compute_power_inline_only
+            ? nullptr
+            : device.get_gpu_memory_array(_gpu_mem_formed_beams, gpu_frame_id, _gpu_buffer_depth,
+                                          output_bytes);
+    if (!input_memory || (!_compute_power_inline_only && !output_memory)) {
         return record_end_event();
     }
 
@@ -1601,7 +1636,7 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
 
     std::shared_ptr<metadataObject> meta =
         device.get_gpu_memory_array_metadata(_gpu_mem_voltage, gpu_frame_id);
-    if (meta) {
+    if (meta && !_compute_power_inline_only) {
         device.claim_gpu_memory_array_metadata(_gpu_mem_formed_beams, gpu_frame_id, meta);
     }
     auto charts_meta = meta ? std::dynamic_pointer_cast<chartsMetadata>(meta) : nullptr;
@@ -1696,6 +1731,40 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
         _last_graph_interp = use_interp;
     }
 
+    const std::uint8_t* d_mask_ptr = nullptr;
+    if (!_gpu_mem_rfi_mask.empty()) {
+        const std::size_t n_chunks =
+            (_samples_per_data_set + _time_chunk_size - 1) / _time_chunk_size;
+        const std::size_t mask_bytes =
+            n_chunks * static_cast<std::size_t>(_num_local_freq) * sizeof(std::uint8_t);
+        void* mask_mem = device.get_gpu_memory_array(_gpu_mem_rfi_mask, gpu_frame_id,
+                                                     _gpu_buffer_depth, mask_bytes);
+        if (mask_mem) {
+            d_mask_ptr = reinterpret_cast<const std::uint8_t*>(mask_mem);
+        }
+    }
+
+    auto launch_beamformer_pass = [&]() {
+        if (_compute_power_inline_only) {
+            launch_direct_beamformer_power_only(
+                reinterpret_cast<const int4x2_t*>(input_memory), _d_weights, step_weights_ptr,
+                _d_beam_power, static_cast<std::size_t>(_samples_per_data_set),
+                static_cast<std::size_t>(_num_local_freq), static_cast<std::size_t>(_num_antennas),
+                active_beams, static_cast<std::size_t>(_max_beams), _time_chunk_size, _time_unroll,
+                _beam_tile_size, stream, static_cast<std::size_t>(_num_pols), _pol_layout,
+                input_format, d_mask_ptr);
+        } else {
+            launch_direct_beamformer(
+                reinterpret_cast<const int4x2_t*>(input_memory), _d_weights, step_weights_ptr,
+                reinterpret_cast<float2*>(output_memory),
+                static_cast<std::size_t>(_samples_per_data_set),
+                static_cast<std::size_t>(_num_local_freq), static_cast<std::size_t>(_num_antennas),
+                active_beams, static_cast<std::size_t>(_max_beams), _time_chunk_size, _time_unroll,
+                _beam_tile_size, stream, static_cast<std::size_t>(_num_pols), _pol_layout,
+                input_format);
+        }
+    };
+
     if (_enable_cuda_graph) {
         const std::size_t slot = static_cast<std::size_t>(gpu_frame_id) % _cuda_graph_execs.size();
         if (_cuda_graph_execs[slot] == nullptr) {
@@ -1705,28 +1774,14 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
             }
             CHECK_CUDA_ERROR_NON_OO(
                 cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
-            launch_direct_beamformer(
-                reinterpret_cast<const int4x2_t*>(input_memory), _d_weights, step_weights_ptr,
-                reinterpret_cast<float2*>(output_memory),
-                static_cast<std::size_t>(_samples_per_data_set),
-                static_cast<std::size_t>(_num_local_freq), static_cast<std::size_t>(_num_antennas),
-                active_beams, static_cast<std::size_t>(_max_beams), _time_chunk_size, _time_unroll,
-                _beam_tile_size, stream, static_cast<std::size_t>(_num_pols), _pol_layout,
-                input_format);
+            launch_beamformer_pass();
             CHECK_CUDA_ERROR_NON_OO(cudaStreamEndCapture(stream, &_cuda_graphs[slot]));
             CHECK_CUDA_ERROR_NON_OO(cudaGraphInstantiate(&_cuda_graph_execs[slot],
                                                          _cuda_graphs[slot], nullptr, nullptr, 0));
         }
         CHECK_CUDA_ERROR_NON_OO(cudaGraphLaunch(_cuda_graph_execs[slot], stream));
     } else {
-        launch_direct_beamformer(
-            reinterpret_cast<const int4x2_t*>(input_memory), _d_weights, step_weights_ptr,
-            reinterpret_cast<float2*>(output_memory),
-            static_cast<std::size_t>(_samples_per_data_set),
-            static_cast<std::size_t>(_num_local_freq), static_cast<std::size_t>(_num_antennas),
-            active_beams, static_cast<std::size_t>(_max_beams), _time_chunk_size, _time_unroll,
-            _beam_tile_size, stream, static_cast<std::size_t>(_num_pols), _pol_layout,
-            input_format);
+        launch_beamformer_pass();
     }
 
     if (_tracker_active_beams) {
@@ -1737,27 +1792,16 @@ cudaEvent_t cudaDirectBeamTrackerCommand::execute(cudaPipelineState& /*pipestate
         _tracker_vram_mb->add_sample(vram_mb);
     }
 
-    // Launch reduction kernel & copy to pinned host buffer
+    // Launch reduction kernel (unless already reduced inline) & copy to pinned host buffer
     if (_d_beam_power && _h_beam_power) {
-        const std::uint8_t* d_mask_ptr = nullptr;
-        if (!_gpu_mem_rfi_mask.empty()) {
-            const std::size_t n_chunks =
-                (_samples_per_data_set + _time_chunk_size - 1) / _time_chunk_size;
-            const std::size_t mask_bytes =
-                n_chunks * static_cast<std::size_t>(_num_local_freq) * sizeof(std::uint8_t);
-            void* mask_mem = device.get_gpu_memory_array(_gpu_mem_rfi_mask, gpu_frame_id,
-                                                         _gpu_buffer_depth, mask_bytes);
-            if (mask_mem) {
-                d_mask_ptr = reinterpret_cast<const std::uint8_t*>(mask_mem);
-            }
+        if (!_compute_power_inline_only) {
+            launch_reduce_beam_power(reinterpret_cast<const float2*>(output_memory), _d_beam_power,
+                                     static_cast<std::size_t>(_samples_per_data_set),
+                                     static_cast<std::size_t>(_num_local_freq), active_beams,
+                                     static_cast<std::size_t>(_max_beams), stream,
+                                     static_cast<std::size_t>(_num_pols), d_mask_ptr,
+                                     _time_chunk_size);
         }
-
-        launch_reduce_beam_power(reinterpret_cast<const float2*>(output_memory), _d_beam_power,
-                                 static_cast<std::size_t>(_samples_per_data_set),
-                                 static_cast<std::size_t>(_num_local_freq), active_beams,
-                                 static_cast<std::size_t>(_max_beams), stream,
-                                 static_cast<std::size_t>(_num_pols), d_mask_ptr,
-                                 _time_chunk_size);
 
         CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_h_beam_power, _d_beam_power,
                                                 static_cast<std::size_t>(_max_beams)

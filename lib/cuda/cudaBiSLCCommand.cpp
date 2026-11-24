@@ -213,11 +213,13 @@ void cudaBiSLCCommand::allocate_device_buffers() {
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_wavenumbers, _num_local_freq * sizeof(double)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_antenna_positions, _num_elements * sizeof(float3)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_antenna_mask, _num_elements * sizeof(std::uint8_t)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_norm_taper, _num_elements * sizeof(float)));
 
     // Allocate pinned host memory for safe, asynchronous DMA transfers
     CHECK_CUDA_ERROR_NON_OO(cudaMallocHost(&_h_directions, max_b * sizeof(DirectDirection3D)));
     CHECK_CUDA_ERROR_NON_OO(cudaMallocHost(&_h_antenna_positions, _num_elements * sizeof(float3)));
     CHECK_CUDA_ERROR_NON_OO(cudaMallocHost(&_h_antenna_mask, _num_elements * sizeof(std::uint8_t)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMallocHost(&_h_norm_taper, _num_elements * sizeof(float)));
 
     _h_coupling_matrices.resize(matrix_elems);
 
@@ -255,6 +257,10 @@ void cudaBiSLCCommand::free_device_buffers() {
         cudaFree(_d_antenna_mask);
         _d_antenna_mask = nullptr;
     }
+    if (_d_norm_taper) {
+        cudaFree(_d_norm_taper);
+        _d_norm_taper = nullptr;
+    }
     if (_h_directions) {
         cudaFreeHost(_h_directions);
         _h_directions = nullptr;
@@ -267,6 +273,10 @@ void cudaBiSLCCommand::free_device_buffers() {
         cudaFreeHost(_h_antenna_mask);
         _h_antenna_mask = nullptr;
     }
+    if (_h_norm_taper) {
+        cudaFreeHost(_h_norm_taper);
+        _h_norm_taper = nullptr;
+    }
 }
 
 void cudaBiSLCCommand::update_matrices_if_needed(cudaStream_t stream) {
@@ -278,13 +288,17 @@ void cudaBiSLCCommand::update_matrices_if_needed(cudaStream_t stream) {
 
     {
         std::lock_guard<std::mutex> lock(_global_mutex);
+        const std::uint64_t tracker_beam_cal_mask = tracker_cfg.effective_beam_calibration_mask();
         if (_shared_config.tracker_generation_synced != tracker_cfg.config_generation
-            || _shared_config.num_active_beams != tracker_cfg.num_active_beams) {
+            || _shared_config.num_active_beams != tracker_cfg.num_active_beams
+            || _shared_config.beam_calibration_mask != tracker_beam_cal_mask) {
 
             _shared_config.num_active_beams = tracker_cfg.num_active_beams;
             _shared_config.antenna_mask = tracker_cfg.antenna_mask;
             _shared_config.antenna_positions = tracker_cfg.antenna_positions;
+            _shared_config.normalized_taper_weights = tracker_cfg.normalized_taper_weights;
             _shared_config.num_active_antennas = tracker_cfg.num_active_antennas;
+            _shared_config.beam_calibration_mask = tracker_beam_cal_mask;
 
             if (_shared_config.targets.size() < tracker_cfg.targets.size()) {
                 _shared_config.targets.resize(tracker_cfg.targets.size());
@@ -320,6 +334,7 @@ void cudaBiSLCCommand::update_matrices_if_needed(cudaStream_t stream) {
     for (std::size_t a = 0; a < static_cast<std::size_t>(_num_elements); ++a) {
         _h_antenna_positions[a] = current_cfg.antenna_positions[a];
         _h_antenna_mask[a] = current_cfg.antenna_mask[a];
+        _h_norm_taper[a] = current_cfg.normalized_taper_weights[a];
     }
 
     CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_d_directions, _h_directions,
@@ -331,12 +346,16 @@ void cudaBiSLCCommand::update_matrices_if_needed(cudaStream_t stream) {
     CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_d_antenna_mask, _h_antenna_mask,
                                             _num_elements * sizeof(std::uint8_t),
                                             cudaMemcpyHostToDevice, stream));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_d_norm_taper, _h_norm_taper,
+                                            _num_elements * sizeof(float), cudaMemcpyHostToDevice,
+                                            stream));
 
     // Compute A(f) and M(f) = (A(f) + eps*I)^-1 directly on the GPU in-stream
     launch_compute_bislc_matrices_gpu(
         _d_unmix_matrices, _d_coupling_matrices, _d_directions, _d_wavenumbers,
         _d_antenna_positions, _d_antenna_mask, B, static_cast<std::size_t>(_num_local_freq),
-        static_cast<std::size_t>(_num_elements), current_cfg.diagonal_loading, stream);
+        static_cast<std::size_t>(_num_elements), current_cfg.diagonal_loading, stream,
+        _d_norm_taper, current_cfg.beam_calibration_mask);
 }
 
 cudaEvent_t cudaBiSLCCommand::execute(cudaPipelineState& /*pipestate*/,

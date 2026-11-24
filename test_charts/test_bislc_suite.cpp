@@ -584,6 +584,148 @@ bool test_gpu_matrix_inversion_parity() {
     return (pass_A && pass_M);
 }
 
+// Test 6: Tapered Dual-Pol Unit-Diagonal Parity & Uncalibrated-Beam Isolation (FIX-1.1)
+bool test_taper_dualpol_and_uncalibrated_isolation() {
+    std::cout << "\n======================================================\n";
+    std::cout << "[Test 6/6] Tapered Dual-Pol Parity & Uncalibrated-Beam Isolation\n";
+    std::cout << "======================================================\n";
+
+    kotekan::DirectBeamTrackerConfig cfg;
+    cfg.taper_type = kotekan::DirectTaperType::COSINE_PEDESTAL;
+    cfg.taper_pedestal = 0.25f;
+    cfg.set_antenna_grid(64, 2, 0.6f, kotekan::DirectPolLayout::INTERLEAVED, true, 8);
+    const std::size_t n_elem = cfg.total_elements(); // 128 (dual-pol)
+    const std::size_t n_freq = 4;
+    const std::size_t num_beams = 3; // Beams 0,1 calibrated; Beam 2 uncalibrated control
+    const std::uint64_t beam_cal_mask = 0b011ULL;
+    const float diag_loading = 1.0e-4f;
+
+    std::vector<kotekan::DirectBeamTarget> targets(num_beams);
+    targets[0].direction = {0.0f, 0.0f, 1.0f};
+    targets[1].direction = {0.25f, -0.15f, std::sqrt(1.0f - 0.25f * 0.25f - 0.15f * 0.15f)};
+    targets[2].direction = {-0.30f, 0.20f, std::sqrt(1.0f - 0.30f * 0.30f - 0.20f * 0.20f)};
+
+    std::vector<double> freqs = {300.0e6, 350.0e6, 400.0e6, 450.0e6};
+    std::vector<double> wavenumbers(n_freq);
+    for (std::size_t f = 0; f < n_freq; ++f) {
+        wavenumbers[f] = TWO_PI * freqs[f] / SPEED_OF_LIGHT;
+    }
+
+    // Host reference M(f), A(f) with norm_taper & beam_cal_mask
+    std::vector<float2> host_M(n_freq * num_beams * num_beams);
+    std::vector<float2> host_A(n_freq * num_beams * num_beams);
+    kotekan::compute_beam_coupling_and_inverses(
+        host_M.data(), host_A.data(), targets.data(), freqs, cfg.antenna_positions.data(),
+        cfg.antenna_mask.data(), num_beams, n_freq, n_elem, cfg.num_active_antennas, diag_loading,
+        cfg.normalized_taper_weights.data(), beam_cal_mask);
+
+    bool isolation_ok = true;
+    for (std::size_t f = 0; f < n_freq; ++f) {
+        for (std::size_t j = 0; j < num_beams; ++j) {
+            const float2 a2j = host_A[f * num_beams * num_beams + 2 * num_beams + j];
+            const float2 m2j = host_M[f * num_beams * num_beams + 2 * num_beams + j];
+            const float exp_r = (j == 2) ? 1.0f : 0.0f;
+            if (std::abs(a2j.x - exp_r) > 1e-6f || std::abs(a2j.y) > 1e-6f
+                || std::abs(m2j.x - exp_r) > 1e-6f || std::abs(m2j.y) > 1e-6f) {
+                isolation_ok = false;
+            }
+        }
+    }
+
+    // GPU check: standalone cudaBiSLC vs fused Weight-Space BiSLC
+    const std::size_t mat_bytes = n_freq * num_beams * num_beams * sizeof(float2);
+    const std::size_t w_elems = num_beams * n_freq * n_elem;
+    float2 *d_M = nullptr, *d_A = nullptr, *d_w_fused = nullptr, *d_w_ref = nullptr;
+    kotekan::DirectDirection3D* d_dirs = nullptr;
+    double* d_k = nullptr;
+    float3* d_pos = nullptr;
+    float* d_taper = nullptr;
+    uint8_t* d_mask = nullptr;
+
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_M, mat_bytes));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_A, mat_bytes));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_w_fused, w_elems * sizeof(float2)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_w_ref, w_elems * sizeof(float2)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_dirs, num_beams * sizeof(kotekan::DirectDirection3D)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_k, n_freq * sizeof(double)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_pos, n_elem * sizeof(float3)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_taper, n_elem * sizeof(float)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&d_mask, n_elem * sizeof(uint8_t)));
+
+    std::vector<kotekan::DirectDirection3D> h_dirs(num_beams);
+    for (std::size_t b = 0; b < num_beams; ++b)
+        h_dirs[b] = targets[b].direction;
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_dirs, h_dirs.data(),
+                                       num_beams * sizeof(kotekan::DirectDirection3D),
+                                       cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(
+        cudaMemcpy(d_k, wavenumbers.data(), n_freq * sizeof(double), cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_pos, cfg.antenna_positions.data(), n_elem * sizeof(float3),
+                                       cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_taper, cfg.normalized_taper_weights.data(),
+                                       n_elem * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR_NON_OO(cudaMemcpy(d_mask, cfg.antenna_mask.data(), n_elem * sizeof(uint8_t),
+                                       cudaMemcpyHostToDevice));
+
+    cudaStream_t stream;
+    CHECK_CUDA_ERROR_NON_OO(cudaStreamCreate(&stream));
+
+    kotekan::launch_compute_bislc_matrices_gpu(d_M, d_A, d_dirs, d_k, d_pos, d_mask, num_beams,
+                                               n_freq, n_elem, diag_loading, stream, d_taper,
+                                               beam_cal_mask);
+    kotekan::launch_generate_steering_weights_tapered(d_w_ref, d_dirs, d_k, d_pos, d_taper, nullptr,
+                                                      num_beams, n_freq, n_elem, false,
+                                                      diag_loading, stream, beam_cal_mask);
+    std::vector<float2> w_unmixed(w_elems);
+    CHECK_CUDA_ERROR_NON_OO(cudaStreamSynchronize(stream));
+    CHECK_CUDA_ERROR_NON_OO(
+        cudaMemcpy(w_unmixed.data(), d_w_ref, w_elems * sizeof(float2), cudaMemcpyDeviceToHost));
+
+    kotekan::launch_apply_bislc_to_weights(d_w_ref, d_M, num_beams, n_freq, n_elem, stream);
+    kotekan::launch_generate_steering_weights_tapered(d_w_fused, d_dirs, d_k, d_pos, d_taper,
+                                                      nullptr, num_beams, n_freq, n_elem, true,
+                                                      diag_loading, stream, beam_cal_mask);
+    CHECK_CUDA_ERROR_NON_OO(cudaStreamSynchronize(stream));
+
+    std::vector<float2> w_ref(w_elems), w_fused(w_elems);
+    CHECK_CUDA_ERROR_NON_OO(
+        cudaMemcpy(w_ref.data(), d_w_ref, w_elems * sizeof(float2), cudaMemcpyDeviceToHost));
+    CHECK_CUDA_ERROR_NON_OO(
+        cudaMemcpy(w_fused.data(), d_w_fused, w_elems * sizeof(float2), cudaMemcpyDeviceToHost));
+
+    float max_parity_err = 0.0f;
+    float max_uncal_drift = 0.0f;
+    for (std::size_t i = 0; i < w_elems; ++i) {
+        max_parity_err = std::max(max_parity_err, std::abs(w_ref[i].x - w_fused[i].x));
+        max_parity_err = std::max(max_parity_err, std::abs(w_ref[i].y - w_fused[i].y));
+    }
+    const std::size_t b2_off = 2 * n_freq * n_elem;
+    for (std::size_t i = b2_off; i < w_elems; ++i) {
+        max_uncal_drift = std::max(max_uncal_drift, std::abs(w_fused[i].x - w_unmixed[i].x));
+        max_uncal_drift = std::max(max_uncal_drift, std::abs(w_fused[i].y - w_unmixed[i].y));
+    }
+
+    std::cout << "  Uncalibrated beam isolation ok:   " << (isolation_ok ? "YES" : "NO") << "\n";
+    std::cout << "  Fused vs cudaBiSLC max weight err: " << std::scientific << max_parity_err
+              << "\n";
+    std::cout << "  Uncalibrated beam weight drift:    " << max_uncal_drift << "\n";
+
+    cudaFree(d_M);
+    cudaFree(d_A);
+    cudaFree(d_w_fused);
+    cudaFree(d_w_ref);
+    cudaFree(d_dirs);
+    cudaFree(d_k);
+    cudaFree(d_pos);
+    cudaFree(d_taper);
+    cudaFree(d_mask);
+    cudaStreamDestroy(stream);
+
+    const bool pass = isolation_ok && (max_parity_err < 1.0e-5f) && (max_uncal_drift < 1.0e-6f);
+    std::cout << "  -> Result: " << (pass ? "[PASS]" : "[FAIL]") << "\n";
+    return pass;
+}
+
 } // namespace
 
 int main() {
@@ -596,9 +738,10 @@ int main() {
     bool pass3 = test_sidelobe_cancellation();
     bool pass4 = test_gpu_kernel_benchmark();
     bool pass5 = test_gpu_matrix_inversion_parity();
+    bool pass6 = test_taper_dualpol_and_uncalibrated_isolation();
 
     std::cout << "\n==============================================================\n";
-    if (pass1 && pass2 && pass3 && pass4 && pass5) {
+    if (pass1 && pass2 && pass3 && pass4 && pass5 && pass6) {
         std::cout << "  OVERALL SUITE RESULT: ALL TESTS PASSED [SUCCESS]          \n";
         std::cout << "==============================================================\n";
         return 0;

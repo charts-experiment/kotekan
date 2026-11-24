@@ -22,12 +22,25 @@ void compute_beam_coupling_and_inverses(
     std::size_t n_freq,
     std::size_t n_elem,
     std::size_t n_active,
-    float diag_loading) {
+    float diag_loading,
+    const float* norm_taper,
+    std::uint64_t beam_calibration_mask) {
 
     if (num_beams == 0 || n_freq == 0 || n_elem == 0) return;
 
     const std::size_t B = std::min(num_beams, MAX_BISLC_BEAMS);
-    const double inv_n_active = (n_active > 0) ? (1.0 / static_cast<double>(n_active)) : 0.0;
+    double diag_pow = static_cast<double>(n_active);
+    if (norm_taper != nullptr) {
+        double sum_t = 0.0;
+        for (std::size_t a = 0; a < n_elem; ++a) {
+            const float t_a = norm_taper[a];
+            if (t_a > 0.0f) {
+                sum_t += static_cast<double>(t_a);
+            }
+        }
+        diag_pow = sum_t;
+    }
+    const double inv_diag = (diag_pow > 0.0) ? (1.0 / diag_pow) : 0.0;
     constexpr double TWO_PI = charts::constants::two_pi;
     constexpr double C = charts::constants::speed_of_light_m_per_s;
 
@@ -38,9 +51,15 @@ void compute_beam_coupling_and_inverses(
         const double k = TWO_PI * frequencies_hz[f] / C;
 
         for (std::size_t i = 0; i < B; ++i) {
+            const bool cal_i = (i >= 64) || (((beam_calibration_mask >> i) & 1ULL) != 0ULL);
             for (std::size_t j = 0; j < B; ++j) {
+                const bool cal_j = (j >= 64) || (((beam_calibration_mask >> j) & 1ULL) != 0ULL);
                 if (i == j) {
                     A_local[i * B + j] = make_float2(1.0f, 0.0f);
+                    continue;
+                }
+                if (!cal_i || !cal_j) {
+                    A_local[i * B + j] = make_float2(0.0f, 0.0f);
                     continue;
                 }
 
@@ -53,7 +72,12 @@ void compute_beam_coupling_and_inverses(
                 double sum_i = 0.0;
 
                 for (std::size_t a = 0; a < n_elem; ++a) {
-                    if (antenna_mask != nullptr && antenna_mask[a] == 0) {
+                    double w_t = 1.0;
+                    if (norm_taper != nullptr) {
+                        const float t_a = norm_taper[a];
+                        if (t_a <= 0.0f) continue;
+                        w_t = static_cast<double>(t_a);
+                    } else if (antenna_mask != nullptr && antenna_mask[a] == 0) {
                         continue;
                     }
 
@@ -62,17 +86,18 @@ void compute_beam_coupling_and_inverses(
                                            static_cast<double>(pos.y) * dm +
                                            static_cast<double>(pos.z) * dn;
                     const double phase = k * delay_m;
-                    sum_r += std::cos(phase);
-                    sum_i += std::sin(phase);
+                    sum_r += w_t * std::cos(phase);
+                    sum_i += w_t * std::sin(phase);
                 }
 
                 A_local[i * B + j] = make_float2(
-                    static_cast<float>(sum_r * inv_n_active),
-                    static_cast<float>(sum_i * inv_n_active));
+                    static_cast<float>(sum_r * inv_diag),
+                    static_cast<float>(sum_i * inv_diag));
             }
         }
 
-        invert_complex_matrix(A_local.data(), M_local.data(), B, diag_loading);
+        invert_complex_matrix(A_local.data(), M_local.data(), B, diag_loading,
+                              beam_calibration_mask);
 
         const std::size_t f_offset = f * B * B;
         for (std::size_t idx = 0; idx < B * B; ++idx) {
@@ -98,10 +123,12 @@ compute_and_invert_bislc_matrices_kernel(
     const double* __restrict__ d_wavenumbers,
     const float3* __restrict__ d_positions,
     const std::uint8_t* __restrict__ d_mask,
+    const float* __restrict__ d_norm_taper,
     const std::size_t B,
     const std::size_t n_freq,
     const std::size_t n_elem,
-    const float diag_loading) {
+    const float diag_loading,
+    const std::uint64_t beam_calibration_mask) {
 
     const std::size_t f = blockIdx.x;
     if (f >= n_freq || B == 0 || B > MAX_B) return;
@@ -111,31 +138,44 @@ compute_and_invert_bislc_matrices_kernel(
 
     __shared__ float2 s_aug[MAX_B][2 * MAX_B];
     __shared__ float2 s_factors[MAX_B];
-    __shared__ unsigned int s_active_count;
+    __shared__ float s_diag_pow;
 
     if (tid == 0) {
-        unsigned int cnt = 0;
-        for (std::size_t a = 0; a < n_elem; ++a) {
-            if (d_mask == nullptr || __ldg(&d_mask[a]) != 0) {
-                cnt++;
+        if (d_norm_taper != nullptr) {
+            float diag_sum = 0.0f;
+            for (std::size_t a = 0; a < n_elem; ++a) {
+                const float t_a = __ldg(&d_norm_taper[a]);
+                if (t_a > 0.0f) {
+                    diag_sum += t_a;
+                }
             }
+            s_diag_pow = diag_sum;
+        } else {
+            unsigned int cnt = 0;
+            for (std::size_t a = 0; a < n_elem; ++a) {
+                if (d_mask == nullptr || __ldg(&d_mask[a]) != 0) {
+                    cnt++;
+                }
+            }
+            s_diag_pow = static_cast<float>(cnt);
         }
-        s_active_count = cnt;
     }
     __syncthreads();
 
-    const float inv_n_active = (s_active_count > 0) ? (1.0f / static_cast<float>(s_active_count)) : 0.0f;
+    const float inv_diag = (s_diag_pow > 0.0f) ? (1.0f / s_diag_pow) : 0.0f;
     const std::size_t total_pairs = B * B;
 
     // Step 1: Compute A_{i, j}(f) entries in parallel across threads
     for (std::size_t idx = tid; idx < total_pairs; idx += blockDim.x) {
         const std::size_t i = idx / B;
         const std::size_t j = idx % B;
+        const bool cal_i = (i >= 64) || (((beam_calibration_mask >> i) & 1ULL) != 0ULL);
+        const bool cal_j = (j >= 64) || (((beam_calibration_mask >> j) & 1ULL) != 0ULL);
 
         float2 a_val = make_float2(0.0f, 0.0f);
         if (i == j) {
             a_val = make_float2(1.0f, 0.0f);
-        } else {
+        } else if (cal_i && cal_j) {
             const DirectDirection3D di = d_dirs[i];
             const DirectDirection3D dj = d_dirs[j];
             const double dl = static_cast<double>(di.x - dj.x);
@@ -145,7 +185,14 @@ compute_and_invert_bislc_matrices_kernel(
             float sum_r = 0.0f;
             float sum_i = 0.0f;
             for (std::size_t a = 0; a < n_elem; ++a) {
-                if (d_mask != nullptr && __ldg(&d_mask[a]) == 0) continue;
+                float w_t = 1.0f;
+                if (d_norm_taper != nullptr) {
+                    const float t_a = __ldg(&d_norm_taper[a]);
+                    if (t_a <= 0.0f) continue;
+                    w_t = t_a;
+                } else if (d_mask != nullptr && __ldg(&d_mask[a]) == 0) {
+                    continue;
+                }
                 const float3 pos = d_positions[a];
                 const double delay_m = static_cast<double>(pos.x) * dl +
                                        static_cast<double>(pos.y) * dm +
@@ -153,17 +200,17 @@ compute_and_invert_bislc_matrices_kernel(
                 const float phase = static_cast<float>(k * delay_m);
                 float s, c;
                 __sincosf(phase, &s, &c);
-                sum_r += c;
-                sum_i += s;
+                sum_r = fmaf(w_t, c, sum_r);
+                sum_i = fmaf(w_t, s, sum_i);
             }
-            a_val = make_float2(sum_r * inv_n_active, sum_i * inv_n_active);
+            a_val = make_float2(sum_r * inv_diag, sum_i * inv_diag);
         }
 
         if (d_A != nullptr) {
             d_A[f * total_pairs + idx] = a_val;
         }
 
-        s_aug[i][j] = (i == j) ? make_float2(a_val.x + diag_loading, a_val.y) : a_val;
+        s_aug[i][j] = (i == j && cal_i) ? make_float2(a_val.x + diag_loading, a_val.y) : a_val;
         s_aug[i][B + j] = (i == j) ? make_float2(1.0f, 0.0f) : make_float2(0.0f, 0.0f);
     }
     __syncthreads();
@@ -430,7 +477,9 @@ void launch_compute_bislc_matrices_gpu(
     std::size_t n_freq,
     std::size_t n_elem,
     float diag_loading,
-    cudaStream_t stream) {
+    cudaStream_t stream,
+    const float* d_norm_taper,
+    std::uint64_t beam_calibration_mask) {
 
     if (num_beams == 0 || n_freq == 0 || n_elem == 0) return;
     const std::size_t B = std::min(num_beams, MAX_BISLC_BEAMS);
@@ -441,15 +490,18 @@ void launch_compute_bislc_matrices_gpu(
     if (B <= 8) {
         compute_and_invert_bislc_matrices_kernel<8><<<grid, BLOCK, 0, stream>>>(
             d_unmix_matrices, d_coupling_matrices, d_directions, d_wavenumbers,
-            d_antenna_positions, d_antenna_mask, B, n_freq, n_elem, diag_loading);
+            d_antenna_positions, d_antenna_mask, d_norm_taper, B, n_freq, n_elem, diag_loading,
+            beam_calibration_mask);
     } else if (B <= 16) {
         compute_and_invert_bislc_matrices_kernel<16><<<grid, BLOCK, 0, stream>>>(
             d_unmix_matrices, d_coupling_matrices, d_directions, d_wavenumbers,
-            d_antenna_positions, d_antenna_mask, B, n_freq, n_elem, diag_loading);
+            d_antenna_positions, d_antenna_mask, d_norm_taper, B, n_freq, n_elem, diag_loading,
+            beam_calibration_mask);
     } else {
         compute_and_invert_bislc_matrices_kernel<32><<<grid, BLOCK, 0, stream>>>(
             d_unmix_matrices, d_coupling_matrices, d_directions, d_wavenumbers,
-            d_antenna_positions, d_antenna_mask, B, n_freq, n_elem, diag_loading);
+            d_antenna_positions, d_antenna_mask, d_norm_taper, B, n_freq, n_elem, diag_loading,
+            beam_calibration_mask);
     }
     CHECK_CUDA_ERROR_NON_OO(cudaGetLastError());
 }

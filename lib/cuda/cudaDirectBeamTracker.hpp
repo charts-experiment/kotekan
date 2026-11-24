@@ -133,6 +133,7 @@ struct DirectBeamTrackerConfig {
     std::size_t time_unroll = 4;
     std::size_t beam_tile_size = 4;
     bool enable_grid_mode = false;
+    bool compute_power_inline_only = false;
     float grid_step = 0.02f;
     bool enable_cuda_graph = false;
     bool enable_subframe_interpolation = true;
@@ -325,8 +326,17 @@ struct DirectBeamTrackerConfig {
     }
 };
 
+struct SkyGridIndex {
+    float step = 0.02f;
+    int n_steps = 0;
+    std::vector<float2> directions;
+    std::vector<int> offset_lut;
+};
+
 std::vector<float2> generate_sky_grid_directions(float step = 0.02f);
+SkyGridIndex build_sky_grid_index(float step = 0.02f);
 int lookup_nearest_sky_grid(float l, float m, const std::vector<float2>& grid_directions);
+int lookup_nearest_sky_grid_o1(float l, float m, const SkyGridIndex& grid_index);
 
 inline void compute_celestial_direction(double ra_deg, double dec_deg, double lst_hours,
                                         double lat_deg, DirectDirection3D& out_dir) {
@@ -470,6 +480,15 @@ void launch_reduce_beam_power(const float2* d_voltages, float* d_power, std::siz
                               std::size_t max_beams_stride, cudaStream_t stream = nullptr,
                               std::size_t n_pol = 1, const std::uint8_t* d_rfi_mask = nullptr,
                               std::size_t chunk_size = 256);
+
+void launch_direct_beamformer_power_only(
+    const int4x2_t* d_packed, const float2* d_weights, const float2* d_step_weights,
+    float* d_power, std::size_t n_time, std::size_t n_freq, std::size_t n_ant,
+    std::size_t num_active_beams, std::size_t max_beams_stride, std::size_t time_chunk_size = 256,
+    std::size_t time_unroll = 4, std::size_t beam_tile_size = 4, cudaStream_t stream = nullptr,
+    std::size_t n_pol = 1, DirectPolLayout pol_layout = DirectPolLayout::INTERLEAVED,
+    DirectInputFormat input_format = DirectInputFormat::INT4X2,
+    const std::uint8_t* d_rfi_mask = nullptr);
 
 } // namespace kotekan
 
