@@ -215,7 +215,8 @@ void launch_tiled_fp16_integrated_beamformer(cudaStream_t stream, const __half2*
 
 // Production beamformer (FP16_TC_ARCHITECTURE.md WP3): same inputs, output and power
 // convention as the scalar reference, computed with fp16 tensor-core MMA (WMMA m16n16k16)
-// and fp32 accumulation; one block per fine channel, one K = 10 window per 16-wide tile.
+// and fp32 accumulation; one block per fine channel, 16 consecutive spectra per WMMA tile
+// (windows may straddle tiles), staging and window sums pipelined with the MMAs.
 // Requires E = 32 or 64, B a multiple of 16 up to 128, K = 10, sm_70 or newer, 32-byte
 // aligned weights and 16-byte aligned fine voltages. Accumulation order and rounding inside
 // the MMA are hardware-defined: not bit-identical to the scalar reference.

@@ -133,26 +133,39 @@ __global__ void tiled_fp16_integrated_voltage_beamformer_kernel(
 // =============================================================================
 // 1b. fp16 Tensor-Core Integrated Beamformer (WMMA m16n16k16, fp32 accumulation)
 // =============================================================================
-// FP16_TC_ARCHITECTURE.md WP3. Per fine channel f and integration window w:
+// FP16_TC_ARCHITECTURE.md WP3, dense time packing and pipelining from BEAM_256_PLAN.md B4.
+// Per fine channel f and spectrum t:
 //   Y[b, t] = sum_e W16[b,f,e] x[t,f,e] as real GEMMs of A = W16 (beams x elements) and
 //   B = x (elements x spectra):  Yr = Wr.Xr + (-Wi).Xi,  Yi = Wr.Xi + Wi.Xr,
-//   P[w,f,b] = sum over the supplied spectra of the window of (s*Yr)^2 + (s*Yi)^2.
-// One block per fine channel with the time loop inside, so the 32 KiB of fp16 weights of a
-// channel are read once per frame; each warp keeps the A fragments of its 16 beams in
-// registers for the whole frame. One window per 16-wide B tile: the K = 10 spectra plus
-// zero columns, staged in shared memory, so a partial last window (T % K != 0) only stages
-// fewer columns and never reads past the fine-voltage buffer. The accumulators reach the
-// power through store_matrix_sync into shared memory, so no fragment-to-element mapping is
-// assumed; the scale of beam b and the window sum are applied per row there.
+//   P[w,f,b] = sum over the supplied spectra of window w of (s*Yr)^2 + (s*Yi)^2.
+// One block per fine channel (and block of 128 beams) with the time loop inside, so the
+// 32 KiB of fp16 weights of a channel are read once per frame; warp w keeps the A fragments
+// of beams 16w .. 16w + 15 of its block in registers for the whole frame. With
+// nvcc 12.8, deriving the channel and beam block from blockIdx.x at run time (beam_blocks)
+// also gives code that runs ~4 % faster than frequency = blockIdx.x (measured,
+// BEAM_256_PLAN.md B4).
+// Dense time packing: each 16-column B tile holds 16 consecutive spectra (30 tiles for 480
+// spectra), and a K-spectrum window may straddle tiles. Every output column of a WMMA product
+// depends only on its own B column, so (Yr, Yi) of a spectrum does not depend on how spectra
+// are grouped into tiles. Spectra past n_time are staged as zeros and never summed.
+// The accumulators reach the power through store_matrix_sync into a per-warp scratch, so no
+// fragment-to-element mapping is assumed. Lane r < 16 owns beam 16w + r and adds
+// (s*Yr)^2 + (s*Yi)^2 to its running window sum in time order, starting from 0 (the scalar
+// reference's order); the sum is written when the window has K spectra or the frame ends.
+// Staging: two shared-memory buffers of tc_tiles_per_round tiles. The next round's voltages
+// are loaded into registers while the current round is multiplied; one __syncthreads per
+// round. Per warp, the MMAs of tile g are interleaved, one K tile at a time, with the window
+// sums of the full tile g - 1, so the tensor pipe has work while the lanes sum.
 // Tensor-core products of fp16 values are exact; the accumulation order and rounding inside
 // the MMA are hardware-defined, so results are not bit-identical to the scalar reference.
+// The output is bit-identical to the earlier one-window-per-tile kernel (f7d1968c5).
 namespace wmma = nvcuda::wmma;
 
-constexpr unsigned int tc_tile = 16;             // WMMA m = n = k
+constexpr unsigned int tc_tile = 16;             // WMMA m = n = k; spectra per B tile
 constexpr unsigned int tc_warps = 8;             // one warp per 16-beam row tile, B <= 128
 constexpr unsigned int tc_threads = tc_warps * 32;
 constexpr unsigned int tc_max_beams = tc_warps * tc_tile;
-constexpr unsigned int tc_windows_per_stage = 4; // windows staged per __syncthreads round
+constexpr unsigned int tc_tiles_per_round = 2;   // B tiles per stage buffer and __syncthreads
 constexpr unsigned int tc_scratch_ld = tc_tile + 4; // fp32 accumulator rows (multiple of 4)
 
 template<unsigned int KTiles>
@@ -161,11 +174,15 @@ struct TensorCoreLayout {
     // Halves per staged spectrum column of a B plane: a multiple of 8 (WMMA ldm) whose
     // 16-byte rows fall on distinct shared-memory banks for 8 consecutive columns.
     static constexpr unsigned int x_ld = n_ant + 8;
-    static constexpr unsigned int plane_halves = tc_tile * x_ld; // one 16-column B plane
-    // [window slot][re, im][column][element]
-    static constexpr unsigned int stage_halves = tc_windows_per_stage * 2 * plane_halves;
+    static constexpr unsigned int plane_halves = tc_tile * x_ld; // one 16-spectrum B plane
+    // One stage buffer: [tile][re, im][spectrum][element].
+    static constexpr unsigned int buffer_halves = tc_tiles_per_round * 2 * plane_halves;
     static constexpr unsigned int chunks_per_row = n_ant / 4; // uint4 = 4 __half2 per load
+    static constexpr unsigned int round_rows = tc_tiles_per_round * tc_tile; // spectra
+    static constexpr unsigned int round_items = round_rows * chunks_per_row;
+    static constexpr unsigned int items_per_thread = (round_items + tc_threads - 1) / tc_threads;
     static_assert((plane_halves * sizeof(__half)) % 32 == 0, "WMMA needs 32-byte planes");
+    static_assert(tc_scratch_ld % 4 == 0, "scratch rows are read as float4");
 };
 
 struct alignas(8) Half2Pair {
@@ -173,27 +190,81 @@ struct alignas(8) Half2Pair {
     __half2 hi;
 };
 
+// Loads one round of spectra [first_time, first_time + round_rows) of a channel into
+// registers: x[t][f][e] (re, im interleaved), each spectrum row as 16-byte chunks. Spectra
+// past n_time are zeros, so the fine-voltage buffer is never read past its end.
 template<unsigned int KTiles>
-__global__ void __launch_bounds__(tc_threads) tensor_core_fp16_integrated_beamformer_kernel(
+__device__ __forceinline__ void tensor_core_stage_load(
+    uint4 (&chunks)[TensorCoreLayout<KTiles>::items_per_thread], const __half2* channel_voltage,
+    const std::size_t time_stride, const std::size_t first_time, const std::size_t n_time) {
+    using L = TensorCoreLayout<KTiles>;
+#pragma unroll
+    for (unsigned int i = 0; i < L::items_per_thread; ++i) {
+        const unsigned int item = threadIdx.x + i * tc_threads;
+        chunks[i] = make_uint4(0U, 0U, 0U, 0U);
+        if (item < L::round_items) {
+            const std::size_t time = first_time + item / L::chunks_per_row;
+            if (time < n_time)
+                chunks[i] = __ldg(reinterpret_cast<const uint4*>(channel_voltage
+                                                                 + time * time_stride)
+                                  + item % L::chunks_per_row);
+        }
+    }
+}
+
+// Writes a loaded round to a stage buffer as separate real and imaginary planes.
+template<unsigned int KTiles>
+__device__ __forceinline__ void tensor_core_stage_store(
+    __half* buffer, const uint4 (&chunks)[TensorCoreLayout<KTiles>::items_per_thread]) {
+    using L = TensorCoreLayout<KTiles>;
+#pragma unroll
+    for (unsigned int i = 0; i < L::items_per_thread; ++i) {
+        const unsigned int item = threadIdx.x + i * tc_threads;
+        if (item < L::round_items) {
+            const unsigned int chunk = item % L::chunks_per_row;
+            const unsigned int row = item / L::chunks_per_row;
+            union {
+                uint4 raw;
+                __half2 v[4];
+            } chunk_data;
+            static_assert(sizeof(chunk_data) == sizeof(uint4), "uint4 holds four __half2");
+            chunk_data.raw = chunks[i];
+            const __half2* const v = chunk_data.v;
+            __half* const re_dst = buffer + (row / tc_tile) * 2 * L::plane_halves
+                                   + (row % tc_tile) * L::x_ld + chunk * 4;
+            *reinterpret_cast<Half2Pair*>(re_dst) =
+                Half2Pair{__lows2half2(v[0], v[1]), __lows2half2(v[2], v[3])};
+            *reinterpret_cast<Half2Pair*>(re_dst + L::plane_halves) =
+                Half2Pair{__highs2half2(v[0], v[1]), __highs2half2(v[2], v[3])};
+        }
+    }
+}
+
+template<unsigned int KTiles>
+__global__ void __launch_bounds__(tc_threads, 2) tensor_core_fp16_integrated_beamformer_kernel(
     const __half2* __restrict__ fine_voltage, const __half* __restrict__ weights_fp16,
     const float* __restrict__ weight_scale, float* __restrict__ integrated_intensity,
     const std::size_t n_time, const std::size_t n_freq, const std::size_t n_beams,
-    const unsigned int integration_spectra) {
+    const unsigned int integration_spectra, const unsigned int beam_blocks) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 700
     __trap(); // WMMA needs sm_70; the launcher is never used on older devices.
 #else
     using L = TensorCoreLayout<KTiles>;
-    __shared__ __align__(128) unsigned char stage_bytes[L::stage_halves * sizeof(__half)];
+    __shared__ __align__(128) unsigned char stage_bytes[2 * L::buffer_halves * sizeof(__half)];
     __shared__ __align__(128) float scratch[tc_warps * 2 * tc_tile * tc_scratch_ld];
     __half* const stage = reinterpret_cast<__half*>(stage_bytes);
 
-    const std::size_t frequency = blockIdx.x;
+    // blockIdx.x = beam_blocks * f + block: the blocks of tc_max_beams beams of a channel are
+    // adjacent, so they run close in time and share the channel's voltages in L2
+    // (BEAM_256_PLAN.md K1; beam_blocks = 1 while B <= 128).
+    const std::size_t frequency = blockIdx.x / beam_blocks;
+    const unsigned int beam_block = blockIdx.x % beam_blocks;
     const unsigned int warp = threadIdx.x / 32;
     const unsigned int lane = threadIdx.x % 32;
-    const std::size_t first_beam = static_cast<std::size_t>(warp) * tc_tile;
+    const std::size_t first_beam = static_cast<std::size_t>(beam_block) * tc_max_beams
+                                   + static_cast<std::size_t>(warp) * tc_tile;
     const bool warp_active = first_beam < n_beams; // warp-uniform
-    const unsigned int k = integration_spectra;     // 1 <= K <= 16 (checked by the launcher)
-    const std::size_t window_count = (n_time + k - 1) / k;
+    const unsigned int k = integration_spectra;     // any K >= 1; the launcher accepts K = 10
 
     // A fragments of this warp's 16 beams, row-major [b][e] straight from the global
     // [f][plane][b][e] layout (ld = E); -Wi by elementwise negation (exact in fp16).
@@ -217,64 +288,79 @@ __global__ void __launch_bounds__(tc_threads) tensor_core_fp16_integrated_beamfo
             scale = weight_scale[frequency * n_beams + first_beam + lane];
     }
 
-    // Columns [K, 16) of every staged plane stay zero for the whole frame; the staging loop
-    // writes only columns [0, K), so this needs no ordering beyond the first round's barrier.
-    {
-        const unsigned int pad_halves = (tc_tile - k) * L::x_ld;
-        for (unsigned int index = threadIdx.x; index < tc_windows_per_stage * 2 * pad_halves;
-             index += tc_threads) {
-            const unsigned int plane = index / pad_halves;
-            const unsigned int offset = index % pad_halves;
-            stage[plane * L::plane_halves + k * L::x_ld + offset] = __float2half_rn(0.0F);
-        }
-    }
-
     const std::size_t time_stride = n_freq * L::n_ant; // __half2 between consecutive spectra
     const __half2* channel_voltage = fine_voltage + frequency * L::n_ant;
     float* const y_re_tile = scratch + warp * 2 * tc_tile * tc_scratch_ld;
     float* const y_im_tile = y_re_tile + tc_tile * tc_scratch_ld;
+    // Output of beam first_beam + lane (dereferenced by active lanes < 16 only).
+    float* const out = integrated_intensity + frequency * n_beams + first_beam + lane;
+    const std::size_t window_stride = n_freq * n_beams;
 
-    for (std::size_t first_window = 0; first_window < window_count;
-         first_window += tc_windows_per_stage) {
-        __syncthreads(); // every warp finished reading the previous round's planes
+    const std::size_t tile_count = (n_time + tc_tile - 1) / tc_tile;
+    const std::size_t round_count = (tile_count + tc_tiles_per_round - 1) / tc_tiles_per_round;
 
-        // Stage the spectra of tc_windows_per_stage windows: x[t][f][e] (re, im interleaved)
-        // to separate real and imaginary planes [column][element]. Each spectrum row of a
-        // channel is E contiguous __half2, read as 16-byte chunks. Spectra past n_time (the
-        // tail of the last window) and windows past the frame are written as zeros.
-        const unsigned int items = tc_windows_per_stage * k * L::chunks_per_row;
-        for (unsigned int item = threadIdx.x; item < items; item += tc_threads) {
-            const unsigned int chunk = item % L::chunks_per_row;
-            const unsigned int row = item / L::chunks_per_row;
-            const unsigned int slot = row / k;
-            const unsigned int column = row % k;
-            const std::size_t time = (first_window + slot) * k + column;
-            union {
-                uint4 raw;
-                __half2 v[4];
-            } chunk_data;
-            static_assert(sizeof(chunk_data) == sizeof(uint4), "uint4 holds four __half2");
-            chunk_data.raw = make_uint4(0U, 0U, 0U, 0U);
-            if (first_window + slot < window_count && time < n_time)
-                chunk_data.raw = __ldg(
-                    reinterpret_cast<const uint4*>(channel_voltage + time * time_stride) + chunk);
-            const __half2* const v = chunk_data.v;
-            __half* const re_dst =
-                stage + slot * 2 * L::plane_halves + column * L::x_ld + chunk * 4;
-            *reinterpret_cast<Half2Pair*>(re_dst) =
-                Half2Pair{__lows2half2(v[0], v[1]), __lows2half2(v[2], v[3])};
-            *reinterpret_cast<Half2Pair*>(re_dst + L::plane_halves) =
-                Half2Pair{__highs2half2(v[0], v[1]), __highs2half2(v[2], v[3])};
+    uint4 chunks[L::items_per_thread];
+    tensor_core_stage_load<KTiles>(chunks, channel_voltage, time_stride, 0, n_time);
+    tensor_core_stage_store<KTiles>(stage, chunks);
+    if (round_count > 1)
+        tensor_core_stage_load<KTiles>(chunks, channel_voltage, time_stride, L::round_rows,
+                                       n_time);
+
+    // Running window sum of lane r < 16, carried across tiles and rounds.
+    float integrated = 0.0F;
+    unsigned int in_window = 0;
+    std::size_t window = 0;
+    auto accumulate = [&](const float y_real, const float y_imag, const std::size_t time) {
+        // Scale before squaring (s^2 alone could under/overflow float32).
+        const float scaled_real = scale * y_real;
+        const float scaled_imag = scale * y_imag;
+        const float power = scaled_real * scaled_real + scaled_imag * scaled_imag;
+        integrated += power;
+        if (++in_window == k || time + 1 == n_time) {
+            out[window * window_stride] = integrated;
+            integrated = 0.0F;
+            in_window = 0;
+            ++window;
         }
-        __syncthreads();
+    };
+    // Spectra 4q .. 4q + 3 of the full tile in scratch (rows are 16-byte aligned).
+    auto sum_quarter = [&](const unsigned int q, const std::size_t first_time) {
+        if (lane < tc_tile) {
+            const float4 re4 =
+                *reinterpret_cast<const float4*>(y_re_tile + lane * tc_scratch_ld + 4 * q);
+            const float4 im4 =
+                *reinterpret_cast<const float4*>(y_im_tile + lane * tc_scratch_ld + 4 * q);
+            accumulate(re4.x, im4.x, first_time + 4 * q);
+            accumulate(re4.y, im4.y, first_time + 4 * q + 1);
+            accumulate(re4.z, im4.z, first_time + 4 * q + 2);
+            accumulate(re4.w, im4.w, first_time + 4 * q + 3);
+        }
+    };
+    constexpr unsigned int quarters_per_k_tile = 4 / KTiles;
+    static_assert(KTiles * quarters_per_k_tile == 4, "KTiles must be 2 or 4");
 
+    // pending: the scratch holds the full tile starting at pending_time, not yet summed.
+    bool pending = false;
+    std::size_t pending_time = 0;
+    for (std::size_t round = 0; round < round_count; ++round) {
+        // Buffer (round & 1) is complete; buffer ((round + 1) & 1), read in round - 1, is free.
+        __syncthreads();
+        if (round + 1 < round_count) {
+            tensor_core_stage_store<KTiles>(stage + ((round + 1) & 1) * L::buffer_halves,
+                                            chunks);
+            if (round + 2 < round_count)
+                tensor_core_stage_load<KTiles>(chunks, channel_voltage, time_stride,
+                                               (round + 2) * L::round_rows, n_time);
+        }
         if (!warp_active)
-            continue;
-        for (unsigned int slot = 0; slot < tc_windows_per_stage; ++slot) {
-            const std::size_t window = first_window + slot;
-            if (window >= window_count)
+            continue; // warp-uniform; inactive warps still stage and reach every barrier
+        const __half* const current = stage + (round & 1) * L::buffer_halves;
+#pragma unroll 1
+        for (unsigned int tile = 0; tile < tc_tiles_per_round; ++tile) {
+            const std::size_t first_time = (round * tc_tiles_per_round + tile) * tc_tile;
+            if (first_time >= n_time)
                 break;
-            const __half* const x_re = stage + slot * 2 * L::plane_halves;
+            const __half* const x_re = current + tile * 2 * L::plane_halves;
             const __half* const x_im = x_re + L::plane_halves;
 
             wmma::fragment<wmma::accumulator, tc_tile, tc_tile, tc_tile, float> y_re, y_im;
@@ -292,30 +378,33 @@ __global__ void __launch_bounds__(tc_threads) tensor_core_fp16_integrated_beamfo
                 wmma::mma_sync(y_re, w_im_neg[kt], b_im, y_re);
                 wmma::mma_sync(y_im, w_re[kt], b_im, y_im);
                 wmma::mma_sync(y_im, w_im[kt], b_re, y_im);
+                if (pending) {
+#pragma unroll
+                    for (unsigned int qq = 0; qq < quarters_per_k_tile; ++qq)
+                        sum_quarter(kt * quarters_per_k_tile + qq, pending_time);
+                }
             }
+            __syncwarp(); // the pending tile's scratch reads are done
             wmma::store_matrix_sync(y_re_tile, y_re, tc_scratch_ld, wmma::mem_row_major);
             wmma::store_matrix_sync(y_im_tile, y_im, tc_scratch_ld, wmma::mem_row_major);
             __syncwarp();
-
-            // Lane r < 16 owns beam first_beam + r: scale before squaring (s^2 alone could
-            // under/overflow float32) and sum the supplied spectra in time order, as the
-            // scalar reference does.
-            if (lane < tc_tile) {
-                const std::size_t first_time = window * k;
-                const std::size_t supplied =
-                    n_time - first_time < k ? n_time - first_time : std::size_t{k};
-                float integrated = 0.0F;
-                for (unsigned int column = 0; column < supplied; ++column) {
-                    const float scaled_real = scale * y_re_tile[lane * tc_scratch_ld + column];
-                    const float scaled_imag = scale * y_im_tile[lane * tc_scratch_ld + column];
-                    const float power = scaled_real * scaled_real + scaled_imag * scaled_imag;
-                    integrated += power;
-                }
-                integrated_intensity[(window * n_freq + frequency) * n_beams + first_beam
-                                     + lane] = integrated;
+            if (first_time + tc_tile <= n_time) {
+                pending = true;
+                pending_time = first_time;
+            } else { // the partial last tile: sum its supplied spectra now
+                pending = false;
+                if (lane < tc_tile)
+                    for (std::size_t time = first_time; time < n_time; ++time)
+                        accumulate(y_re_tile[lane * tc_scratch_ld + (time - first_time)],
+                                   y_im_tile[lane * tc_scratch_ld + (time - first_time)], time);
+                __syncwarp();
             }
-            __syncwarp(); // scratch reads done before the next window's stores
         }
+    }
+    if (warp_active && pending) {
+#pragma unroll
+        for (unsigned int q = 0; q < 4; ++q)
+            sum_quarter(q, pending_time);
     }
 #endif
 }
@@ -644,7 +733,6 @@ void check_tensor_core_shape(const Dimensions& dims, const std::size_t integrati
     if (integration_spectra != 10) {
         throw std::invalid_argument("CUDA temporal integration supports K = 10 only");
     }
-    static_assert(10 <= tc_tile, "one integration window must fit one 16-wide WMMA tile");
     if (dims.n_ant != 32 && dims.n_ant != 64) {
         throw std::invalid_argument("tensor-core beamformer supports 32 or 64 elements");
     }
@@ -680,17 +768,24 @@ void launch_tensor_core_fp16_integrated_beamformer(const cudaStream_t stream,
     }
     (void)cudaGetLastError();
 
-    const dim3 grid(static_cast<unsigned int>(dims.n_freq));
+    // One block per (fine channel, block of tc_max_beams beams), beam blocks of a channel
+    // adjacent in x; one beam block while B <= 128.
+    const auto beam_blocks =
+        static_cast<unsigned int>((dims.n_beams + tc_max_beams - 1) / tc_max_beams);
+    if (dims.n_freq * beam_blocks > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument("tensor-core beamformer grid exceeds 2^31 - 1 blocks");
+    }
+    const dim3 grid(static_cast<unsigned int>(dims.n_freq * beam_blocks));
     const dim3 block(tc_threads);
     const auto k = static_cast<unsigned int>(integration_spectra);
     if (dims.n_ant == 64) {
         tensor_core_fp16_integrated_beamformer_kernel<4><<<grid, block, 0, stream>>>(
             fine_voltage, weights_fp16, weight_scale, integrated_intensity, dims.n_time,
-            dims.n_freq, dims.n_beams, k);
+            dims.n_freq, dims.n_beams, k, beam_blocks);
     } else {
         tensor_core_fp16_integrated_beamformer_kernel<2><<<grid, block, 0, stream>>>(
             fine_voltage, weights_fp16, weight_scale, integrated_intensity, dims.n_time,
-            dims.n_freq, dims.n_beams, k);
+            dims.n_freq, dims.n_beams, k, beam_blocks);
     }
     check_cuda(cudaGetLastError(), "tensor_core_fp16_integrated_beamformer_kernel launch");
 }

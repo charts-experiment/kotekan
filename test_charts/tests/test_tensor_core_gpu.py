@@ -18,9 +18,15 @@ fp16 values exactly and accumulates in fp32 in a hardware-defined order, so:
 * the descriptor names the kernel that ran (beamformer.kernel) and the log reports its
   resources; an unknown kernel name is rejected at startup.
 
-Cases cover a partial tail (T = 25), fewer spectra than K (T = 9), a frame whose windows cross
-the kernel's 4-window staging round (T = 47: 5 windows, tail 7), weights distinct per (b, f, e)
-with scales over ~20 octaves, and the production frame T_raw = 15360 (48 windows).
+The kernel packs 16 consecutive spectra per WMMA tile (windows straddle tiles) and stages two
+tiles per round. Cases cover:
+- a partial tail (T = 25, window 10-19 straddles tiles 0 and 1);
+- fewer spectra than K (T = 9, one partial tile);
+- T = 47: 5 windows with a tail of 7, 3 tiles in 2 rounds, the last tile partial;
+- T = 48: the partial last window 40-47 ends exactly at the end of a full tile;
+- T = 175: 18 windows over 11 tiles in 6 rounds, the last round holding one partial tile;
+- weights distinct per (b, f, e) with scales over ~20 octaves;
+- the production frame T_raw = 15360 (48 windows, 30 tiles).
 Synthetic verification only.
 """
 
@@ -149,9 +155,21 @@ class TensorCoreGpu(unittest.TestCase):
                         onehot_beams=range(8))
 
     def test_distinct_weights_across_staging_round(self):
-        # 47 spectra = 5 windows (tail 7): windows 0..3 in the first staging round, 4 alone.
+        # 47 spectra = 5 windows (tail 7) = 3 tiles (the last holds 15) in 2 staging rounds.
         raw, _ = sc.fine_fixture(1504, seed=1504)
         self.check_pair("distinct_t1504", raw, wf.distinct_weights(seed=31), 1504, 0)
+
+    def test_partial_window_ends_with_full_tile(self):
+        # 48 spectra = 3 full tiles; the partial window 40..47 ends with the last full tile.
+        raw, _ = sc.fine_fixture(1536, seed=1536)
+        m = self.check_pair("distinct_t1536", raw, wf.distinct_weights(seed=33), 1536, 1)
+        self.assertEqual((m["windows"], m["tail_spectra"]), (5, 8))
+
+    def test_many_rounds_partial_last_round(self):
+        # 175 spectra = 11 tiles (the last holds 15) in 6 rounds; 18 windows, tail 5.
+        raw, _ = sc.fine_fixture(5600, seed=5600)
+        m = self.check_pair("distinct_t5600", raw, wf.distinct_weights(seed=34), 5600, 0)
+        self.assertEqual((m["windows"], m["tail_spectra"]), (18, 5))
 
     def test_production_frame_shard1(self):
         rng = np.random.default_rng(15360)
