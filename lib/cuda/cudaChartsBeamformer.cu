@@ -139,7 +139,8 @@ __global__ void tiled_fp16_integrated_voltage_beamformer_kernel(
 //   B = x (elements x spectra):  Yr = Wr.Xr + (-Wi).Xi,  Yi = Wr.Xi + Wi.Xr,
 //   P[w,f,b] = sum over the supplied spectra of window w of (s*Yr)^2 + (s*Yi)^2.
 // One block per fine channel (and block of 128 beams) with the time loop inside, so the
-// 32 KiB of fp16 weights of a channel are read once per frame; warp w keeps the A fragments
+// 32 KiB of fp16 weights of a channel and block are read once per frame (B = 256: two
+// blocks per channel, adjacent, sharing the voltages in L2); warp w keeps the A fragments
 // of beams 16w .. 16w + 15 of its block in registers for the whole frame. With
 // nvcc 12.8, deriving the channel and beam block from blockIdx.x at run time (beam_blocks)
 // also gives code that runs ~4 % faster than frequency = blockIdx.x (measured,
@@ -162,7 +163,7 @@ __global__ void tiled_fp16_integrated_voltage_beamformer_kernel(
 namespace wmma = nvcuda::wmma;
 
 constexpr unsigned int tc_tile = 16;             // WMMA m = n = k; spectra per B tile
-constexpr unsigned int tc_warps = 8;             // one warp per 16-beam row tile, B <= 128
+constexpr unsigned int tc_warps = 8;             // one warp per 16-beam row tile of a block
 constexpr unsigned int tc_threads = tc_warps * 32;
 constexpr unsigned int tc_max_beams = tc_warps * tc_tile;
 constexpr unsigned int tc_tiles_per_round = 2;   // B tiles per stage buffer and __syncthreads
@@ -256,7 +257,7 @@ __global__ void __launch_bounds__(tc_threads, 2) tensor_core_fp16_integrated_bea
 
     // blockIdx.x = beam_blocks * f + block: the blocks of tc_max_beams beams of a channel are
     // adjacent, so they run close in time and share the channel's voltages in L2
-    // (BEAM_256_PLAN.md K1; beam_blocks = 1 while B <= 128).
+    // (BEAM_256_PLAN.md K1; beam_blocks = 1 at B = 128, 2 at B = 256).
     const std::size_t frequency = blockIdx.x / beam_blocks;
     const unsigned int beam_block = blockIdx.x % beam_blocks;
     const unsigned int warp = threadIdx.x / 32;
@@ -565,8 +566,8 @@ std::vector<Vec3> default_positions(const std::size_t n_ant, const float spacing
 }
 
 std::vector<Vec3> default_beam_grid(const std::size_t n_beams, const float l_step, const float m) {
-    if (n_beams == 0 || n_beams > beam_count) {
-        throw std::invalid_argument("beam count must be between 1 and 128");
+    if (n_beams == 0 || n_beams > max_beam_count) {
+        throw std::invalid_argument("beam count must be between 1 and 256");
     }
     if (!std::isfinite(l_step) || l_step <= 0.0F) {
         throw std::invalid_argument("beam l_step must be positive and finite");
@@ -736,10 +737,10 @@ void check_tensor_core_shape(const Dimensions& dims, const std::size_t integrati
     if (dims.n_ant != 32 && dims.n_ant != 64) {
         throw std::invalid_argument("tensor-core beamformer supports 32 or 64 elements");
     }
-    if (dims.n_beams == 0 || dims.n_beams % tc_tile != 0 || dims.n_beams > tc_max_beams) {
+    if (dims.n_beams == 0 || dims.n_beams % tc_tile != 0 || dims.n_beams > max_beam_count) {
         throw std::invalid_argument(
             "tensor-core beamformer needs a beam count that is a positive multiple of 16, "
-            "at most 128");
+            "at most 256");
     }
     if (dims.n_time == 0 || dims.n_freq == 0
         || dims.n_freq > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
@@ -769,7 +770,7 @@ void launch_tensor_core_fp16_integrated_beamformer(const cudaStream_t stream,
     (void)cudaGetLastError();
 
     // One block per (fine channel, block of tc_max_beams beams), beam blocks of a channel
-    // adjacent in x; one beam block while B <= 128.
+    // adjacent in x (one at B = 128, two at B = 256).
     const auto beam_blocks =
         static_cast<unsigned int>((dims.n_beams + tc_max_beams - 1) / tc_max_beams);
     if (dims.n_freq * beam_blocks > static_cast<std::size_t>(std::numeric_limits<int>::max())) {

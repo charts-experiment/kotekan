@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Build combined CHARTS beamformer weights offline: gain correction x geometric steering.
 
-The output is one canonical array per shard (always upchannelized, U = 32; B = 128 beams),
+The output is one canonical array per shard (always upchannelized, U = 32; B = 128 beams by
+default, or 256 with --num-beams 256),
 
     W[b, nu, e] = conj(C[nu, e] * exp(-2*pi*i * nu * (n_b . p_e) / c))
                 = exp(+2*pi*i * nu * (n_b . p_e) / c) / conj(g[nu, e]),
@@ -64,10 +65,12 @@ ANTENNAS_PER_ROW = 8
 CHARTS_LOGICAL = "charts_logical"
 KOTEKAN_RAW = "kotekan_raw"
 
-# The beamformer always upchannelizes (U = 32) and forms exactly 128 beams. "mode" is kept
-# in signatures and descriptors so that stale coarse requests fail loudly.
+# The beamformer always upchannelizes (U = 32) and forms B = 128 (default) or 256 beams
+# (num_beams; BEAM_256_PLAN.md WP15). "mode" is kept in signatures and descriptors so that
+# stale coarse requests fail loudly.
 MODES = ("fine",)
-N_BEAMS = 128
+N_BEAMS = 128  # default B
+SUPPORTED_BEAMS = (128, 256)
 DEFAULT_DIRECTIONS = (Path(__file__).resolve().parents[1] / "config"
                       / "charts_hex64_beam_directions.json")
 
@@ -148,8 +151,9 @@ def load_directions(path: Path) -> np.ndarray:
     nxy = np.asarray(spec["directions"], dtype=np.float64)
     if nxy.ndim != 2 or nxy.shape[1] != 2 or not np.all(np.isfinite(nxy)):
         raise ValueError(f"{path}: directions must be finite [B][n_x, n_y]")
-    if not 1 <= nxy.shape[0] <= 128:
-        raise ValueError(f"{path}: beam count must be 1..128, got {nxy.shape[0]}")
+    if not 1 <= nxy.shape[0] <= max(SUPPORTED_BEAMS):
+        raise ValueError(f"{path}: beam count must be 1..{max(SUPPORTED_BEAMS)}, "
+                         f"got {nxy.shape[0]}")
     transverse = np.sum(nxy**2, axis=1)
     if np.any(transverse > 1.0):
         raise ValueError(f"{path}: direction below the horizon (n_x^2 + n_y^2 > 1)")
@@ -313,7 +317,7 @@ def descriptor(mode: str, shard: int, weights_path: Path, n_beams: int, flagged:
 def pad_to_beam_count(weights: np.ndarray, n_beams: int = N_BEAMS) -> np.ndarray:
     """Append all-zero beams up to n_beams; a zero-weight beam outputs exactly zero power."""
     if weights.shape[0] > n_beams:
-        raise ValueError(f"{weights.shape[0]} beams exceed the fixed count {n_beams}")
+        raise ValueError(f"{weights.shape[0]} beams exceed the beam count {n_beams}")
     pad = np.zeros((n_beams - weights.shape[0],) + weights.shape[1:], dtype=weights.dtype)
     return np.concatenate([weights, pad], axis=0)
 
@@ -321,9 +325,13 @@ def pad_to_beam_count(weights: np.ndarray, n_beams: int = N_BEAMS) -> np.ndarray
 def _build(args: argparse.Namespace) -> int:
     directions = load_directions(args.directions)
     n_defined = directions.shape[0]
-    if n_defined != N_BEAMS and not args.pad_zero_beams:
+    n_beams = args.num_beams
+    if n_defined > n_beams:
+        raise SystemExit(f"{args.directions} defines {n_defined} beams, more than "
+                         f"--num-beams {n_beams}")
+    if n_defined != n_beams and not args.pad_zero_beams:
         raise SystemExit(f"{args.directions} defines {n_defined} beams; the beamformer needs "
-                         f"exactly {N_BEAMS}. Provide {N_BEAMS} directions or pass "
+                         f"exactly {n_beams}. Provide {n_beams} directions or pass "
                          f"--pad-zero-beams to append zero-weight beams.")
     positions = (load_positions_charts_logical(args.positions) if args.positions
                  else default_positions_charts_logical())
@@ -352,15 +360,15 @@ def _build(args: argparse.Namespace) -> int:
     shards = range(N_SHARDS) if args.shard is None else [args.shard]
     for shard in shards:
         weights = pad_to_beam_count(
-            build_weights(args.mode, shard, correction, positions, directions))
+            build_weights(args.mode, shard, correction, positions, directions), n_beams)
         stem = args.output_dir / f"weights_{args.mode}_shard{shard}"
         np.save(stem.with_suffix(".npy"), weights)
         if args.emit_legacy_bin:
             # Raw canonical complex float32 [B][F][E]: the current weights_file reader input.
             weights.tofile(stem.with_suffix(".bin"))
-        desc = descriptor(args.mode, shard, stem.with_suffix(".npy"), N_BEAMS, flagged, inputs)
-        desc["beams"] = {"defined": int(n_defined), "zero_padded": int(N_BEAMS - n_defined),
-                         "rule": "beams [defined, 128) have all-zero weights"}
+        desc = descriptor(args.mode, shard, stem.with_suffix(".npy"), n_beams, flagged, inputs)
+        desc["beams"] = {"defined": int(n_defined), "zero_padded": int(n_beams - n_defined),
+                         "rule": f"beams [defined, {n_beams}) have all-zero weights"}
         if args.emit_legacy_bin:
             desc["legacy_bin_sha256"] = sha256_file(stem.with_suffix(".bin"))
         with open(stem.with_suffix(".json"), "w") as f:
@@ -404,8 +412,11 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--positions", type=Path, default=None,
                    help=".npy (64, 3) ENU metres, charts_logical order (default 8x8 grid)")
     b.add_argument("--output-dir", type=Path, required=True)
+    b.add_argument("--num-beams", type=int, choices=SUPPORTED_BEAMS, default=N_BEAMS,
+                   help="beam count B of the weight file; must equal the beamformer's num_beams")
     b.add_argument("--pad-zero-beams", action="store_true",
-                   help=f"append zero-weight beams when the directions define fewer than {N_BEAMS}")
+                   help="append zero-weight beams when the directions define fewer than "
+                        "--num-beams")
     b.add_argument("--emit-legacy-bin", action="store_true",
                    help="also write raw .bin for the current weights_file reader")
     b.set_defaults(func=_build)

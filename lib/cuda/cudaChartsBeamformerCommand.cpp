@@ -49,7 +49,7 @@ public:
     std::string upchan_gain_normalization = "none";
     std::string upchan_gain_sha256; // of the applied float32 [336*32] array
     Dimensions beamform_dims;
-    Dimensions output_dims; // computed fp32 intensity, always B = 128 beams
+    Dimensions output_dims; // computed fp32 intensity, all B = num_beams beams (128 or 256)
     // int8 only: beam groups that are quantized, copied and written (output_beam_groups).
     // written_dims = output_dims with n_beams = 16G; it sizes the int8 codes and parameters,
     // never the weights, the fp32 scratch or the beamformer launch.
@@ -92,8 +92,9 @@ public:
     chartsBeamformerState(Config& cfg, const std::string& name, bufferContainer& buffers,
                           cudaDeviceInterface& device) :
         cudaCommandState(cfg, name, buffers, device) {
-        // Always upchannelized U = 32, K = 10, B = 128. The keys are still accepted with
-        // their only valid value so that a stale configuration fails loudly.
+        // Always upchannelized U = 32, K = 10; B = num_beams is 128 (default) or 256. The
+        // fixed keys are still accepted with their only valid value so that a stale
+        // configuration fails loudly.
         require(cfg.get_default<std::string>(name, "input_mode", "fine") == "fine",
                 "input_mode: coarse was removed; the beamformer always upchannelizes (U=32)");
 
@@ -110,16 +111,15 @@ public:
         } catch (const std::runtime_error&) {
         }
         beam_groups_configured = groups_value.has_value();
+        std::vector<std::int64_t> configured_groups; // validated against B below
         if (beam_groups_configured) {
             require(quantize_int8, "output_beam_groups requires output_format: int8; float32 "
                                    "is a full diagnostic product");
             require(groups_value->is_array(), "output_beam_groups must be a list of integers");
-            std::vector<std::int64_t> groups;
             for (const auto& item : *groups_value) {
                 require(item.is_number_integer(), "output_beam_groups must be a list of integers");
-                groups.push_back(item.get<std::int64_t>());
+                configured_groups.push_back(item.get<std::int64_t>());
             }
-            beam_groups = make_beam_group_selection(groups);
         }
 
         shard_id = cfg.get_default<std::size_t>(name, "shard_id", 0);
@@ -129,9 +129,12 @@ public:
         const std::size_t n_ant = cfg.get_default<std::size_t>(name, "num_elements", 64);
         const std::size_t n_beams = cfg.get_default<std::size_t>(name, "num_beams", beam_count);
         require(cfg.get_default<std::size_t>(name, "max_beams", beam_count) == beam_count,
-                "max_beams was removed; the beam count is fixed at 128");
+                "max_beams was removed; set num_beams (128 or 256)");
         require(n_ant == 32 || n_ant == 64, "num_elements must be 32 or 64");
-        require(n_beams == beam_count, "num_beams must be 128 (fixed beam count)");
+        require(is_supported_beam_count(n_beams), "num_beams must be 128 or 256");
+        beam_groups = beam_groups_configured
+                          ? make_beam_group_selection(configured_groups, n_beams)
+                          : all_beam_groups(n_beams);
 
         require(raw_n_time >= pfb_history_samples && raw_n_time % upchannelization_factor == 0,
                 "samples_per_data_set must be >= 96 and divisible by 32");

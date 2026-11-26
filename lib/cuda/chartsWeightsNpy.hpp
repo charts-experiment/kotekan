@@ -261,8 +261,11 @@ inline NpyWeightsInfo validate_weights_descriptor(const nlohmann::json& d,
         info.flagged_channel_antennas =
             d["gain"].value("flagged_logical_channel_antenna_count", std::size_t{0});
     }
-    if (d.contains("inputs") && d["inputs"].is_object())
-        info.calibration_note = d["inputs"].value("calibration_note", "");
+    // The builder writes calibration_note: null when no --calibration-note is given;
+    // json::value() only defaults a missing key, so a null must be read as "" explicitly.
+    if (d.contains("inputs") && d["inputs"].is_object() && d["inputs"].contains("calibration_note")
+        && d["inputs"]["calibration_note"].is_string())
+        info.calibration_note = d["inputs"]["calibration_note"].get<std::string>();
     return info;
 }
 

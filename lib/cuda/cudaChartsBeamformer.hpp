@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace beamformer {
@@ -19,8 +20,13 @@ inline constexpr std::size_t frequency_shard_count = 2;
 inline constexpr std::size_t full_band_frequency_channels =
     local_frequency_channels * frequency_shard_count;
 
-// Fixed beam count: every product, weight file and kernel uses B = 128.
-inline constexpr std::size_t beam_count = 128;
+// Beam count B: 128 (default) or 256, configured by num_beams (BEAM_256_PLAN.md WP15, user
+// decision 2026-11-26). Weight files, the fp32 scratch and the products follow it.
+inline constexpr std::size_t beam_count = 128; // default B
+inline constexpr std::size_t max_beam_count = 256;
+constexpr bool is_supported_beam_count(const std::size_t n_beams) {
+    return n_beams == 128 || n_beams == 256;
+}
 
 inline constexpr double speed_of_light_m_per_s = 299792458.0;
 inline constexpr double two_pi = 6.283185307179586476925286766559;
@@ -123,13 +129,13 @@ constexpr std::size_t quantization_parameter_count(const Dimensions& integrated_
 // int8 output beam selection (output_beam_groups): whole quantization beam groups of 16, so
 // every 1x16x16 chunk keeps its content and its codes and (offset, scale) are bit-identical
 // to the full product; only their destination changes. Output group g holds the computed
-// beams 16*source[g] ... 16*source[g] + 15 (B = 128 beams are always computed).
-inline constexpr std::size_t beam_group_count = beam_count / quantization_chunk_beam;
-static_assert(beam_count % quantization_chunk_beam == 0, "B must be a multiple of 16");
+// beams 16*source[g] ... 16*source[g] + 15 (all B beams are always computed; B/16 groups).
+inline constexpr std::size_t max_beam_group_count = max_beam_count / quantization_chunk_beam;
+static_assert(max_beam_count % quantization_chunk_beam == 0, "B must be a multiple of 16");
 
 struct BeamGroupSelection {
-    std::uint32_t count = 0;                     // G = number of written groups, 1..8
-    std::uint32_t source[beam_group_count] = {}; // computed group of output group g, increasing
+    std::uint32_t count = 0;                         // G = number of written groups, 1..B/16
+    std::uint32_t source[max_beam_group_count] = {}; // computed group of output group g, increasing
 
     std::size_t written_beams() const {
         return count * quantization_chunk_beam;
@@ -148,25 +154,38 @@ struct BeamGroupSelection {
     }
 };
 
-inline BeamGroupSelection all_beam_groups() {
+inline std::size_t beam_group_count(const std::size_t n_beams) {
+    if (n_beams == 0 || n_beams > max_beam_count || n_beams % quantization_chunk_beam != 0)
+        throw std::invalid_argument("beam count must be a positive multiple of 16, at most 256");
+    return n_beams / quantization_chunk_beam;
+}
+
+// Every group of B computed beams, in order (the default when output_beam_groups is absent).
+inline BeamGroupSelection all_beam_groups(const std::size_t n_beams = beam_count) {
     BeamGroupSelection selection;
-    selection.count = beam_group_count;
-    for (std::uint32_t g = 0; g < beam_group_count; ++g)
+    selection.count = static_cast<std::uint32_t>(beam_group_count(n_beams));
+    for (std::uint32_t g = 0; g < selection.count; ++g)
         selection.source[g] = g;
     return selection;
 }
 
-// Validates a configured list: non-empty, entries in 0..7, strictly increasing.
-inline BeamGroupSelection make_beam_group_selection(const std::vector<std::int64_t>& groups) {
+// Validates a configured list against B computed beams: non-empty, entries in 0..B/16 - 1,
+// strictly increasing.
+inline BeamGroupSelection make_beam_group_selection(const std::vector<std::int64_t>& groups,
+                                                    const std::size_t n_beams = beam_count) {
+    const std::size_t groups_max = beam_group_count(n_beams);
     if (groups.empty())
         throw std::invalid_argument("output_beam_groups must not be empty");
-    if (groups.size() > beam_group_count)
-        throw std::invalid_argument("output_beam_groups has more than 8 groups");
+    if (groups.size() > groups_max)
+        throw std::invalid_argument("output_beam_groups has more than "
+                                    + std::to_string(groups_max) + " groups (B/16)");
     BeamGroupSelection selection;
     for (std::size_t i = 0; i < groups.size(); ++i) {
-        if (groups[i] < 0 || groups[i] >= static_cast<std::int64_t>(beam_group_count))
-            throw std::invalid_argument("output_beam_groups entries must be in 0..7 "
-                                        "(beam group b // 16 of B = 128)");
+        if (groups[i] < 0 || groups[i] >= static_cast<std::int64_t>(groups_max))
+            throw std::invalid_argument("output_beam_groups entries must be in 0.."
+                                        + std::to_string(groups_max - 1)
+                                        + " (beam group b // 16 of B = "
+                                        + std::to_string(n_beams) + ")");
         if (i > 0 && groups[i] <= groups[i - 1])
             throw std::invalid_argument("output_beam_groups must be strictly increasing "
                                         "(no duplicates)");
@@ -217,7 +236,7 @@ void launch_tiled_fp16_integrated_beamformer(cudaStream_t stream, const __half2*
 // convention as the scalar reference, computed with fp16 tensor-core MMA (WMMA m16n16k16)
 // and fp32 accumulation; one block per fine channel, 16 consecutive spectra per WMMA tile
 // (windows may straddle tiles), staging and window sums pipelined with the MMAs.
-// Requires E = 32 or 64, B a multiple of 16 up to 128, K = 10, sm_70 or newer, 32-byte
+// Requires E = 32 or 64, B a multiple of 16 up to 256, K = 10, sm_70 or newer, 32-byte
 // aligned weights and 16-byte aligned fine voltages. Accumulation order and rounding inside
 // the MMA are hardware-defined: not bit-identical to the scalar reference.
 void launch_tensor_core_fp16_integrated_beamformer(cudaStream_t stream,

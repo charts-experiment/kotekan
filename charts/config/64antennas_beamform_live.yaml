@@ -23,7 +23,7 @@ element_order: charts_logical
 n_channels_per_packet: 168
 local_subbands_per_packet: 2
 num_local_freq: 336
-num_beams: 128 # fixed beam count
+num_beams: 128 # B: 128 (default) or 256; the weight files must have the same B
 
 spectra_per_second: 300000.0
 samples_per_data_set: 15360          # T_raw: 51.2 ms per frame
@@ -37,7 +37,7 @@ run_frames: 200                      # frames written per shard before Kotekan e
 
 # Fine mode, K=10: 15360/32 = 480 fine spectra -> 48 windows; 10752 fine channels.
 # int8 output of selected 16-beam groups (output_beam_groups in each beamformer command):
-# in the two frame-byte expressions below (not the top-level num_beams, which stays 128) use
+# in the two frame-byte expressions below (not the top-level num_beams, the computed B) use
 # 16 * G instead of num_beams (G = number of written groups), e.g. 64 for [0, 1, 2, 3] (hex64
 # without the zero-weight padding beams). Both shards here share these sizes.
 intensity_frame_bytes: 48 * 10752 * num_beams

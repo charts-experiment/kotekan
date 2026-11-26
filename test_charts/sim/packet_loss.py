@@ -88,8 +88,8 @@ def create_packet_loss_yaml(yaml_path: Path, input_dir: Path, output_dir: Path,
         raise ValueError("fine requires T_raw >= 96 divisible by 32")
     if frames < 1 or gpu_depth < 1 or min(raw_depth, mask_depth, output_depth) < gpu_depth:
         raise ValueError("positive frame count and host depths >= GPU depth are required")
-    if num_beams != 128:
-        raise ValueError("num_beams must be 128 (fixed beam count)")
+    if num_beams not in (128, 256):
+        raise ValueError("num_beams must be 128 or 256")
     yaml_path.parent.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     n_time = raw_n_time // 32

@@ -36,7 +36,7 @@ struct ProductDescription {
     std::size_t n_time = 0;
     std::size_t n_freq = 0;
     std::size_t n_beams = 0;          // written beams (intensity.shape[2]) = 16G for int8
-    std::size_t n_computed_beams = 0; // beams formed on the GPU (B = 128)
+    std::size_t n_computed_beams = 0; // beams formed on the GPU (B = 128 or 256)
     std::vector<std::size_t> beam_groups;   // written 16-beam groups of the computed beams
     std::vector<std::size_t> written_beams; // computed beam index of each output beam
     std::size_t n_elements = 0;

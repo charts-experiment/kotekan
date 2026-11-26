@@ -325,15 +325,16 @@ def create_beamformer_yaml(
 ) -> Path:
     """Generates Kotekan YAML for rawFileRead -> cudaChartsBeamformerCommand -> rawFileWrite.
 
-    The beamformer always upchannelizes (U=32, K=10) and forms exactly 128 beams; input_mode
-    and num_beams are kept for callers but only accept those values. output_beam_groups
+    The beamformer always upchannelizes (U=32, K=10) and forms num_beams = 128 or 256 beams;
+    input_mode is kept for callers but only accepts "fine". output_beam_groups
     (int8 only) writes those 16-beam groups and sizes the intensity frames for 16*G beams;
     the int8 parameter buffer, when a caller adds one, needs G beam tiles.
     """
     if input_mode != "fine":
         raise ValueError("input_mode: coarse was removed; the beamformer is always fine (U=32)")
-    if num_beams != 128 or integration_spectra != 10:
-        raise ValueError("the CHARTS beamformer requires num_beams=128 and integration_spectra=10")
+    if num_beams not in (128, 256) or integration_spectra != 10:
+        raise ValueError("the CHARTS beamformer requires num_beams 128 or 256 and "
+                         "integration_spectra=10")
     yaml_path.parent.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
