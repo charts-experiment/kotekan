@@ -4,10 +4,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:1
-#SBATCH --mem=128G
+#SBATCH --gpus-per-node=1
 #SBATCH --time=08:00:00
-#SBATCH --partition=gpu
 #SBATCH --output=slurm_10tb_tri_engine_%j.out
 #SBATCH --error=slurm_10tb_tri_engine_%j.err
 
@@ -31,9 +29,12 @@
 # Usage:
 #   sbatch test_charts/slurm/submit_10tb_tri_engine_campaign.slurm
 #
-#   # Custom FERPB output root or campaign run subset:
+#   # Custom FERPB output root, dual-subband config, or full 16-run campaign:
 #   sbatch --export=ALL,FERPB_OUT=/project/rrg-vanderli/ferpb,RUN_ALL=1 \
 #     test_charts/slurm/submit_10tb_tri_engine_campaign.slurm
+#
+#   # Dry-run mode for the 10-TB campaign driver:
+#   sbatch --export=ALL,DRY_RUN=1 test_charts/slurm/submit_10tb_tri_engine_campaign.slurm
 # ==============================================================================
 
 set -euo pipefail
@@ -43,6 +44,7 @@ echo " CHARTS 10-TB Campaign + Tri-Engine Outputs on Trillium"
 echo " Hostname       : $(hostname)"
 echo " CUDA Device    : ${CUDA_VISIBLE_DEVICES:-Not set (default 0)}"
 echo " Job ID         : ${SLURM_JOB_ID:-manual}"
+echo " Array Task ID  : ${SLURM_ARRAY_TASK_ID:-0}"
 echo " Date           : $(date)"
 echo "======================================================================"
 
@@ -50,23 +52,30 @@ echo "======================================================================"
 if command -v module >/dev/null 2>&1; then
     echo ">>> Loading Trillium Environment Modules..."
     module load StdEnv/2023 2>/dev/null || true
-    module load gcc/12.3 2>/dev/null || module load gcc || true
-    module load cuda/12.6 2>/dev/null || module load cuda/13.3 2>/dev/null || module load cuda || true
+    module load gcc/12.3 2>/dev/null || module load gcc 2>/dev/null || true
+    module load cuda/12.6 2>/dev/null || module load cuda/13.3 2>/dev/null || module load cuda 2>/dev/null || true
     module load cmake 2>/dev/null || true
-    module load python/3.11 2>/dev/null || module load python/3.10 2>/dev/null || module load python || true
+    module load boost 2>/dev/null || true
+    module load python/3.11 2>/dev/null || module load python/3.10 2>/dev/null || module load python 2>/dev/null || true
     module load scipy-stack 2>/dev/null || true
     module load hdf5 2>/dev/null || true
+    module load ffmpeg 2>/dev/null || true
 fi
 
 # Print GPU architecture & specifications
-nvidia-smi
+nvidia-smi || true
 
-# 2. Resolve Repository Root
+# 2. Resolve Repository Root (Slurm-safe: sbatch executes a spool copy)
 SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
-if [ -f "${SUBMIT_DIR}/test_charts/run_10tb_correlator_campaign.py" ]; then
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "${SUBMIT_DIR}/CMakeLists.txt" ] && [ -d "${SUBMIT_DIR}/test_charts" ]; then
     REPO_ROOT="${SUBMIT_DIR}"
-elif [ -f "${SUBMIT_DIR}/../../test_charts/run_10tb_correlator_campaign.py" ]; then
+elif [ -f "${SUBMIT_DIR}/../CMakeLists.txt" ] && [ -d "${SUBMIT_DIR}/../test_charts" ]; then
+    REPO_ROOT="$(cd "${SUBMIT_DIR}/.." && pwd)"
+elif [ -f "${SUBMIT_DIR}/../../CMakeLists.txt" ] && [ -d "${SUBMIT_DIR}/../../test_charts" ]; then
     REPO_ROOT="$(cd "${SUBMIT_DIR}/../.." && pwd)"
+elif [ -f "${SCRIPT_DIR}/../../CMakeLists.txt" ] && [ -d "${SCRIPT_DIR}/../../test_charts" ]; then
+    REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 else
     REPO_ROOT="${PWD}"
 fi
@@ -76,11 +85,15 @@ echo "Repository Root : ${REPO_ROOT}"
 
 # 3. Configuration knobs (overridable via --export at sbatch time)
 BUILD_TYPE="${BUILD_TYPE:-Release}"
+CUDA_ARCH="${CUDA_ARCH:-native}"
 FERPB_OUT="${FERPB_OUT:-/project/rrg-vanderli/ferpb}"
 CAMPAIGN_OUT="${FERPB_OUT}/10tb_campaign"
 TRI_ENGINE_OUT="${FERPB_OUT}/tri_engine"
 CONFIG="${CONFIG:-test_charts/config/64antennas_tri_engine_benchmark.yaml}"
 RUN_ALL="${RUN_ALL:-0}"
+DRY_RUN="${DRY_RUN:-0}"
+TASK_ID="${SLURM_ARRAY_TASK_ID:-0}"
+BUILD_KOTEKAN="${BUILD_KOTEKAN:-1}"
 BUILD_DIR="${REPO_ROOT}/build"
 KOTEKAN_BIN="${BUILD_DIR}/kotekan/kotekan"
 
@@ -99,28 +112,35 @@ echo "FERPB Output Root : ${FERPB_OUT}"
 echo "Campaign Output   : ${CAMPAIGN_OUT}"
 echo "Tri-Engine Output : ${TRI_ENGINE_OUT}"
 echo "Scratch Base      : ${SCRATCH_BASE}"
+echo "CUDA Arch         : ${CUDA_ARCH}"
 
 # 4. Build Kotekan with CUDA enabled
-mkdir -p "${BUILD_DIR}"
-cd "${BUILD_DIR}"
+if [ "${BUILD_KOTEKAN}" = "1" ] || [ ! -x "${KOTEKAN_BIN}" ]; then
+    mkdir -p "${BUILD_DIR}"
+    cd "${BUILD_DIR}"
 
-echo ">>> Configuring CMake (BUILD_TYPE=${BUILD_TYPE})..."
-cmake .. \
-    -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
-    -DUSE_CUDA=ON \
-    -DCMAKE_CUDA_ARCHITECTURES="80;90" \
-    -DCMAKE_SKIP_RPATH=TRUE
+    echo ">>> Configuring CMake (BUILD_TYPE=${BUILD_TYPE}, CUDA_ARCH=${CUDA_ARCH})..."
+    cmake .. \
+        -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
+        -DUSE_CUDA=ON \
+        -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCH}" \
+        -DUSE_NUMA=ON \
+        -DWERROR=OFF \
+        -DCMAKE_SKIP_RPATH=TRUE
 
-echo ">>> Compiling Kotekan..."
-make -j"${SLURM_CPUS_PER_TASK:-8}" kotekan
+    echo ">>> Compiling Kotekan..."
+    make -j"${SLURM_CPUS_PER_TASK:-16}" kotekan
 
-# Apply Alliance setrpaths.sh if available
-if command -v setrpaths.sh >/dev/null 2>&1; then
-    echo "Applying Alliance setrpaths.sh to build tree..."
-    setrpaths.sh --path "${BUILD_DIR}" --add_origin 2>/dev/null || true
+    # Apply Alliance setrpaths.sh if available
+    if command -v setrpaths.sh >/dev/null 2>&1; then
+        echo "Applying Alliance setrpaths.sh to build tree..."
+        setrpaths.sh --path "${BUILD_DIR}" --add_origin 2>/dev/null || true
+    fi
+
+    cd "${REPO_ROOT}"
 fi
 
-cd "${REPO_ROOT}"
+export LD_LIBRARY_PATH="${BUILD_DIR}/external/n2k:${BUILD_DIR}/lib:${BUILD_DIR}/kotekan:${LD_LIBRARY_PATH:-}"
 
 # 5. Pre-flight check: smoke test Kotekan binary
 echo ">>> Pre-flight check: testing Kotekan binary..."
@@ -134,7 +154,7 @@ fi
 
 # 6. Validate the tri-engine benchmark config
 echo ">>> Validating tri-engine benchmark config: ${CONFIG}"
-"${KOTEKAN_BIN}" --check-config "${CONFIG}"
+"${KOTEKAN_BIN}" --check-config -c "${CONFIG}"
 
 # 7. Run the 10-TB correlator campaign
 echo "======================================================================"
@@ -150,7 +170,10 @@ CAMPAIGN_ARGS=(
 if [ "${RUN_ALL}" = "1" ]; then
     CAMPAIGN_ARGS+=(--all)
 else
-    CAMPAIGN_ARGS+=(--run-idx 0)
+    CAMPAIGN_ARGS+=(--run-idx "${TASK_ID}")
+fi
+if [ "${DRY_RUN}" = "1" ]; then
+    CAMPAIGN_ARGS+=(--dry-run)
 fi
 
 python3 "${REPO_ROOT}/test_charts/run_10tb_correlator_campaign.py" \
@@ -165,40 +188,20 @@ echo " Step 2: CHARTS 64-Antenna Tri-Engine Benchmark Pipeline"
 echo " Config  : ${CONFIG}"
 echo " Output  : ${TRI_ENGINE_OUT}"
 echo "======================================================================"
-mkdir -p /tmp/test_charts_tri_engine_${SLURM_JOB_ID:-manual}
-LD_LIBRARY_PATH="${BUILD_DIR}/external/n2k:${BUILD_DIR}/lib:${BUILD_DIR}/kotekan:${LD_LIBRARY_PATH:-}" \
-    "${KOTEKAN_BIN}" --config "${CONFIG}"
+mkdir -p "/tmp/test_charts_tri_engine_${SLURM_JOB_ID:-manual}"
+"${KOTEKAN_BIN}" --config "${CONFIG}" | tee "${TRI_ENGINE_OUT}/tri_engine_kotekan_${SLURM_JOB_ID:-manual}.log"
 
 echo "Tri-engine benchmark pipeline execution completed successfully."
 
-# 9. Archive tri-engine REST-inspect outputs into the FERPB tree
+# 9. Archive tri-engine config, script, and theoretical metrics into the FERPB tree
 echo "======================================================================"
 echo " Archiving tri-engine outputs to ${TRI_ENGINE_OUT}"
 echo "======================================================================"
-TRI_ENGINE_SCRATCH="${SCRATCH_BASE}/tri_engine"
-mkdir -p "${TRI_ENGINE_SCRATCH}"
-
-# The tri-engine config writes formed beams into VRAM and transfers only
-# correlation visibilities and FRB intensity D2H for REST inspection. Capture
-# the live REST telemetry snapshots from the running instance if available,
-# otherwise record the config and benchmark metrics as the output record.
-if command -v curl >/dev/null 2>&1; then
-    for buf in host_correlation_buffer_0 host_correlation_buffer_1 \
-               host_frb_intensity_buffer_0 host_frb_intensity_buffer_1; do
-        if curl -sf "localhost:12048/buffer_frame?name=${buf}" \
-                -o "${TRI_ENGINE_SCRATCH}/${buf}.json" 2>/dev/null; then
-            echo "  * Captured REST frame for ${buf}"
-        fi
-    done
-fi
-
-# Copy the benchmark config and metrics record for reproducibility
 cp "${CONFIG}" "${TRI_ENGINE_OUT}/tri_engine_config.yaml"
 cp "${REPO_ROOT}/test_charts/benchmark_tri_engine.py" \
    "${TRI_ENGINE_OUT}/benchmark_tri_engine.py"
 
-# Run the theoretical metrics benchmark and store its stdout as the output record
-python3 "${REPO_ROOT}/test_charts/benchmark_tri_engine.py" \
+python3 -c 'import sys; sys.path.insert(0, "test_charts"); import benchmark_tri_engine as b; b.print_theoretical_audit(b.calculate_theoretical_metrics())' \
     > "${TRI_ENGINE_OUT}/tri_engine_metrics.txt" 2>&1 || true
 
 echo "Tri-engine outputs archived in ${TRI_ENGINE_OUT}"

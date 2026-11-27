@@ -25,8 +25,10 @@ test_charts/
 ├── config/                       # Kotekan stage YAML pipeline templates
 ├── slurm/                        # Centralized Slurm cluster job scripts & verification
 │   ├── trillium_pipeline.slurm   # Parameterized cluster simulation launcher
-│   ├── submit_build_and_test.slurm # Native C++/CUDA build & test suite on GPU node
+│   ├── submit_build_and_test.slurm # Native C++/CUDA build, config check & test suite
 │   ├── submit_10tb_correlator_campaign.slurm # 10TB correlator campaign Slurm array job
+│   ├── submit_10tb_tri_engine_campaign.slurm # 10TB campaign + tri-engine output archive job
+│   ├── submit_tri_engine_benchmark.slurm     # 64-antenna tri-engine GPU benchmark
 │   ├── submit_64antennas_beam_tracker.slurm  # 64-antenna live beam tracker job
 │   ├── submit_direct_beam_tracker_benchmark.slurm # Direct beam tracker standalone benchmark
 │   ├── submit_direct_vs_v5_benchmark_comparison.slurm # Head-to-head Direct vs V5 benchmark
@@ -75,6 +77,12 @@ python test_charts/charts_sim.py pipeline --preset 1min --profile night
 
 All cluster execution and build verification is managed under `test_charts/slurm/`. The root of the repository is completely clean of one-off `.sbatch` scripts.
 
+All Slurm launchers target the local GPU compute capability dynamically (`CUDA_ARCH=native` by default) and support environment variable overrides via `sbatch --export=ALL,...`:
+- `CUDA_ARCH`: Target CUDA architecture (default `native`, e.g. `90` or `80;90`).
+- `BUILD_TYPE`: CMake build type (default `Release`).
+- `BUILD_KOTEKAN`: Set to `1` to force recompilation or `0` to reuse an existing `build/kotekan/kotekan` (default varies by script).
+- `RUN_BENCHMARKS`, `RUN_PYTHON_TESTS`: Toggle C++ benchmarks or Python test suites in `submit_build_and_test.slurm` (both `1` by default).
+
 ```bash
 # 1. Standard parameterized simulation pipeline:
 sbatch test_charts/slurm/trillium_pipeline.slurm
@@ -85,22 +93,29 @@ sbatch --export=ALL,PRESET=5min,PROFILE=night test_charts/slurm/trillium_pipelin
 # Pass arbitrary flags directly to charts_sim.py:
 sbatch test_charts/slurm/trillium_pipeline.slurm --antennas 64 --max-beams 8 --workers 24
 
-# 2. Build verification stage (compiles Kotekan and runs test suite on GPU node):
+# 2. Build verification stage (compiles Kotekan + all 18 test_charts C++/CUDA targets, validates configs, runs tests):
 sbatch test_charts/slurm/submit_build_and_test.slurm
 
 # 3. 10-Terabyte Correlator Campaign (16-task Slurm array job):
 sbatch test_charts/slurm/submit_10tb_correlator_campaign.slurm
 
-# 4. Live 64-Antenna Beam Tracker:
+# 4. 10-TB Campaign + Tri-Engine Archive Run:
+sbatch test_charts/slurm/submit_10tb_tri_engine_campaign.slurm
+
+# 5. 64-Antenna Tri-Engine GPU Benchmark (single- or dual-subband via CONFIG):
+sbatch test_charts/slurm/submit_tri_engine_benchmark.slurm
+sbatch --export=ALL,CONFIG=charts/config/64antennas_tri_engine_benchmark.yaml test_charts/slurm/submit_tri_engine_benchmark.slurm
+
+# 6. Live 64-Antenna Beam Tracker:
 sbatch test_charts/slurm/submit_64antennas_beam_tracker.slurm
 
-# 5. Standalone Direct Beam Tracker benchmark:
+# 7. Standalone Direct Beam Tracker benchmark:
 sbatch test_charts/slurm/submit_direct_beam_tracker_benchmark.slurm
 
-# 6. Head-to-Head Comparative Benchmark (Direct vs V5 Beam Tracker):
+# 8. Head-to-Head Comparative Benchmark (Direct vs V5 Beam Tracker):
 sbatch test_charts/slurm/submit_direct_vs_v5_benchmark_comparison.slurm
 
-# 7. Sequential execution of both benchmarks with dependency chaining:
+# 9. Sequential execution of Direct & Comparison benchmarks with dependency chaining:
 bash test_charts/slurm/submit_sequential.sh
 ```
 
