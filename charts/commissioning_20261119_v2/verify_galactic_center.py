@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""Post-test verification for Test 9A: Galactic Center (Sgr A*, l=0 deg)
+Galactic latitude cut, synchrotron spectral index, parked zenith drift scan,
+and simultaneous Sun sidelobe isolation check."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+from typing import Any, Dict, List
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+from scipy.ndimage import gaussian_filter1d
+
+from beam_io import (
+    FREQS_MHZ,
+    atomic_savefig,
+    atomic_write_text,
+    clean_channel_mask,
+    effective_beam_response_sq,
+    load_dual_subband_beam_power,
+    load_jsonl,
+    theoretical_array_factor_sq,
+)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--run-dir", required=True)
+    args = p.parse_args()
+
+    run_dir = Path(args.run_dir)
+    wf, seq, t0_us, timing = load_dual_subband_beam_power(run_dir, n_beams=10)
+    pointing = load_jsonl(run_dir / "beam_pointing_log.jsonl")
+    t_rel_s = (seq - seq[0]).astype(np.float64) * (10.0 / 3.0) * 1e-6
+
+    off_beam = 9
+    drift_beam = 7
+    sun_beam = 8
+    lat_map = [
+        (0, 0.0, "b=0 deg (Sgr A*)"),
+        (1, 4.0, "b=+4 deg"),
+        (2, -4.0, "b=-4 deg"),
+        (3, 8.0, "b=+8 deg"),
+        (4, -8.0, "b=-8 deg"),
+        (5, 15.0, "b=+15 deg"),
+        (6, -15.0, "b=-15 deg"),
+    ]
+
+    clean = clean_channel_mask(wf[:, 0, :], max_zero_frac=0.08, mad_sigma=5.0) & clean_channel_mask(
+        wf[:, off_beam, :], max_zero_frac=0.08, mad_sigma=5.0
+    )
+    if int(np.sum(clean)) < 30:
+        clean = np.mean(np.isfinite(wf[:, 0, :]) & (wf[:, 0, :] > 0.0), axis=0) > 0.85
+
+    # Latitude cut fractional excess & SNR
+    off_ts = np.mean(wf[:, off_beam, clean], axis=1)
+    lat_profile: List[Dict[str, Any]] = []
+    for bid, bdeg, lbl in sorted(lat_map, key=lambda x: x[1]):
+        b_ts = np.mean(wf[:, bid, clean], axis=1)
+        exc = (b_ts - off_ts) / np.maximum(off_ts, 1e-12)
+        exc_low = np.mean((wf[:, bid, clean & (FREQS_MHZ < 400.65)] - wf[:, off_beam, clean & (FREQS_MHZ < 400.65)]) / np.maximum(wf[:, off_beam, clean & (FREQS_MHZ < 400.65)], 1e-12)) if np.any(clean & (FREQS_MHZ < 400.65)) else 0.0
+        exc_hi = np.mean((wf[:, bid, clean & (FREQS_MHZ >= 400.65)] - wf[:, off_beam, clean & (FREQS_MHZ >= 400.65)]) / np.maximum(wf[:, off_beam, clean & (FREQS_MHZ >= 400.65)], 1e-12)) if np.any(clean & (FREQS_MHZ >= 400.65)) else 0.0
+        lat_profile.append({
+            "beam_id": bid,
+            "b_gal_deg": bdeg,
+            "label": lbl,
+            "mean_power": round(float(np.mean(b_ts)), 4),
+            "mean_excess_vs_cold_off": round(float(np.mean(exc)), 4),
+            "std_excess": round(float(np.std(exc)), 4),
+            "excess_300_400": round(float(exc_low), 4),
+            "excess_400_501": round(float(exc_hi), 4),
+        })
+
+    # Spectral index beta_synch on b=0 excess normalized by cold OFF spectral template
+    edges = np.linspace(300.0, 501.5, 17)
+    spec_freqs, spec_exc = [], []
+    for bi in range(len(edges) - 1):
+        m_b = clean & (FREQS_MHZ >= edges[bi]) & (FREQS_MHZ < edges[bi + 1])
+        if int(np.sum(m_b)) < 3:
+            continue
+        p0 = float(np.median(np.mean(wf[:, 0, m_b], axis=1)))
+        p9 = float(np.median(np.mean(wf[:, off_beam, m_b], axis=1)))
+        # Excess normalized by cold OFF removes bandpass; slope reflects T_gal(nu)/T_sys(nu)
+        spec_freqs.append(float(np.mean(FREQS_MHZ[m_b])))
+        spec_exc.append((p0 - p9) / max(p9, 1e-12))
+
+    slope_contrast = None
+    valid_s = [k for k, v in enumerate(spec_exc) if v > 0.01]
+    if len(valid_s) >= 4:
+        fs = np.array([spec_freqs[k] for k in valid_s])
+        vs = np.array([spec_exc[k] for k in valid_s])
+        slope_contrast = round(float(np.polyfit(np.log(fs / 400.0), np.log(vs), 1)[0]), 4)
+
+    # Parked zenith drift transit check
+    drift_ts = np.mean(wf[:, drift_beam, clean] - wf[:, off_beam, clean], axis=1)
+    drift_sm = gaussian_filter1d(drift_ts, sigma=max(1.0, min(4.0, len(drift_ts) / 8.0)))
+    drift_pk_s = float(t_rel_s[int(np.argmax(drift_sm))]) if len(drift_sm) else 0.0
+
+    # Sun sidelobe check
+    sun_ts = np.mean(wf[:, sun_beam, clean], axis=1)
+    sun_exc = float(np.mean((sun_ts - off_ts) / np.maximum(off_ts, 1e-12)))
+
+    # 4-antenna Sun Array Factor (AF_sun) sidelobe coupling regression across non-Sun beams
+    sun_af_regression: Dict[str, Any] = {}
+    if pointing:
+        non_sun_bids = [0, 1, 2, 3, 4, 5, 6, 7, 9]
+        p_samp = np.zeros((len(pointing), 10), dtype=np.float64)
+        af_samp = np.zeros((len(pointing), 10), dtype=np.float64)
+        t_start_unix = float(pointing[0]["unix"])
+        for si, snap in enumerate(pointing):
+            idx_t = int(np.argmin(np.abs(t_rel_s - (float(snap["unix"]) - t_start_unix))))
+            tg = {int(x["beam_id"]): x for x in snap.get("targets", [])}
+            if sun_beam not in tg:
+                continue
+            s_tgt = tg[sun_beam]
+            for bid in range(10):
+                p_samp[si, bid] = float(np.mean(wf[idx_t, bid, clean]))
+                if bid in tg:
+                    af_samp[si, bid] = float(
+                        np.mean(
+                            effective_beam_response_sq(
+                                float(tg[bid]["l0"]),
+                                float(tg[bid]["m0"]),
+                                float(s_tgt["l0"]),
+                                float(s_tgt["m0"]),
+                                FREQS_MHZ[clean],
+                            )
+                        )
+                    )
+        obs_p = p_samp[:, non_sun_bids].ravel()
+        obs_af = af_samp[:, non_sun_bids].ravel()
+        if np.std(obs_af) > 1e-6 and np.std(obs_p) > 1e-12:
+            af_slope, af_intercept = np.polyfit(obs_af, obs_p, 1)
+            r_corr = float(np.corrcoef(obs_af, obs_p)[0, 1])
+            sun_af_regression = {
+                "pearson_r": round(r_corr, 4),
+                "slope_per_af": round(float(af_slope), 4),
+                "intercept_power": round(float(af_intercept), 4),
+                "sun_monitor_minus_intercept": round(float(np.mean(p_samp[:, sun_beam]) - af_intercept), 4),
+            }
+            for row in lat_profile:
+                bid = int(row["beam_id"])
+                resid = p_samp[:, bid] - (af_intercept + af_slope * af_samp[:, bid])
+                row["mean_af_sun"] = round(float(np.mean(af_samp[:, bid])), 4)
+                row["sun_af_subtracted_resid"] = round(float(np.mean(resid)), 4)
+
+    summary = {
+        "run_dir": str(run_dir),
+        "duration_s": round(float(t_rel_s[-1] - t_rel_s[0]) if len(t_rel_s) > 1 else 0.0, 2),
+        "timing": timing,
+        "clean_channels": int(np.sum(clean)),
+        "pointing_samples": len(pointing),
+        "latitude_profile": lat_profile,
+        "b0_excess_spectral_slope": slope_contrast,
+        "drift_peak_elapsed_s": round(drift_pk_s, 2),
+        "sun_monitor_excess_vs_cold_off": round(sun_exc, 4),
+        "sun_af_regression": sun_af_regression,
+        "subband_freqs_mhz": [round(x, 2) for x in spec_freqs],
+        "subband_b0_excess_frac": [round(float(x), 4) for x in spec_exc],
+    }
+    atomic_write_text(run_dir / "galactic_center_verification.json", json.dumps(summary, indent=2))
+
+    # 2x2 Diagnostic Figure
+    fig, axes = plt.subplots(2, 2, figsize=(13.5, 9), layout="constrained")
+    bs = [r["b_gal_deg"] for r in lat_profile]
+    excs = [r["mean_excess_vs_cold_off"] for r in lat_profile]
+    axes[0, 0].plot(bs, excs, "o-", color="#2563eb", lw=2.0)
+    axes[0, 0].set_title("Galactic Center Cut (l=0 deg): (Beam - Cold OFF) / Cold OFF")
+    axes[0, 0].set_xlabel("Galactic Latitude b (deg)")
+    axes[0, 0].set_ylabel("Fractional Excess")
+    axes[0, 0].grid(True, alpha=0.25)
+
+    t_min = t_rel_s / 60.0
+    axes[0, 1].plot(t_min, gaussian_filter1d(np.mean(wf[:, 0, clean] - wf[:, off_beam, clean], axis=1), sigma=2.0), label="b=0 tracked - OFF", color="#dc2626")
+    axes[0, 1].plot(t_min, drift_sm, label="Beam 7 parked drift - OFF", color="#0f172a")
+    axes[0, 1].set_title("Galactic Center Tracked vs Parked Zenith Drift Lightcurve")
+    axes[0, 1].set_xlabel("Elapsed Time (min)")
+    axes[0, 1].set_ylabel("Excess Power")
+    axes[0, 1].grid(True, alpha=0.25)
+    axes[0, 1].legend(fontsize=8.5)
+
+    if spec_freqs:
+        axes[1, 0].plot(spec_freqs, spec_exc, "o-", color="#16a34a", label=f"slope={slope_contrast}")
+        axes[1, 0].legend(fontsize=8.5)
+    axes[1, 0].set_title("Sgr A* (b=0) Excess Spectrum vs Frequency")
+    axes[1, 0].set_xlabel("Frequency (MHz)")
+    axes[1, 0].set_ylabel("(b=0 - Cold OFF) / Cold OFF")
+    axes[1, 0].grid(True, alpha=0.25)
+
+    axes[1, 1].plot(bs, [r["excess_300_400"] for r in lat_profile], "o-", color="#dc2626", label="300-400 MHz")
+    axes[1, 1].plot(bs, [r["excess_400_501"] for r in lat_profile], "s--", color="#2563eb", label="400-501 MHz")
+    axes[1, 1].set_title("Galactic Latitude Profile: Subband 0 vs Subband 1 Chromatic Width")
+    axes[1, 1].set_xlabel("Galactic Latitude b (deg)")
+    axes[1, 1].set_ylabel("Fractional Excess")
+    axes[1, 1].grid(True, alpha=0.25)
+    axes[1, 1].legend(fontsize=8.5)
+
+    atomic_savefig(fig, run_dir / "galactic_center_verification.png", dpi=140)
+    plt.close(fig)
+    print(json.dumps(summary, indent=2))
+
+
+if __name__ == "__main__":
+    main()

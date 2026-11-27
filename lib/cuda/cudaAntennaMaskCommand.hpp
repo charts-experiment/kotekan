@@ -29,6 +29,7 @@ public:
 
     cudaEvent_t execute(cudaPipelineState& pipestate,
                         const std::vector<cudaEvent_t>& pre_events) override;
+    void finalize_frame() override;
 
     // Static accessors for inter-stage queries & REST integration
     static std::array<std::uint8_t, MAX_MASK_ANTENNAS> get_current_mask();
@@ -60,6 +61,10 @@ public:
         std::lock_guard<std::mutex> lk(_metric_mutex);
         return _last_clip_fraction;
     }
+    std::vector<float> get_last_channel_power() const {
+        std::lock_guard<std::mutex> lk(_metric_mutex);
+        return _last_chan_power;
+    }
 
 private:
     void allocate_device_buffers();
@@ -82,22 +87,36 @@ private:
     std::string _antenna_order = "descending";
 
     std::uint64_t _applied_mask_generation = 0;
+    std::uint64_t _frame_counter = 0;
 
     // Per-subband telemetry
     mutable std::mutex _metric_mutex;
     std::vector<std::uint8_t> _last_active_mask;
     std::vector<float> _last_power_rms;
     std::vector<float> _last_clip_fraction;
+    std::vector<float> _last_chan_power;
+
+    // Pending frame snapshot produced in execute() and consumed asynchronously in finalize_frame()
+    bool _last_frame_executed = false;
+    bool _last_frame_inspected = false;
+    bool _last_frame_ran_coherence = false;
+    bool _last_frame_authoritative = false;
+    std::size_t _last_inspected_spectra = 0;
+    AntennaMaskConfig _last_frame_cfg;
 
     // Device allocations
     AntennaRawStats* _d_raw_stats = nullptr;
     float* _d_antenna_powers = nullptr;
     std::uint32_t* _d_antenna_clips = nullptr;
+    float* _d_chan_power = nullptr;
+    float* _d_chan_coh = nullptr;
     int* _d_bad_antennas = nullptr;
     int* _d_alive_antennas = nullptr;
 
     // Pinned host memory for single-DMA telemetry transfer
     AntennaRawStats* _h_raw_stats = nullptr;
+    float* _h_chan_power = nullptr;
+    float* _h_chan_coh = nullptr;
 
     std::vector<int> _current_bad_indices;
     std::vector<int> _current_alive_indices;

@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib
 import logging
 import math
+import os
 from pathlib import Path
 import sys
 from typing import Any, Dict, List, Tuple
@@ -84,6 +85,7 @@ C_LIGHT: float = float(_get_external("C_LIGHT", 299_792_458.0))
 SPEED_OF_LIGHT: float = C_LIGHT
 SPEED_OF_LIGHT_M_PER_S: float = C_LIGHT
 K_BOLTZMANN: float = 1.380649e-23
+EARTH_ROT_RATE_RAD_S: float = 7.292115e-5
 
 
 # ---------------------------------------------------------------------------
@@ -99,16 +101,17 @@ DEFAULT_NFFT: int = FPGA_NUM_SAMP_FFT
 NFFT: int = FPGA_NUM_SAMP_FFT
 
 CHARTS_CHANNEL_WIDTH_HZ: float = float(
-    _get_external("CHARTS_CHANNEL_WIDTH_HZ", 300_000.0)
+    _get_external("FPGA_FREQUENCY_HZ", 300_000.0)
 )
 CHARTS_CHANNEL_WIDTH_MHZ: float = float(_get_external("CHARTS_CHANNEL_WIDTH_MHZ", 0.3))
 CHANNEL_WIDTH_MHZ: float = CHARTS_CHANNEL_WIDTH_MHZ
 
-FPGA_TIME_RESOLUTION_US: float = float(
-    _get_external("FPGA_TIME_RESOLUTION_US", 10.0 / 3.0)
+FPGA_TIME_RESOLUTION_S: float = float(
+    _get_external("DELTA_TIME", 1.0e-5 / 3.0)
 )
+FPGA_TIME_RESOLUTION_US: float = FPGA_TIME_RESOLUTION_S * 1e6
 TIME_PER_SPECTRUM_US: float = FPGA_TIME_RESOLUTION_US
-TIME_PER_SPECTRUM_S: float = FPGA_TIME_RESOLUTION_US * 1e-6
+TIME_PER_SPECTRUM_S: float = FPGA_TIME_RESOLUTION_S
 SAMPLE_RATE_HZ: float = CHARTS_CHANNEL_WIDTH_HZ
 
 # Digitizer operating point: per-component (Re/Im) channel-noise sigma in LSB at
@@ -124,21 +127,21 @@ DIGITIZER_NOMINAL_SIGMA_LSB: float = 2.0
 # 3. Frequency Grid & Sharding
 # ---------------------------------------------------------------------------
 CHARTS_N_FREQ: int = int(_get_external("CHARTS_N_FREQ", 672))
-LOCAL_FREQUENCY_CHANNELS: int = int(_get_external("LOCAL_FREQUENCY_CHANNELS", 336))
-FREQUENCY_SHARD_COUNT: int = int(_get_external("FREQUENCY_SHARD_COUNT", 2))
+FREQUENCY_SHARD_COUNT: int = int(_get_external("CPT_NUM_BANDS", 2))
+LOCAL_FREQUENCY_CHANNELS: int = CHARTS_N_FREQ // FREQUENCY_SHARD_COUNT
+UPCHANNELIZED_FACTOR: int = int(_get_external("UPCHANNELIZED_FACTOR", 32))
+UPCHANNELIZED_N_FREQ: int = int(_get_external("UPCHANNELIZED_N_FREQ", 21504))
 
 DEFAULT_FREQUENCY_START_MHZ: float = float(
-    _get_external("DEFAULT_FREQUENCY_START_MHZ", 300.0)
+    _get_external("CPT_FREQ_0_BAND1", 300.0)
 )
-DEFAULT_FREQUENCY_START_HZ: float = float(
-    _get_external("DEFAULT_FREQUENCY_START_HZ", 300_000_000.0)
-)
+DEFAULT_FREQUENCY_START_HZ: float = DEFAULT_FREQUENCY_START_MHZ * 1e6
 
 
 # ---------------------------------------------------------------------------
 # 4. Array Geometry & Dimensions
 # ---------------------------------------------------------------------------
-DEFAULT_SPACING_M: float = float(_get_external("DEFAULT_SPACING_M", 0.6))
+DEFAULT_SPACING_M: float = float(_get_external("CHARTS_ANTENNA_SPACING_M", 0.6))
 CHARTS_N_ANTENNAS: int = int(_get_external("CHARTS_N_ANTENNAS", 256))
 DEFAULT_ANTENNAS: int = 64
 
@@ -150,10 +153,35 @@ CHARTS_LATITUDE_DEG: float = float(_get_external("CHARTS_LATITUDE_DEG", -33.4211
 CHARTS_LONGITUDE_DEG: float = float(_get_external("CHARTS_LONGITUDE_DEG", -70.8634710))
 CHARTS_ALTITUDE_M: float = float(_get_external("CHARTS_ALTITUDE_M", 458.0))
 
+# Antenna Array Reference Coordinates (Observatorio Carén Array Center)
+# Offset ~30m from the Carén main station entrance coordinates above
+CHARTS_ANTENNA_REF_LATITUDE_DEG: float = float(
+    _get_external("CHARTS_ANTENNA_REF_LATITUDE_DEG", -33.4212167)
+)
+CHARTS_ANTENNA_REF_LONGITUDE_DEG: float = float(
+    _get_external("CHARTS_ANTENNA_REF_LONGITUDE_DEG", -70.8637972)
+)
+CHARTS_ANTENNA_REF_ALTITUDE_M: float = float(
+    _get_external("CHARTS_ANTENNA_REF_ALTITUDE_M", 458.0)
+)
+CHARTS_ANTENNA_REF_LOCATION: Tuple[float, float, float] = (
+    CHARTS_ANTENNA_REF_LATITUDE_DEG,
+    CHARTS_ANTENNA_REF_LONGITUDE_DEG,
+    CHARTS_ANTENNA_REF_ALTITUDE_M,
+)
+
 # Calán Observatory (Auxiliary)
-CALAN_LATITUDE_DEG: float = float(_get_external("CALAN_LATITUDE_DEG", -33.397222))
-CALAN_LONGITUDE_DEG: float = float(_get_external("CALAN_LONGITUDE_DEG", -70.536111))
-CALAN_ALTITUDE_M: float = float(_get_external("CALAN_ALTITUDE_M", 867.0))
+_calan_preset = None
+if _has_external("PRESET_LOCATIONS"):
+    _calan_preset = _get_external("PRESET_LOCATIONS", {}).get("Calan")
+if _calan_preset is not None:
+    _def_calan_lat, _def_calan_lon, _def_calan_alt = _calan_preset
+else:
+    _def_calan_lat, _def_calan_lon, _def_calan_alt = -33.39628, -70.536695, 860.0
+
+CALAN_LATITUDE_DEG: float = float(_get_external("CALAN_LATITUDE_DEG", _def_calan_lat))
+CALAN_LONGITUDE_DEG: float = float(_get_external("CALAN_LONGITUDE_DEG", _def_calan_lon))
+CALAN_ALTITUDE_M: float = float(_get_external("CALAN_ALTITUDE_M", _def_calan_alt))
 
 
 # ---------------------------------------------------------------------------
@@ -188,3 +216,15 @@ def get_frequency_channels_mhz(
 ) -> np.ndarray:
     """Returns array of channel center frequencies in MHz."""
     return f_start_mhz + np.arange(num_channels, dtype=np.float64) * df_mhz
+
+
+def get_default_charts_h5_path() -> Path:
+    """Returns default path to CHARTS virtual baseband HDF5 file."""
+    env_path = os.environ.get("CHARTS_DEFAULT_H5")
+    if env_path:
+        return Path(env_path)
+    return (
+        Path(__file__).resolve().parent.parent
+        / "scratch_charts_sim"
+        / "baseband_virtual.h5"
+    )

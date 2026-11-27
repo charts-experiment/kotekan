@@ -96,14 +96,14 @@ public:
     void set_array_dimension(int dim, int size, const std::string& name) {
         assert(dim < CHARTS_META_MAX_DIM);
         this->dim[dim] = size;
-        // GCC helpfully tries to warn us that the destination string may end up not
-        // NUL-terminated, which we know.
-#pragma GCC diagnostic push
-#if GCC_VERSION > 80000
-#pragma GCC diagnostic ignored "-Wstringop-truncation"
-#endif
-        strncpy(this->dim_name[dim], name.c_str(), CHARTS_META_MAX_DIMNAME);
-#pragma GCC diagnostic pop
+        // Copied by hand like set_name(): strncpy with a bound equal to the destination
+        // size trips -Wstringop-truncation. Same result: at most CHARTS_META_MAX_DIMNAME
+        // chars, zero-padded, not NUL-terminated when the name fills the field.
+        int len = name.length() < CHARTS_META_MAX_DIMNAME ? name.length() : CHARTS_META_MAX_DIMNAME;
+        for (int i = 0; i < len; i++)
+            this->dim_name[dim][i] = name[i];
+        for (int i = len; i < CHARTS_META_MAX_DIMNAME; i++)
+            this->dim_name[dim][i] = '\0';
     }
     void set_strides_simple() {
         // Compute the strides from the set dims assuming simple contiguous

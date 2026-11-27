@@ -18,11 +18,12 @@ Then open:
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import math
 import os
+from pathlib import Path
 import sys
 import time
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import dash
@@ -50,6 +51,7 @@ from constants import (
     get_default_charts_h5_path,
 )
 from kotekan_tracker_control import KotekanTrackerClient
+from sim.astro import datetime_to_lst_hours, equatorial_to_direction_cosines
 from plot_beam_patterns_and_outputs import (
     compute_array_factor_2d,
     compute_beam_cuts,
@@ -59,14 +61,16 @@ from plot_beam_patterns_and_outputs import (
 
 # Catalog of primary astronomical radio sources
 ASTRONOMICAL_TARGETS = {
-    "Vela Pulsar (PSR J0835-4510)": {"ra": 128.836, "dec": -45.176, "color": "#00FFCC"},
+    "Vela Pulsar (PSR J0835-4510)": {"ra": 128.8359, "dec": -45.1764, "color": "#00FFCC"},
     "Sagittarius A* (Galactic Center)": {
-        "ra": 266.417,
-        "dec": -29.008,
+        "ra": 266.4168,
+        "dec": -29.0078,
         "color": "#FF7043",
     },
-    "Centaurus A (NGC 5128)": {"ra": 201.365, "dec": -43.019, "color": "#AB47BC"},
-    "Crab Pulsar (PSR J0534+2200)": {"ra": 83.633, "dec": 22.014, "color": "#FFEE58"},
+    "Centaurus A (NGC 5128)": {"ra": 201.3651, "dec": -43.0191, "color": "#AB47BC"},
+    "Crab Pulsar (PSR J0534+2200)": {"ra": 83.6331, "dec": 22.0145, "color": "#FFEE58"},
+    "Pictor A": {"ra": 79.9572, "dec": -45.7788, "color": "#FF4081"},
+    "Fornax A (NGC 1316)": {"ra": 50.6738, "dec": -37.2082, "color": "#7C4DFF"},
     "Carén Local Zenith Field": {
         "ra": 24.346,
         "dec": CHARTS_LATITUDE_DEG,
@@ -969,14 +973,14 @@ def create_app(rest_host: str = "127.0.0.1", rest_port: int = 12048) -> dash.Das
             return ""
         try:
             if mode == "celestial":
-                now_s = time.time()
-                lst_hours = (
-                    now_s / 3600.0 * 1.0027379 + (CHARTS_LONGITUDE_DEG / 15.0)
-                ) % 24.0
+                now_dt = datetime.now(timezone.utc)
+                lst_hours = datetime_to_lst_hours(
+                    now_dt, longitude_deg=CHARTS_LONGITUDE_DEG
+                )
                 msg = client.steer_radec(
                     int(beam_id), float(ra), float(dec), float(lst_hours)
                 )
-                return f"[OK] Beam #{beam_id} steered to RA {ra:.3f}°, Dec {dec:.3f}°"
+                return f"[OK] Beam #{beam_id} steered to RA {ra:.3f}°, Dec {dec:.3f}° (LST={lst_hours:.3f}h)"
             else:
                 msg = client.steer_lm(
                     int(beam_id), float(l0), float(m0), float(dl), float(dm)
@@ -1182,22 +1186,15 @@ def create_app(rest_host: str = "127.0.0.1", rest_port: int = 12048) -> dash.Das
             )
         )
 
-        now_s = time.time()
-        lst_deg = (
-            (now_s / 3600.0 * 1.0027379 + (CHARTS_LONGITUDE_DEG / 15.0)) * 15.0
-        ) % 360.0
+        now_dt = datetime.now(timezone.utc)
+        lst_hours = datetime_to_lst_hours(
+            now_dt, longitude_deg=CHARTS_LONGITUDE_DEG
+        )
         for name, data in ASTRONOMICAL_TARGETS.items():
-            ha_rad = math.radians(lst_deg - data["ra"])
-            dec_rad = math.radians(data["dec"])
-            lat_rad = math.radians(CHARTS_LATITUDE_DEG)
-            l = -math.cos(dec_rad) * math.sin(ha_rad)
-            m = math.sin(dec_rad) * math.cos(lat_rad) - math.cos(dec_rad) * math.sin(
-                lat_rad
-            ) * math.cos(ha_rad)
-            n = math.sin(dec_rad) * math.sin(lat_rad) + math.cos(dec_rad) * math.cos(
-                lat_rad
-            ) * math.cos(ha_rad)
-            if n > 0:
+            l, m, n = equatorial_to_direction_cosines(
+                data["ra"], data["dec"], lst_hours, lat_deg=CHARTS_LATITUDE_DEG
+            )
+            if n > 0.0:
                 short_n = name.split("(")[0].strip()
                 fig_sky.add_trace(
                     go.Scatter(

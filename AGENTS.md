@@ -4,9 +4,9 @@ This is a high-performance, soft-realtime radio astronomy pipeline code. This is
 CHARTS fork notes
 -----------------
 
-This repository is the CHARTS fork of kotekan (github.com/charts-experiment/kotekan). The main development branch is `kotekan_charts`, not `develop`; upstream CHIME/CHORD kotekan lives on the `root` remote (github.com/kotekan/kotekan, branch `develop`). CHARTS is a different telescope than CHIME/CHORD: CHORD-specific production notes below (service daemon, `chord` branch, CI containers) describe upstream operations and do not apply to CHARTS deployments.
+This repository is the CHARTS fork of kotekan (github.com/charts-experiment/kotekan). The main development branch is `kotekan_charts_next` (`kotekan_charts` is an older ancestor), not `develop`; upstream CHIME/CHORD kotekan lives on the `root` remote (github.com/kotekan/kotekan, branch `develop`). CHARTS is a different telescope than CHIME/CHORD: CHORD-specific production notes below (service daemon, `chord` branch, CI containers) describe upstream operations and do not apply to CHARTS deployments.
 
-CHARTS-specific code lives in `lib/stages/chartsFEngineSim.*`, `lib/cuda/cudaDirectBeamTracker.*`, `lib/cuda/cudaBeamTrackerV5.*`, `lib/cuda/cudaTransientTrigger.*`, `charts/config/`, and `test_charts/` (simulation framework, beam tracker benchmarks, and pipeline visualizers). CHARTS pipelines run on the Trillium HPC cluster via Slurm scripts under `test_charts/`; GPU work targets the local GPU's compute capability rather than a hardcoded architecture. Constants and telescope parameters come from the sibling `charts-constants` package; do not hardcode instrument values.
+CHARTS-specific code lives in `lib/stages/chartsFEngineSim.*`, `lib/cuda/cudaDirectBeamTracker.*`, `lib/cuda/cudaBeamTrackerV5.*`, `lib/cuda/cudaTransientTrigger.*`, `charts/config/`, and `test_charts/` (simulation framework, beam tracker benchmarks, and pipeline visualizers). CHARTS pipelines run on the Trillium HPC cluster via Slurm scripts under `test_charts/slurm/`, which exist only on the `kotekan_charts_trillium` branch (they were removed from `kotekan_charts_next`); GPU work targets the local GPU's compute capability rather than a hardcoded architecture. Constants and telescope parameters come from the sibling `charts-constants` package; do not hardcode instrument values.
 
 
 Development
@@ -27,6 +27,15 @@ Fix unrelated bugs in a separate PR. Report a latent bug you notice; fix it in t
 Doxygen strings should exist where appropriate. Higher-level sphinx documentation is also available, and should be updated if appropriate. Code comments should generally be kept lean and explanatory, not verbose. Comments explaining past behavior, debugging steps, why code was removed, or previous functionality, are not generally needed, and can live in commit messages or PR descriptions.
 
 When reviewing, attempt to understand both the intent of previously existing code, and incoming changes, before providing feedback. Rather than merely providing feedback, explicit suggestions for changes are preferred.
+
+
+GPU stages
+----------
+
+Several `cudaProcess` stages often share one GPU, and two things are shared across all of them:
+
+- CUDA streams. Each command runs on one stream, chosen by role from its stage's `cuda_stream_base`: copy-in on `3*base+0`, copy-out on `3*base+1`, kernel on `3*base+2`. A command's own `cuda_stream` overrides this. Command queuing is locked per stream, so stages at the same base serialise against each other; independent pipelines should use different bases. A command must enqueue only onto its own `cuda_stream_id`. `execute()` should only enqueue, since the stage holds its stream locks while it runs; blocking waits belong in `wait_on_precondition()`. A stage whose commands use streams above its own three must raise `num_cuda_streams`, or startup refuses it.
+- Named GPU memory. `get_gpu_memory` and `get_gpu_memory_array` look regions up by name across the whole device. A region belongs to the first stage that takes it, and a second stage taking it is refused. GPU memory crosses between stages only through GPU ring buffers, which declare the share themselves. A command that first allocates a region in `execute()` must call `register_gpu_memory_name` from its constructor, so `--dry-run` catches the conflict.
 
 
 Writing

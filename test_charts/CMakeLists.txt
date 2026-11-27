@@ -7,6 +7,8 @@ if(CUDAToolkit_FOUND)
         ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cuda/cudaAntennaMask.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cuda/cudaBiSLC.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cuda/cudaTransientTrigger.cu
+        ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cuda/cudaRfiMitigation.cu
+        ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cuda/cudaPirateBeamQuantize.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/../lib/core/kotekanLogging.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../lib/core/errors.c)
 
@@ -22,6 +24,10 @@ if(CUDAToolkit_FOUND)
         ${CMAKE_CURRENT_SOURCE_DIR}/../external/fmt
         ${CMAKE_CURRENT_SOURCE_DIR}/../external/gputils/src_lib
         ${CMAKE_CURRENT_SOURCE_DIR}/../external/gputils/src_include)
+
+    if(WIN32)
+        list(INSERT COMMON_INCLUDE_DIRS 0 ${CMAKE_CURRENT_SOURCE_DIR}/win_compat)
+    endif()
 
     # 1. Benchmark Kotekan CUDA Tracker V5
     add_executable(benchmark_kotekan_cuda_tracker_v5 benchmark_kotekan_cuda_tracker_v5.cpp
@@ -83,4 +89,55 @@ if(CUDAToolkit_FOUND)
                                                 ${COMMON_TEST_SRCS})
     target_link_libraries(test_transient_trigger_suite PRIVATE CUDA::cudart Threads::Threads)
     target_include_directories(test_transient_trigger_suite PRIVATE ${COMMON_INCLUDE_DIRS})
+
+    # 1. Chained GPU Pipeline Verification Suite: Masking -> Direct Tracker -> MVDR / BiSLC
+    add_executable(test_chained_mask_tracker_mvdr_suite test_chained_mask_tracker_mvdr_suite.cpp
+                                                        ${COMMON_TEST_SRCS}
+                                                        ${CMAKE_CURRENT_SOURCE_DIR}/../lib/utils/chartsMvdr.cpp)
+    target_link_libraries(test_chained_mask_tracker_mvdr_suite PRIVATE CUDA::cudart Threads::Threads)
+    target_include_directories(test_chained_mask_tracker_mvdr_suite PRIVATE ${COMMON_INCLUDE_DIRS})
+
+    # 1. Dynamic Gains Loader & Calibration Math Unit Test Suite
+    add_executable(test_phase1_gains_loader test_phase1_gains_loader.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/../lib/utils/chartsMvdr.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/../lib/core/kotekanLogging.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/../lib/core/errors.c)
+    target_link_libraries(test_phase1_gains_loader PRIVATE Threads::Threads)
+    target_include_directories(test_phase1_gains_loader PRIVATE ${COMMON_INCLUDE_DIRS})
+
+    # 1. Lightweight GPU RFI Mitigation Stage Test & Benchmark Suite
+    add_executable(test_rfi_mitigation_stage test_rfi_mitigation_stage.cpp ${COMMON_TEST_SRCS})
+    target_link_libraries(test_rfi_mitigation_stage PRIVATE CUDA::cudart Threads::Threads)
+    target_include_directories(test_rfi_mitigation_stage PRIVATE ${COMMON_INCLUDE_DIRS})
+
+    # 1. Pirate FRB Beam Quantizer Test Suite
+    add_executable(test_pirate_beam_quantize_suite test_pirate_beam_quantize_suite.cpp
+                                                   ${COMMON_TEST_SRCS})
+    target_link_libraries(test_pirate_beam_quantize_suite PRIVATE CUDA::cudart Threads::Threads)
+    target_include_directories(test_pirate_beam_quantize_suite PRIVATE ${COMMON_INCLUDE_DIRS})
+
+    # 11. Wave 3A Blackwell MMA & 2D FFT GPU Scaling Test Suite
+    add_executable(test_wave3_gpu_scaling_suite test_wave3_gpu_scaling_suite.cpp
+                                                ${COMMON_TEST_SRCS})
+    target_link_libraries(test_wave3_gpu_scaling_suite PRIVATE CUDA::cudart Threads::Threads)
+    target_include_directories(test_wave3_gpu_scaling_suite PRIVATE ${COMMON_INCLUDE_DIRS})
+
+    # 12. Wave 3B Beam Upchannelizer Test Suite
+    add_executable(
+        test_beam_upchannelize_suite
+        test_beam_upchannelize_suite.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cuda/cudaBeamUpchannelize.cu
+        ${CMAKE_CURRENT_SOURCE_DIR}/../lib/core/kotekanLogging.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../lib/core/errors.c)
+    target_link_libraries(test_beam_upchannelize_suite PRIVATE CUDA::cudart Threads::Threads)
+    target_include_directories(test_beam_upchannelize_suite PRIVATE ${COMMON_INCLUDE_DIRS})
+
+    # 13. Wave 4A Multi-Beam Sub-Frame Coincidence & Transient Trigger Test Suite
+    add_executable(
+        test_transient_trigger_multibeam_suite
+        test_transient_trigger_multibeam_suite.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cuda/cudaTransientTrigger.cu
+        ${CMAKE_CURRENT_SOURCE_DIR}/../lib/core/kotekanLogging.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../lib/core/errors.c)
+    target_link_libraries(test_transient_trigger_multibeam_suite PRIVATE CUDA::cudart Threads::Threads)
+    target_include_directories(test_transient_trigger_multibeam_suite PRIVATE ${COMMON_INCLUDE_DIRS})
 endif()

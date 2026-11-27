@@ -218,6 +218,8 @@ gpu:
           time_unroll: 4
           beam_tile_size: 4
           enable_cuda_graph: false
+          gains_file: /home/fpalma/kotekan/charts/config/gains/gains_sun_transit_1027_interp.npy
+          gains_antennas: [0, 5, 32, 37]
           enable_grid_mode: false
           grid_step: 0.02
           site_lat_deg: -33.4211146
@@ -296,6 +298,8 @@ gpu:
           time_unroll: 4
           beam_tile_size: 4
           enable_cuda_graph: false
+          gains_file: /home/fpalma/kotekan/charts/config/gains/gains_sun_transit_1027_interp.npy
+          gains_antennas: [0, 5, 32, 37]
           enable_grid_mode: false
           grid_step: 0.02
           site_lat_deg: -33.4211146

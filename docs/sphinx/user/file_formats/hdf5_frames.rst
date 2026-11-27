@@ -156,7 +156,7 @@ Multi-frame constraints
 Multi-frame files (with a fixed number of frames per file) use the same path
 as the single-file mode, and are thus subject to most of the same restrictions.
 The only difference is that the multi-frame write mode allows for non-contiguous
-``fpga_seq_num``s; however, a new file is created whenever a non-contiguous
+values of ``fpga_seq_num``; however, a new file is created whenever a non-contiguous
 sample is received, which can result in significantly more files than expected
 being created.
 
@@ -229,7 +229,8 @@ as dotted scalar attributes (``time_center_eop.t_inst_ns``,
 ``n_rfi_only_fpga_ticks``, ``n_pl_fpga_ticks``,
 ``n_rfi_first_stage_enabled_fpga_ticks``;
 ``rfi_frame_excision_enabled``, ``rfi_frame_excision_num``,
-``rfi_frame_excision_threshold``, ``rfi_frame_excision_fraction``; and the
+``rfi_frame_excision_threshold``, ``rfi_frame_excision_fraction``,
+``fringestop_enabled``; and the
 telescope geometry set (``itrs_lat_deg``, ``itrs_lon_deg``,
 ``grid_orientation``, ``grid_size_x``, ``grid_size_y``,
 ``feed_separation_x_m``, ``feed_separation_y_m``,

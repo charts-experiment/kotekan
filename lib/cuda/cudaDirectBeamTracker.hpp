@@ -24,6 +24,26 @@ enum class DirectPolLayout : int {
     PLANAR = 1       // [time][freq][pol][ant] -> elem = pol * n_ant + ant
 };
 
+enum class DirectInputFormat : uint8_t {
+    INT4X2 = 0,                    // Two's complement: low nibble = real, high nibble = imag
+    INT4X2_SWAPPED_WITHOFFSET = 1  // Swapped with offset (+8): high nibble = real + 8, low nibble = imag + 8
+};
+
+enum class DirectBeamformerMode : int {
+    DIRECT = 0,       // Arbitrary tracked sky directions (FP32 FMA / Tensor Core WMMA)
+    FFT_2D_ALLSKY = 1 // Separable 2D factorized 8x8 (64) or 16x16 (256) stationary all-sky FFT
+};
+
+inline DirectBeamformerMode parse_beamformer_mode(const std::string& s) {
+    if (s == "fft_2d_allsky" || s == "fft_2d" || s == "allsky_fft")
+        return DirectBeamformerMode::FFT_2D_ALLSKY;
+    return DirectBeamformerMode::DIRECT;
+}
+
+inline const char* beamformer_mode_to_string(DirectBeamformerMode m) {
+    return (m == DirectBeamformerMode::FFT_2D_ALLSKY) ? "fft_2d_allsky" : "direct";
+}
+
 enum class DirectTaperType : int {
     NONE = 0, // Uniform weights (first sidelobe ~ -13.2 dB)
     COSINE_PEDESTAL =
@@ -107,7 +127,10 @@ struct DirectBeamTarget {
     DirectDirection3D direction{0.0f, 0.0f, 1.0f};
     DirectDirection3D direction_end{0.0f, 0.0f, 1.0f};
     DirectCelestialTarget celestial;
+    std::string tle_name;
+    int norad_id = 0;
     int grid_index = -1;
+    bool calibrated = true;
 };
 
 struct DirectBeamTrackerConfig {
@@ -127,17 +150,45 @@ struct DirectBeamTrackerConfig {
     std::size_t time_unroll = 4;
     std::size_t beam_tile_size = 4;
     bool enable_grid_mode = false;
+    bool compute_power_inline_only = false;
     float grid_step = 0.02f;
     bool enable_cuda_graph = false;
     bool enable_subframe_interpolation = true;
+    bool enable_tensor_core = true;
+    DirectBeamformerMode beamformer_mode = DirectBeamformerMode::DIRECT;
+    std::size_t fft_2d_size = 16;
 
     // Fused 2D Spatial Tapering & Optional Weight-Space BiSLC
     DirectTaperType taper_type = DirectTaperType::COSINE_PEDESTAL;
     float taper_pedestal = 0.25f;
     bool enable_weight_bislc = false;
     float bislc_diagonal_loading = 1.0e-4f;
+    // false: sum(w^2) = 1 per pol (noise power independent of the number of active antennas).
+    // true: sum(w) = 1 per pol (a source gives the same beam amplitude for any number of active
+    // antennas; the noise power scales as 1/N). Do not combine with enable_weight_bislc.
+    bool coherent_gain_normalization = false;
+    // When false, taper weights are unnormalized (ta), so the formed beam voltage is the raw sum
+    // without dividing by sqrt(N_active) or N_active.
+    bool normalize_weights = true;
+    // Global calibration toggle (when false, ignores calibration gains across all beams for A/B checks).
+    bool apply_calibration_gains = true;
+
+    std::uint64_t effective_beam_calibration_mask() const {
+        if (!apply_calibration_gains)
+            return 0ULL;
+        std::uint64_t mask = 0ULL;
+        const std::size_t n = std::min<std::size_t>(MAX_DIRECT_BEAMS, targets.size());
+        for (std::size_t b = 0; b < n; ++b) {
+            if (targets[b].calibrated)
+                mask |= (1ULL << b);
+        }
+        return mask;
+    }
 
     std::array<std::uint8_t, MAX_DIRECT_ANTENNAS> antenna_mask;
+    std::array<std::uint8_t, MAX_DIRECT_ANTENNAS> calibration_valid_mask;
+    bool calibration_mask_initialized = false;
+    std::uint64_t calibration_mask_generation = 0;
     std::array<float3, MAX_DIRECT_ANTENNAS> antenna_positions;
     std::array<float, MAX_DIRECT_ANTENNAS> normalized_taper_weights;
     DirectSiteLocation site;
@@ -150,6 +201,7 @@ struct DirectBeamTrackerConfig {
 
     DirectBeamTrackerConfig() {
         antenna_mask.fill(1);
+        calibration_valid_mask.fill(1);
         normalized_taper_weights.fill(0.0f);
         set_antenna_grid(64, 1, spacing_m, DirectPolLayout::INTERLEAVED, true, 8);
     }
@@ -209,12 +261,13 @@ struct DirectBeamTrackerConfig {
         const float rx = std::max(1e-6f, 0.5f * (max_x - min_x));
         const float ry = std::max(1e-6f, 0.5f * (max_y - min_y));
 
-        // 2. Evaluate unnormalized 2D window t_a and accumulate sum(t_a^2) per polarization
+        // 2. Evaluate unnormalized 2D window t_a and accumulate sum(t_a^2) (or sum(t_a) when
+        //    coherent_gain_normalization is set) per polarization
         double sum_sq_pol[2] = {0.0, 0.0};
         std::size_t active_cnt = 0;
 
         for (std::size_t r = 0; r < elem_limit; ++r) {
-            if (antenna_mask[r] == 0) {
+            if (antenna_mask[r] == 0 || calibration_valid_mask[r] == 0) {
                 normalized_taper_weights[r] = 0.0f;
                 continue;
             }
@@ -227,19 +280,28 @@ struct DirectBeamTrackerConfig {
 
             normalized_taper_weights[r] = ta;
             const std::size_t pol = raw_elem_to_pol(r) & 1U;
-            sum_sq_pol[pol] += static_cast<double>(ta) * static_cast<double>(ta);
+            sum_sq_pol[pol] += coherent_gain_normalization
+                                   ? static_cast<double>(ta)
+                                   : static_cast<double>(ta) * static_cast<double>(ta);
         }
         num_active_antennas = active_cnt;
 
-        // 3. L2 normalization per polarization: guarantees sum_{a in pol} norm_taper[a]^2 == 1.0
-        const float inv_norm_pol[2] = {
-            (sum_sq_pol[0] > 0.0) ? static_cast<float>(1.0 / std::sqrt(sum_sq_pol[0])) : 0.0f,
-            (sum_sq_pol[1] > 0.0) ? static_cast<float>(1.0 / std::sqrt(sum_sq_pol[1])) : 0.0f};
+        // 3. Normalization per polarization: sum_{a in pol} norm_taper[a]^2 == 1.0 (default), or
+        //    sum_{a in pol} norm_taper[a] == 1.0 with coherent_gain_normalization.
+        //    If normalize_weights is false, weights remain raw taper values ta (unnormalized).
+        if (normalize_weights) {
+            const auto inv_norm = [this](double s) {
+                if (s <= 0.0)
+                    return 0.0f;
+                return static_cast<float>(coherent_gain_normalization ? 1.0 / s : 1.0 / std::sqrt(s));
+            };
+            const float inv_norm_pol[2] = {inv_norm(sum_sq_pol[0]), inv_norm(sum_sq_pol[1])};
 
-        for (std::size_t r = 0; r < elem_limit; ++r) {
-            if (antenna_mask[r] != 0) {
-                const std::size_t pol = raw_elem_to_pol(r) & 1U;
-                normalized_taper_weights[r] *= inv_norm_pol[pol];
+            for (std::size_t r = 0; r < elem_limit; ++r) {
+                if (antenna_mask[r] != 0 && calibration_valid_mask[r] != 0) {
+                    const std::size_t pol = raw_elem_to_pol(r) & 1U;
+                    normalized_taper_weights[r] *= inv_norm_pol[pol];
+                }
             }
         }
     }
@@ -267,7 +329,10 @@ struct DirectBeamTrackerConfig {
                 const std::size_t phys_ant = raw_elem_to_physical_ant(r);
                 const std::size_t col = phys_ant % grid_cols;
                 const std::size_t row = phys_ant / grid_cols;
-                antenna_positions[r] = make_float3(static_cast<float>(col) * spacing_m,
+                // CHARTS physical ENU convention: Chain 0 (col=0, D00/A10) is on the East edge
+                // and Chain 7 (col=7, D07/A17) is on the West edge, so East (x) is -col * spacing_m
+                // and North (y) is +row * spacing_m.
+                antenna_positions[r] = make_float3(-static_cast<float>(col) * spacing_m,
                                                    static_cast<float>(row) * spacing_m, 0.0f);
             } else {
                 antenna_positions[r] = make_float3(0.0f, 0.0f, 0.0f);
@@ -281,8 +346,17 @@ struct DirectBeamTrackerConfig {
     }
 };
 
+struct SkyGridIndex {
+    float step = 0.02f;
+    int n_steps = 0;
+    std::vector<float2> directions;
+    std::vector<int> offset_lut;
+};
+
 std::vector<float2> generate_sky_grid_directions(float step = 0.02f);
+SkyGridIndex build_sky_grid_index(float step = 0.02f);
 int lookup_nearest_sky_grid(float l, float m, const std::vector<float2>& grid_directions);
+int lookup_nearest_sky_grid_o1(float l, float m, const SkyGridIndex& grid_index);
 
 inline void compute_celestial_direction(double ra_deg, double dec_deg, double lst_hours,
                                         double lat_deg, DirectDirection3D& out_dir) {
@@ -316,7 +390,9 @@ void launch_direct_beamformer(const int4x2_t* d_packed, const float2* d_weights,
                               std::size_t max_beams_stride, std::size_t time_chunk_size = 256,
                               std::size_t time_unroll = 4, std::size_t beam_tile_size = 4,
                               cudaStream_t stream = nullptr, std::size_t n_pol = 1,
-                              DirectPolLayout pol_layout = DirectPolLayout::INTERLEAVED);
+                              DirectPolLayout pol_layout = DirectPolLayout::INTERLEAVED,
+                              DirectInputFormat input_format = DirectInputFormat::INT4X2,
+                              bool enable_tensor_core = true);
 
 inline void launch_direct_beamformer(const int4x2_t* d_packed, const float2* d_weights,
                                      float2* d_voltages, std::size_t n_time, std::size_t n_freq,
@@ -325,11 +401,39 @@ inline void launch_direct_beamformer(const int4x2_t* d_packed, const float2* d_w
                                      std::size_t time_chunk_size = 256, std::size_t time_unroll = 4,
                                      std::size_t beam_tile_size = 4, cudaStream_t stream = nullptr,
                                      std::size_t n_pol = 1,
-                                     DirectPolLayout pol_layout = DirectPolLayout::INTERLEAVED) {
+                                     DirectPolLayout pol_layout = DirectPolLayout::INTERLEAVED,
+                                     DirectInputFormat input_format = DirectInputFormat::INT4X2,
+                                     bool enable_tensor_core = true) {
     launch_direct_beamformer(d_packed, d_weights, nullptr, d_voltages, n_time, n_freq, n_ant,
                              num_active_beams, max_beams_stride, time_chunk_size, time_unroll,
-                             beam_tile_size, stream, n_pol, pol_layout);
+                             beam_tile_size, stream, n_pol, pol_layout, input_format,
+                             enable_tensor_core);
 }
+
+/**
+ * @brief Separable 2D all-sky FFT beamformer for an 8x8 array (N_FFT = 8 -> 64 beams,
+ *        or zero-padded N_FFT = 16 -> 256 oversampled beams).
+ *
+ * Applies optional per-(freq, elem) calibration correctors and scalar taper weights prior
+ * to 2D separable Cooley-Tukey FFT with centered zenith at beam (N_FFT/2, N_FFT/2).
+ */
+void launch_factorized_2d_fft_beamformer(
+    const int4x2_t* d_packed, float2* d_voltages, float* d_power,
+    const float2* d_calibration_gains, const float* d_norm_taper, const std::uint8_t* d_rfi_mask,
+    std::size_t n_time, std::size_t n_freq, std::size_t fft_size, std::size_t max_beams_stride,
+    std::size_t time_chunk_size = 256, bool descending_order = true, cudaStream_t stream = nullptr,
+    DirectInputFormat input_format = DirectInputFormat::INT4X2);
+
+/**
+ * @brief Separable two-stage factorized 2D DFT beamformer (BURSTT-256 Eq. 1-5):
+ *        B(q, p) = sum_row B_y[q, row] * (sum_col B_x[p, col] * V(row, col)).
+ */
+void launch_factorized_2d_dft_beamformer(
+    const int4x2_t* d_packed, const float2* d_bx_weights, const float2* d_by_weights,
+    float2* d_voltages, std::size_t n_time, std::size_t n_freq, std::size_t nx_beams,
+    std::size_t ny_beams, std::size_t max_beams_stride, std::size_t time_chunk_size = 256,
+    bool descending_order = true, cudaStream_t stream = nullptr,
+    DirectInputFormat input_format = DirectInputFormat::INT4X2);
 
 void set_l2_persisting_weights_policy(cudaStream_t stream, const void* ptr, std::size_t bytes);
 
@@ -343,17 +447,19 @@ void launch_generate_steering_weights_tapered(
     const float3* d_antenna_positions, const float* d_norm_taper, const float2* d_calibration_gains,
     std::size_t num_beams, std::size_t n_freq, std::size_t n_elem, std::size_t n_time,
     bool enable_weight_bislc = false, float bislc_diag_loading = 1.0e-4f,
-    cudaStream_t stream = nullptr);
+    cudaStream_t stream = nullptr, std::uint64_t beam_calibration_mask = ~0ULL);
 
 inline void launch_generate_steering_weights_tapered(
     float2* d_weights, const DirectDirection3D* d_directions, const double* d_wavenumbers,
     const float3* d_antenna_positions, const float* d_norm_taper, const float2* d_calibration_gains,
     std::size_t num_beams, std::size_t n_freq, std::size_t n_elem, bool enable_weight_bislc = false,
-    float bislc_diag_loading = 1.0e-4f, cudaStream_t stream = nullptr) {
+    float bislc_diag_loading = 1.0e-4f, cudaStream_t stream = nullptr,
+    std::uint64_t beam_calibration_mask = ~0ULL) {
     launch_generate_steering_weights_tapered(d_weights, nullptr, d_directions, nullptr,
                                              d_wavenumbers, d_antenna_positions, d_norm_taper,
                                              d_calibration_gains, num_beams, n_freq, n_elem, 0,
-                                             enable_weight_bislc, bislc_diag_loading, stream);
+                                             enable_weight_bislc, bislc_diag_loading, stream,
+                                             beam_calibration_mask);
 }
 
 /**
@@ -420,7 +526,17 @@ inline void launch_precompute_sky_grid(float2* d_grid_weights, const float2* d_g
 void launch_reduce_beam_power(const float2* d_voltages, float* d_power, std::size_t n_time,
                               std::size_t n_freq, std::size_t active_beams,
                               std::size_t max_beams_stride, cudaStream_t stream = nullptr,
-                              std::size_t n_pol = 1);
+                              std::size_t n_pol = 1, const std::uint8_t* d_rfi_mask = nullptr,
+                              std::size_t chunk_size = 256);
+
+void launch_direct_beamformer_power_only(
+    const int4x2_t* d_packed, const float2* d_weights, const float2* d_step_weights,
+    float* d_power, std::size_t n_time, std::size_t n_freq, std::size_t n_ant,
+    std::size_t num_active_beams, std::size_t max_beams_stride, std::size_t time_chunk_size = 256,
+    std::size_t time_unroll = 4, std::size_t beam_tile_size = 4, cudaStream_t stream = nullptr,
+    std::size_t n_pol = 1, DirectPolLayout pol_layout = DirectPolLayout::INTERLEAVED,
+    DirectInputFormat input_format = DirectInputFormat::INT4X2,
+    const std::uint8_t* d_rfi_mask = nullptr);
 
 } // namespace kotekan
 

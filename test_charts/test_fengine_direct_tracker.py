@@ -35,39 +35,9 @@ from constants import (
     DEFAULT_FREQUENCY_START_MHZ,
     CHARTS_CHANNEL_WIDTH_MHZ,
     FPGA_TIME_RESOLUTION_US,
+    get_antenna_positions,
 )
-
-
-def unpack_int4x2(
-    u8_array: np.ndarray, format_type: str = "twos_complement"
-) -> np.ndarray:
-    """
-    Unpacks 4-bit complex int4x2 values (real and imag nibbles) to complex64.
-    """
-    if "offset" in format_type.lower():
-        real = (u8_array & 0x0F).astype(np.float32) - 8.0
-        imag = (u8_array >> 4).astype(np.float32) - 8.0
-    else:
-        r = (u8_array & 0x0F).astype(np.int8)
-        i = (u8_array >> 4).astype(np.int8)
-        r[r >= 8] -= 16
-        i[i >= 8] -= 16
-        real = r.astype(np.float32)
-        imag = i.astype(np.float32)
-    return real + 1j * imag
-
-
-def get_antenna_positions(num_antennas: int, spacing_m: float = DEFAULT_SPACING_M):
-    """
-    Returns (pos_x, pos_y) arrays for 64 (8x8) or 256 (16x16) array.
-    """
-    if num_antennas <= 64:
-        cols = np.arange(num_antennas) & 7
-        rows = np.arange(num_antennas) >> 3
-    else:
-        cols = np.arange(num_antennas) & 15
-        rows = np.arange(num_antennas) >> 4
-    return cols * spacing_m, rows * spacing_m
+from sim.writer import unpack_int4x2
 
 
 def beamform_direct(

@@ -28,23 +28,8 @@ from constants import (
     DEFAULT_FREQUENCY_START_MHZ,
     CHARTS_CHANNEL_WIDTH_MHZ,
     FPGA_TIME_RESOLUTION_US,
+    get_antenna_positions,
 )
-
-
-def get_antenna_positions(num_antennas: int, spacing_m: float = DEFAULT_SPACING_M):
-    """
-    Computes (x, y) physical coordinates for 64 (8x8) or 256 (16x16) array.
-    """
-    if num_antennas <= 64:
-        cols = np.arange(num_antennas) & 7
-        rows = np.arange(num_antennas) >> 3
-    else:
-        cols = np.arange(num_antennas) & 15
-        rows = np.arange(num_antennas) >> 4
-
-    pos_x = cols * spacing_m
-    pos_y = rows * spacing_m
-    return pos_x, pos_y
 
 
 def generate_fengine_data(

@@ -258,7 +258,7 @@ public:
     /**
      * @brief Create and write a file for a frame with chordMetadata
      *
-     * @param full_path The full path, including file name, for the file.
+     * @param frame_counter Frame number used to choose the output file.
      * @param frame uint8_t pointer to the frame data
      * @param meta shared pointer to the chordMetadata object for this frame.
      * @param frame_desc shared pointer to the NDarray description for this frame.
@@ -517,7 +517,7 @@ public:
     /**
      * @brief Create and write a file for an N2FrameView
      *
-     * @param full_path The full path, including file name, for the file.
+     * @param frame_counter Frame number used to choose the output file.
      * @param frame An N2FrameView object for the frame to output.
      */
     void write_n2(const N2FrameView& frame, const std::int64_t frame_counter) {
@@ -617,6 +617,7 @@ public:
         file.createAttribute("n_rfi_first_stage_enabled_fpga_ticks",
                              frame.n_rfi_first_stage_enabled_fpga_ticks);
         file.createAttribute("rfi_frame_excision_enabled", frame.rfi_frame_excision_enabled);
+        file.createAttribute("fringestop_enabled", frame.fringestop_enabled);
         file.createAttribute("rfi_frame_excision_num", frame.rfi_frame_excision_num);
         file.createAttribute("rfi_frame_excision_threshold", frame.rfi_frame_excision_threshold);
         file.createAttribute("rfi_frame_excision_fraction", frame.rfi_frame_excision_fraction);

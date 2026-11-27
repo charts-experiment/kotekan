@@ -261,7 +261,8 @@ dpdk:
         - [0]                      # lcore 3 handles NIC port 0
         - [1]                      # lcore 5 handles NIC port 1
     max_rx_pkt_len: 9000
-    num_mbufs: 9600
+    rx_ring_size: 4096
+    num_mbufs: 65536
     mbuf_data_size: 9216
 
     handlers:
@@ -302,7 +303,7 @@ zero_samples_1:
 # GPU Tri-Engine Processing Stages (NVIDIA RTX 5090 GPU 0)
 # ------------------------------------------------------------------------------
 gpu:
-    profiling: false
+    profiling: true
     kernel_path: "lib/cuda/kernels"
     frame_arrival_period: 0.0512
 
@@ -321,6 +322,7 @@ gpu:
           num_local_freq: 336
           samples_per_data_set: 15360
           buffer_depth: 3
+          sample_stride: 4
           antenna_order: "descending"
           active_antennas: [0, 4, 5, 6, 32]
           auto_detect_enabled: true
@@ -428,6 +430,7 @@ gpu:
           num_local_freq: 336
           samples_per_data_set: 15360
           buffer_depth: 3
+          sample_stride: 4
           antenna_order: "descending"
           active_antennas: [0, 4, 5, 6, 32]
           auto_detect_enabled: true

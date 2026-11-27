@@ -165,11 +165,13 @@ def pack_int4x2(voltages: np.ndarray) -> np.ndarray:
     return (r_nibble | i_nibble).astype(np.uint8)
 
 
-def unpack_int4x2(packed: np.ndarray) -> np.ndarray:
+def unpack_int4x2(
+    packed: np.ndarray, format_type: str = "twos_complement"
+) -> np.ndarray:
     """Unpack int4x2 uint8 array into complex64 values.
 
     Extracts signed 4-bit real (low nibble) and imaginary (high nibble) components
-    using two's complement sign extension:
+    using two's complement sign extension (default) or offset-binary:
       r = (Byte & 0x0F), sign-extended from 4 to 8 bits
       i = ((Byte >> 4) & 0x0F), sign-extended from 4 to 8 bits
       v = r + 1j * i
@@ -182,6 +184,8 @@ def unpack_int4x2(packed: np.ndarray) -> np.ndarray:
     ----------
     packed : np.ndarray
         uint8 packed array.
+    format_type : str
+        'twos_complement' (standard) or 'offset' / 'int4x2_swapped_withoffset'.
 
     Returns
     -------
@@ -189,6 +193,11 @@ def unpack_int4x2(packed: np.ndarray) -> np.ndarray:
         complex64 array with the same shape as `packed`.
     """
     u8 = np.asarray(packed, dtype=np.uint8)
+    if "offset" in format_type.lower():
+        real = (u8 & 0x0F).astype(np.float32) - 8.0
+        imag = (u8 >> 4).astype(np.float32) - 8.0
+        return real + 1j * imag
+
     r = (u8 & 0x0F).astype(np.int8)
     r[r >= 8] -= 16
 

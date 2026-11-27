@@ -64,11 +64,13 @@ private:
     double* _d_wavenumbers = nullptr;
     float3* _d_antenna_positions = nullptr;
     std::uint8_t* _d_antenna_mask = nullptr;
+    float* _d_norm_taper = nullptr;
 
     // Pinned host buffers for DMA-safe, asynchronous streaming
     DirectDirection3D* _h_directions = nullptr;
     float3* _h_antenna_positions = nullptr;
     std::uint8_t* _h_antenna_mask = nullptr;
+    float* _h_norm_taper = nullptr;
 
     // Host staging for telemetry inspection
     std::vector<float2> _h_coupling_matrices;

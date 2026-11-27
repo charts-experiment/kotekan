@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cstdint>
@@ -21,8 +22,10 @@
 #include <fstream>
 #include <immintrin.h>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <packet_copy.h>
+#include <set>
 #include <string>
 #include <util.h>
 #include <vector>
@@ -138,9 +141,13 @@ protected:
     uint64_t alignment = 0;
 
     // For test and start
+    // The warmup starts at the first packet the lcore polls: dpdkCore starts polling only after
+    // lcore_start_delay, and the packets queued in the rx ring by then are stale.
+    // update_stats() runs on another thread and reads start_time only once warmup_started is set.
     double warmup_time = 10.0; // seconds
     std::chrono::steady_clock::time_point start_time;
-    bool in_warmup = true;
+    std::atomic<bool> warmup_started{false};
+    std::atomic<bool> in_warmup{true};
     double last_status_message_time = 0.0;
 
     // Metadata
@@ -292,46 +299,31 @@ protected:
 
     bool align_first_packet(uint64_t spec);
 
-    /**
-     * Check startup alignment across all RFSoC shuffle handlers in this process.
-     * UINT64_MAX resets the shared state.
-     * Reset only during construction, before any packet processing starts.
-     * The first boundary is accepted; subsequent boundaries must match it.
-     */
-    inline bool check_cross_handler_alignment(uint64_t seq_num) {
+    static inline std::mutex& alignment_mutex_ref() {
         static std::mutex alignment_mutex;
-        static uint64_t alignment_first_seq = std::numeric_limits<uint64_t>::max();
-        static uint64_t first_alignment = 0;
-        static uint64_t first_specs_per_frame = 0;
-        std::lock_guard<std::mutex> alignment_lock(alignment_mutex);
+        return alignment_mutex;
+    }
 
-        if (seq_num == std::numeric_limits<uint64_t>::max()) {
-            alignment_first_seq = std::numeric_limits<uint64_t>::max();
-            return true;
-        }
+    static inline std::set<int>& registered_ports_ref() {
+        static std::set<int> ports;
+        return ports;
+    }
 
-        if (alignment_first_seq == std::numeric_limits<uint64_t>::max()) {
-            alignment_first_seq = seq_num;
-            first_alignment = alignment;
-            first_specs_per_frame = specs_per_frame;
-            DEBUG("rfsocHandlerShuffle: Port {:d} set startup alignment to {:d}", port, seq_num);
-            return true;
-        }
+    static inline std::map<int, uint64_t>& port_first_seen_map_ref() {
+        static std::map<int, uint64_t> port_map;
+        return port_map;
+    }
 
-        if (alignment != first_alignment || specs_per_frame != first_specs_per_frame) {
-            ERROR("rfsocHandlerShuffle: Port {:d} has alignment {:d} and spectra per frame {:d}, "
-                  "expected alignment {:d} and spectra per frame {:d}",
-                  port, alignment, specs_per_frame, first_alignment, first_specs_per_frame);
-            return false;
-        }
+    static inline uint64_t& alignment_target_seq_ref() {
+        static uint64_t alignment_target_seq = std::numeric_limits<uint64_t>::max();
+        return alignment_target_seq;
+    }
 
-        if (seq_num != alignment_first_seq) {
-            ERROR("rfsocHandlerShuffle: Port {:d} got startup alignment {:d}, expected {:d}", port,
-                  seq_num, alignment_first_seq);
-            return false;
-        }
-
-        return true;
+    static inline void register_handler_for_alignment(int port) {
+        std::lock_guard<std::mutex> lock(alignment_mutex_ref());
+        registered_ports_ref().insert(port);
+        alignment_target_seq_ref() = std::numeric_limits<uint64_t>::max();
+        port_first_seen_map_ref().clear();
     }
 
     bool advance_frame(uint64_t new_seq, bool first_time = false);
@@ -387,7 +379,7 @@ inline rfsocHandlerShuffle::rfsocHandlerShuffle(kotekan::Config& config,
         FATAL_ERROR("rfsocHandlerShuffle: Alignment parameter must be set and greater than zero.");
     }
     // dpdkCore constructs every handler before launching packet-processing threads.
-    check_cross_handler_alignment(std::numeric_limits<uint64_t>::max());
+    register_handler_for_alignment(port);
 
     // Number of frames to capture before stopping, 0 = unlimited
     capture_n_frames = config.get_default<uint64_t>(unique_name, "capture_n_frames", 0);
@@ -483,8 +475,6 @@ inline rfsocHandlerShuffle::rfsocHandlerShuffle(kotekan::Config& config,
          "layout {:d} freq x {:d} elements, {:d} packets/spec.",
          port, first_subband, coarse_freq_start, num_local_freq, num_elements,
          expected_packets_per_spec);
-
-    start_time = std::chrono::steady_clock::now();
 };
 
 
@@ -494,6 +484,10 @@ inline int rfsocHandlerShuffle::handle_packet(struct rte_mbuf* mbuf) {
     // stabilize, and then start processing packets after that.
     if (in_warmup) {
         const auto now = std::chrono::steady_clock::now();
+        if (!warmup_started) {
+            start_time = now;
+            warmup_started = true;
+        }
         const double elapsed_time =
             std::chrono::duration_cast<std::chrono::duration<double>>(now - start_time).count();
         if (elapsed_time >= warmup_time) {
@@ -579,17 +573,46 @@ inline bool rfsocHandlerShuffle::align_first_packet(uint64_t spec) {
         FATAL_ERROR("rfsocHandlerShuffle: Alignment parameter must be set and greater than zero.");
     }
 
-    if ((spec % alignment) <= 1000) {
-        const uint64_t start_spec = spec - (spec % alignment);
-        INFO("rfsocHandlerShuffle: Port {:d} received spectrum {:d}, selected start spectrum {:d}",
-             port, spec, start_spec);
+    uint64_t target_spec = std::numeric_limits<uint64_t>::max();
+    {
+        std::lock_guard<std::mutex> lock(alignment_mutex_ref());
+        auto& seen_map = port_first_seen_map_ref();
+        seen_map[port] = spec;
 
-        if (!check_cross_handler_alignment(start_spec)) {
-            FATAL_ERROR("rfsocHandlerShuffle: Port {:d} failed startup alignment between handlers, "
-                        "closing kotekan!",
-                        port);
-            return false;
+        uint64_t& common_target = alignment_target_seq_ref();
+        if (common_target == std::numeric_limits<uint64_t>::max()) {
+            if (seen_map.size() >= registered_ports_ref().size()) {
+                uint64_t max_seen = 0;
+                for (const auto& [p, s] : seen_map) {
+                    if (s > max_seen) {
+                        max_seen = s;
+                    }
+                }
+                // Align to 2 full frames ahead of the highest seen spectrum so no port misses it
+                common_target = ((max_seen / alignment) + 2) * alignment;
+                INFO("rfsocHandlerShuffle: All {:d} network handlers active. Synchronizing startup "
+                     "alignment to spectrum {:d}",
+                     registered_ports_ref().size(), common_target);
+            }
         }
+        target_spec = common_target;
+    }
+
+    if (target_spec == std::numeric_limits<uint64_t>::max()) {
+        // Still waiting for remaining handlers to become active and receive packets
+        return false;
+    }
+
+    if (spec < target_spec) {
+        // Stream has not reached the synchronized target boundary yet
+        return false;
+    }
+
+    if (spec < target_spec + alignment) {
+        const uint64_t start_spec = target_spec;
+        INFO("rfsocHandlerShuffle: Port {:d} received spectrum {:d}, locked to common start "
+             "spectrum {:d}",
+             port, spec, start_spec);
 
         last_seq = cur_seq;
         got_first_packet = true;
@@ -600,6 +623,13 @@ inline bool rfsocHandlerShuffle::align_first_packet(uint64_t spec) {
         }
         return true;
     }
+
+    ERROR("rfsocHandlerShuffle: Port {:d} missed common startup alignment target {:d} (current "
+          "spec {:d})",
+          port, target_spec, spec);
+    FATAL_ERROR("rfsocHandlerShuffle: Port {:d} failed startup alignment between handlers, closing "
+                "kotekan!",
+                port);
     return false;
 }
 
@@ -613,15 +643,21 @@ inline bool rfsocHandlerShuffle::advance_frame(uint64_t new_spec, bool first_tim
 
     if (!first_time) {
         // Check for lost samples in the previous frame.
+        int32_t lost_in_frame = 0;
         for (uint64_t i = 0; i < specs_per_frame; i++) {
             const uint8_t missing_packet_mask = complete_packet_mask & ~packets_seen[i];
             if (missing_packet_mask == 0) {
                 mask_frame[i] = 0;
             } else {
                 mask_frame[i] = 1;
+                lost_in_frame += 1;
                 rx_lost_samples_total += 1;
                 rx_lost_packets_total += count_bits(missing_packet_mask);
             }
+        }
+        if (auto prev_meta =
+                std::dynamic_pointer_cast<chartsMetadata>(out_buf->get_metadata(out_frame_id))) {
+            prev_meta->set_lost_timesamples(lost_in_frame);
         }
 
         // DEBUG("advance_frame: closing frame_id {} start_spec {} valid_specs_total {}",
@@ -789,6 +825,9 @@ inline void rfsocHandlerShuffle::update_stats() {
     const double status_cadence = 1.0; // seconds
 
     if (in_warmup) {
+        if (!warmup_started) {
+            return;
+        }
         const auto now = std::chrono::steady_clock::now();
         const double elapsed_time =
             std::chrono::duration_cast<std::chrono::duration<double>>(now - start_time).count();

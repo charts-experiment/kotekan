@@ -47,22 +47,17 @@ from constants import (
     DEFAULT_SPACING_M,
     FPGA_TIME_RESOLUTION_US,
     get_default_charts_h5_path,
+    get_antenna_positions as get_antenna_positions_2d,
 )
+from sim.writer import unpack_int4x2 as unpack_4bit_complex
 
 
 def get_antenna_positions(
     n_ant: int, spacing_m: float = DEFAULT_SPACING_M
 ) -> np.ndarray:
     """Computes (x, y, z) coordinates for 32, 64, 128, or 256 array layout."""
-    if n_ant <= 64:
-        cols = np.arange(n_ant) & 7
-        rows = np.arange(n_ant) >> 3
-    else:
-        cols = np.arange(n_ant) & 15
-        rows = np.arange(n_ant) >> 4
-    return np.column_stack(
-        [cols * spacing_m, rows * spacing_m, np.zeros(n_ant, dtype=np.float32)]
-    )
+    px, py = get_antenna_positions_2d(n_ant, spacing_m)
+    return np.column_stack([px, py, np.zeros(n_ant, dtype=np.float32)])
 
 
 def compute_array_factor_2d(
@@ -163,15 +158,6 @@ def compute_beam_cuts(
     )
 
     return l_cut, P_ew_dB, m_cut, P_ns_dB
-
-
-def unpack_4bit_complex(u8_array: np.ndarray) -> np.ndarray:
-    """Unpack int4x2_t to complex64."""
-    real = (u8_array & 0x0F).astype(np.int8)
-    imag = (u8_array >> 4).astype(np.int8)
-    real[real >= 8] -= 16
-    imag[imag >= 8] -= 16
-    return real.astype(np.float32) + 1j * imag.astype(np.float32)
 
 
 def generate_beam_patterns_and_outputs_plot(

@@ -1,6 +1,10 @@
+#include "chartsConstants.hpp"
 #include "cudaAntennaMaskCommand.hpp"
 
+#include "chartsMetadata.hpp"
+#include "chordMetadata.hpp"
 #include "cudaDirectBeamTrackerCommand.hpp"
+#include "cudaRfiMitigationCommand.hpp"
 #include "cudaUtils.hpp"
 #include "gpuCommand.hpp"
 #include "kotekanLogging.hpp"
@@ -79,9 +83,17 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
         config.get_default<std::string>(unique_name, "gpu_mem_alive_voltages", "");
     _max_alive_antennas = config.get_default<int>(unique_name, "max_alive_antennas", _num_elements);
     _antenna_order = config.get_default<std::string>(unique_name, "antenna_order", "descending");
-    _freq_start_hz = config.get_default<double>(unique_name, "freq_start_hz", 300.0e6);
-    _subband_id =
-        config.get_default<int>(unique_name, "subband", (_freq_start_hz > 350.0e6 ? 1 : 0));
+    _freq_start_hz = config.get_default<double>(
+        unique_name, "freq_start_hz", charts::constants::subband0_freq_start_hz);
+    int default_subband = (_freq_start_hz > 350.0e6) ? 1 : 0;
+    if (!config.exists(unique_name, "subband") && !config.exists(unique_name, "freq_start_hz")) {
+        if (_gpu_mem_voltage.find("_1") != std::string::npos
+            || unique_name.find("_1") != std::string::npos) {
+            default_subband = 1;
+            _freq_start_hz = charts::constants::subband1_freq_start_hz;
+        }
+    }
+    _subband_id = config.get_default<int>(unique_name, "subband", default_subband);
 
     _last_active_mask.resize(_num_elements, 1);
     _last_power_rms.resize(_num_elements, 0.0f);
@@ -138,6 +150,8 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
             static_cast<std::uint16_t>(config.get_default<int>(unique_name, "revival_frames", 5));
         _shared_config.sample_stride =
             static_cast<std::size_t>(config.get_default<int>(unique_name, "sample_stride", 1));
+        _shared_config.auto_detect_cadence_frames = static_cast<std::size_t>(
+            config.get_default<int>(unique_name, "auto_detect_cadence_frames", 10));
 
         _shared_mask.fill(1);
         _shared_config.manual_mask.fill(1);
@@ -262,10 +276,28 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
                           });
 
                 if (!sorted_instances.empty()) {
+                    std::vector<int> seen_subbands;
                     for (std::size_t s = 0; s < sorted_instances.size(); ++s) {
                         auto* inst = sorted_instances[s];
+                        const int sb_id = inst->get_subband_id();
+                        if (std::find(seen_subbands.begin(), seen_subbands.end(), sb_id)
+                            != seen_subbands.end()) {
+                            continue;
+                        }
+                        // Pick the instance for this subband with the highest non-zero power
+                        for (std::size_t k = s + 1; k < sorted_instances.size(); ++k) {
+                            if (sorted_instances[k]->get_subband_id() == sb_id) {
+                                const auto p_cur = inst->get_last_power_rms();
+                                const auto p_alt = sorted_instances[k]->get_last_power_rms();
+                                if (!p_alt.empty() && (p_cur.empty() || p_alt[0] > p_cur[0])) {
+                                    inst = sorted_instances[k];
+                                }
+                            }
+                        }
+                        seen_subbands.push_back(sb_id);
+
                         nlohmann::json sub;
-                        sub["subband"] = inst->get_subband_id();
+                        sub["subband"] = sb_id;
                         sub["freq_start_hz"] = inst->get_freq_start_hz();
 
                         nlohmann::json act_mask = nlohmann::json::array();
@@ -292,7 +324,7 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
                 } else {
                     nlohmann::json sub;
                     sub["subband"] = 0;
-                    sub["freq_start_hz"] = 300.0e6;
+                    sub["freq_start_hz"] = charts::constants::subband0_freq_start_hz;
                     nlohmann::json act_mask = nlohmann::json::array();
                     nlohmann::json pwr_rms = nlohmann::json::array();
                     nlohmann::json clp_frac = nlohmann::json::array();
@@ -371,6 +403,8 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
                                          {"clip_fraction", m.clipping_fraction},
                                          {"kurtosis", m.kurtosis},
                                          {"iq_imbalance", m.iq_imbalance},
+                                         {"coherence", m.coherence},
+                                         {"passband_power", m.passband_power},
                                          {"robust_z_score", m.robust_z_score},
                                          {"clipped_count", m.clipped_count},
                                          {"consecutive_healthy", m.consecutive_healthy}});
@@ -547,6 +581,99 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
             };
             rest.register_post_callback("/antenna_mask/configure", config_cb);
 
+            // 6. GET /antenna_mask/channel_power
+            auto channel_power_cb = [](connectionInstance& conn) {
+                nlohmann::json reply;
+                std::lock_guard<std::mutex> lk(_global_mutex);
+
+                const int n_elem =
+                    static_cast<int>(std::min(_shared_config.total_elements(), MAX_MASK_ANTENNAS));
+                nlohmann::json subbands_json = nlohmann::json::array();
+
+                std::vector<cudaAntennaMaskCommand*> sorted_instances;
+                {
+                    std::lock_guard<std::mutex> reg_lk(_registry_mutex);
+                    sorted_instances = _instances;
+                }
+                std::sort(sorted_instances.begin(), sorted_instances.end(),
+                          [](const cudaAntennaMaskCommand* a, const cudaAntennaMaskCommand* b) {
+                              return a->get_freq_start_hz() < b->get_freq_start_hz();
+                          });
+
+                std::vector<int> seen_subbands;
+                for (std::size_t s = 0; s < sorted_instances.size(); ++s) {
+                    auto* inst = sorted_instances[s];
+                    const int sb_id = inst->get_subband_id();
+                    if (std::find(seen_subbands.begin(), seen_subbands.end(), sb_id)
+                        != seen_subbands.end()) {
+                        continue;
+                    }
+                    for (std::size_t k = s + 1; k < sorted_instances.size(); ++k) {
+                        if (sorted_instances[k]->get_subband_id() == sb_id) {
+                            const auto p_alt = sorted_instances[k]->get_last_channel_power();
+                            if (!p_alt.empty() && inst->get_last_channel_power().empty()) {
+                                inst = sorted_instances[k];
+                            }
+                        }
+                    }
+                    seen_subbands.push_back(sb_id);
+
+                    const auto ch_pwr = inst->get_last_channel_power();
+                    const auto m_mask = inst->get_last_active_mask();
+                    const auto m_pwr = inst->get_last_power_rms();
+                    const int n_f =
+                        (n_elem > 0) ? static_cast<int>(ch_pwr.size() / static_cast<std::size_t>(n_elem)) : 0;
+
+                    nlohmann::json sub;
+                    sub["subband"] = sb_id;
+                    sub["freq_start_hz"] = inst->get_freq_start_hz();
+                    sub["num_elements"] = n_elem;
+                    sub["num_local_freq"] = n_f;
+                    sub["has_channel_power"] = (n_f > 0);
+                    sub["power_rms"] = m_pwr;
+
+                    nlohmann::json active_phys = nlohmann::json::array();
+                    for (int a = 0; a < n_elem; ++a) {
+                        const bool active =
+                            (a < static_cast<int>(m_mask.size())) ? (m_mask[a] != 0) : (_shared_mask[a] != 0);
+                        if (active) {
+                            active_phys.push_back(_shared_config.raw_elem_to_physical_ant(a));
+                        }
+                    }
+                    sub["active_physical_antennas"] = active_phys;
+
+                    nlohmann::json mean_active = nlohmann::json::array();
+                    nlohmann::json matrix = nlohmann::json::array();
+                    for (int f = 0; f < n_f; ++f) {
+                        double sum_act = 0.0;
+                        int cnt_act = 0;
+                        nlohmann::json row = nlohmann::json::array();
+                        for (int a = 0; a < n_elem; ++a) {
+                            const float v = ch_pwr[static_cast<std::size_t>(f) * n_elem + a];
+                            row.push_back(v);
+                            const bool active =
+                                (a < static_cast<int>(m_mask.size())) ? (m_mask[a] != 0)
+                                                                      : (_shared_mask[a] != 0);
+                            if (active) {
+                                sum_act += static_cast<double>(v);
+                                cnt_act++;
+                            }
+                        }
+                        matrix.push_back(std::move(row));
+                        mean_active.push_back(
+                            (cnt_act > 0) ? static_cast<float>(sum_act / cnt_act) : 0.0f);
+                    }
+                    sub["mean_active_power"] = std::move(mean_active);
+                    sub["channel_power"] = std::move(matrix);
+                    subbands_json.push_back(std::move(sub));
+                }
+
+                reply["num_elements"] = n_elem;
+                reply["subbands"] = std::move(subbands_json);
+                conn.send_json_reply(reply);
+            };
+            rest.register_get_callback("/antenna_mask/channel_power", channel_power_cb);
+
             _endpoints_registered = true;
         }
     }
@@ -555,7 +682,8 @@ cudaAntennaMaskCommand::cudaAntennaMaskCommand(Config& config, const std::string
     set_name("cudaAntennaMaskCommand");
     gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_voltage, true, true, true));
     if (!_gpu_mem_alive_voltages.empty()) {
-        gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_alive_voltages, true, false, true));
+        gpu_buffers_used.push_back(std::make_tuple(_gpu_mem_alive_voltages, false, true, true));
+        device.register_gpu_memory_name(_gpu_mem_alive_voltages);
     }
 
     allocate_device_buffers();
@@ -574,13 +702,19 @@ cudaAntennaMaskCommand::~cudaAntennaMaskCommand() {
 
 void cudaAntennaMaskCommand::allocate_device_buffers() {
     device.set_thread_device();
+    const std::size_t chan_elems =
+        static_cast<std::size_t>(_num_local_freq) * static_cast<std::size_t>(_num_elements);
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_raw_stats, _num_elements * sizeof(AntennaRawStats)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_antenna_powers, _num_elements * sizeof(float)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_antenna_clips, _num_elements * sizeof(std::uint32_t)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_chan_power, chan_elems * sizeof(float)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_chan_coh, chan_elems * sizeof(float)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_bad_antennas, _num_elements * sizeof(int)));
     CHECK_CUDA_ERROR_NON_OO(cudaMalloc(&_d_alive_antennas, _num_elements * sizeof(int)));
 
     CHECK_CUDA_ERROR_NON_OO(cudaMallocHost(&_h_raw_stats, _num_elements * sizeof(AntennaRawStats)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMallocHost(&_h_chan_power, chan_elems * sizeof(float)));
+    CHECK_CUDA_ERROR_NON_OO(cudaMallocHost(&_h_chan_coh, chan_elems * sizeof(float)));
 }
 
 void cudaAntennaMaskCommand::free_device_buffers() {
@@ -597,6 +731,14 @@ void cudaAntennaMaskCommand::free_device_buffers() {
         cudaFree(_d_antenna_clips);
         _d_antenna_clips = nullptr;
     }
+    if (_d_chan_power) {
+        cudaFree(_d_chan_power);
+        _d_chan_power = nullptr;
+    }
+    if (_d_chan_coh) {
+        cudaFree(_d_chan_coh);
+        _d_chan_coh = nullptr;
+    }
     if (_d_bad_antennas) {
         cudaFree(_d_bad_antennas);
         _d_bad_antennas = nullptr;
@@ -608,6 +750,14 @@ void cudaAntennaMaskCommand::free_device_buffers() {
     if (_h_raw_stats) {
         cudaFreeHost(_h_raw_stats);
         _h_raw_stats = nullptr;
+    }
+    if (_h_chan_power) {
+        cudaFreeHost(_h_chan_power);
+        _h_chan_power = nullptr;
+    }
+    if (_h_chan_coh) {
+        cudaFreeHost(_h_chan_coh);
+        _h_chan_coh = nullptr;
     }
 }
 
@@ -670,6 +820,11 @@ AntennaMaskConfig cudaAntennaMaskCommand::get_config() {
 cudaEvent_t cudaAntennaMaskCommand::execute(cudaPipelineState& /*pipestate*/,
                                             const std::vector<cudaEvent_t>&) {
     pre_execute();
+    _last_frame_executed = false;
+    _last_frame_inspected = false;
+    _last_frame_ran_coherence = false;
+    _last_frame_authoritative = false;
+    _last_inspected_spectra = 0;
 
     const std::size_t input_bytes =
         static_cast<std::size_t>(_num_elements) * static_cast<std::size_t>(_num_local_freq)
@@ -682,10 +837,46 @@ cudaEvent_t cudaAntennaMaskCommand::execute(cudaPipelineState& /*pipestate*/,
     }
 
     record_start_event();
+    _last_frame_executed = true;
     cudaStream_t stream = device.getStream(cuda_stream_id);
     int4x2_t* d_voltages = reinterpret_cast<int4x2_t*>(input_memory);
 
     AntennaMaskConfig current_cfg = get_config();
+
+    bool is_swapped_withoffset = false;
+    std::shared_ptr<metadataObject> meta =
+        device.get_gpu_memory_array_metadata(_gpu_mem_voltage, gpu_frame_id);
+    if (auto c_meta = std::dynamic_pointer_cast<chartsMetadata>(meta)) {
+        if (c_meta->type == kotekan::int4x2_swapped_withoffset) {
+            is_swapped_withoffset = true;
+        }
+        if (c_meta->has_coarse_freq()) {
+            const auto cf = c_meta->get_coarse_freq();
+            if (!cf.empty()) {
+                _subband_id = (cf.front() >= 336) ? 1 : 0;
+                _freq_start_hz = charts::constants::charts_frequency_start_hz
+                                 + static_cast<double>(cf.front()) * charts::constants::charts_channel_width_hz;
+            }
+        }
+        if (c_meta->has_lost_timesamples()) {
+            const int32_t lost = c_meta->get_lost_timesamples();
+            if (lost > static_cast<int32_t>(0.25 * _samples_per_data_set)) {
+                // Packet loss exceeded 25% of this frame; skip auto-detection mask updates
+                // to prevent temporary network packet loss from falsely marking antennas dead.
+                current_cfg.auto_detect_enabled = false;
+            }
+        }
+    } else if (auto ch_meta = std::dynamic_pointer_cast<chordMetadata>(meta)) {
+        if (ch_meta->type == kotekan::int4x2_swapped_withoffset) {
+            is_swapped_withoffset = true;
+        }
+    }
+
+    const std::uint64_t current_frame = _frame_counter++;
+    if (current_cfg.auto_detect_cadence_frames > 1
+        && (current_frame % current_cfg.auto_detect_cadence_frames != 0)) {
+        current_cfg.auto_detect_enabled = false;
+    }
 
     const std::size_t total_spectra =
         static_cast<std::size_t>(_samples_per_data_set) * _num_local_freq;
@@ -693,199 +884,62 @@ cudaEvent_t cudaAntennaMaskCommand::execute(cudaPipelineState& /*pipestate*/,
         (total_spectra + current_cfg.sample_stride - 1) / current_cfg.sample_stride;
 
     if (current_cfg.auto_detect_enabled && inspected_spectra > 0) {
+        bool is_authoritative_subband = (_subband_id == 0);
+        if (!is_authoritative_subband) {
+            std::lock_guard<std::mutex> reg_lk(_registry_mutex);
+            bool has_sb0 = false;
+            for (const auto* inst : _instances) {
+                if (inst->get_subband_id() == 0) {
+                    has_sb0 = true;
+                    break;
+                }
+            }
+            if (!has_sb0) {
+                is_authoritative_subband = true;
+            }
+        }
+
+        const bool run_coherence = is_authoritative_subband && (_num_elements <= 64)
+                                   && (_num_local_freq >= 4) && (_d_chan_power != nullptr)
+                                   && (_d_chan_coh != nullptr);
+
         // 1. Single-pass exact integer moment accumulation on GPU
         launch_inspect_antenna_moments(d_voltages, _d_raw_stats, nullptr, nullptr,
                                        _samples_per_data_set, _num_local_freq, _num_elements,
-                                       current_cfg.sample_stride, stream);
+                                       current_cfg.sample_stride, stream, is_swapped_withoffset);
 
-        // Single consolidated DMA transfer of AntennaRawStats
+        if (run_coherence) {
+            launch_inspect_channel_coherence(d_voltages, _d_chan_power, _d_chan_coh,
+                                             _samples_per_data_set, _num_local_freq, _num_elements,
+                                             stream, is_swapped_withoffset);
+        }
+
+        // Single consolidated DMA transfer of AntennaRawStats (+ per-channel coherence stats)
         CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_h_raw_stats, _d_raw_stats,
                                                 _num_elements * sizeof(AntennaRawStats),
                                                 cudaMemcpyDeviceToHost, stream));
-        CHECK_CUDA_ERROR_NON_OO(cudaStreamSynchronize(stream));
-
-        const double inv_n = 1.0 / static_cast<double>(inspected_spectra);
-
-        // Pre-pass: compute per-element moments & gather candidate powers per polarization for MAD
-        std::vector<float> pol_powers[2];
-        pol_powers[0].reserve(_num_elements);
-        pol_powers[1].reserve(_num_elements);
-
-        std::vector<float> elem_power(_num_elements, 0.0f);
-        std::vector<float> elem_ac_var(_num_elements, 0.0f);
-        std::vector<float> elem_dc_frac(_num_elements, 0.0f);
-        std::vector<float> elem_clip_frac(_num_elements, 0.0f);
-        std::vector<float> elem_kurtosis(_num_elements, 2.0f);
-        std::vector<float> elem_iq_imb(_num_elements, 0.0f);
-
-        for (int a = 0; a < _num_elements; ++a) {
-            const auto& st = _h_raw_stats[a];
-            const double p_re = static_cast<double>(st.sum_re2) * inv_n;
-            const double p_im = static_cast<double>(st.sum_im2) * inv_n;
-            const double p_tot = p_re + p_im;
-
-            const double mu_re = static_cast<double>(st.sum_re) * inv_n;
-            const double mu_im = static_cast<double>(st.sum_im) * inv_n;
-            const double dc_p = mu_re * mu_re + mu_im * mu_im;
-            const double ac_v = std::max(0.0, p_tot - dc_p);
-            const double m4 = static_cast<double>(st.sum_p2) * inv_n;
-
-            elem_power[a] = static_cast<float>(p_tot);
-            elem_ac_var[a] = static_cast<float>(ac_v);
-            elem_dc_frac[a] = (p_tot > 1e-6) ? static_cast<float>(dc_p / p_tot) : 0.0f;
-            elem_clip_frac[a] = static_cast<float>(static_cast<double>(st.clips) * (0.5 * inv_n));
-            elem_kurtosis[a] = (p_tot > 1e-3) ? static_cast<float>(m4 / (p_tot * p_tot)) : 0.0f;
-            elem_iq_imb[a] =
-                (p_tot > 1e-6) ? static_cast<float>(std::abs(p_re - p_im) / p_tot) : 0.0f;
-
-            // Include non-dead, non-saturated elements in array median/MAD reference
-            if (current_cfg.manual_mask[a] != 0 && ac_v > current_cfg.dead_power_threshold
-                && p_tot < current_cfg.sat_power_threshold) {
-                const std::size_t pol = current_cfg.raw_elem_to_pol(a) & 1U;
-                pol_powers[pol].push_back(elem_power[a]);
-            }
+        if (run_coherence) {
+            const std::size_t chan_elems =
+                static_cast<std::size_t>(_num_local_freq) * static_cast<std::size_t>(_num_elements);
+            CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_h_chan_power, _d_chan_power,
+                                                    chan_elems * sizeof(float),
+                                                    cudaMemcpyDeviceToHost, stream));
+            CHECK_CUDA_ERROR_NON_OO(cudaMemcpyAsync(_h_chan_coh, _d_chan_coh,
+                                                    chan_elems * sizeof(float),
+                                                    cudaMemcpyDeviceToHost, stream));
         }
 
-        // Compute Median and MAD per polarization
-        float med_power[2] = {0.0f, 0.0f};
-        float mad_sigma[2] = {1.0f, 1.0f};
-        for (int p = 0; p < std::min(2, _num_pols); ++p) {
-            if (pol_powers[p].size() >= 4) {
-                med_power[p] = compute_median(pol_powers[p]);
-                std::vector<float> abs_devs(pol_powers[p].size());
-                for (std::size_t i = 0; i < pol_powers[p].size(); ++i) {
-                    abs_devs[i] = std::abs(pol_powers[p][i] - med_power[p]);
-                }
-                // Floor sigma at 5% of median power to avoid false triggers on ultra-uniform
-                // synthetic data
-                mad_sigma[p] = std::max(1.4826f * compute_median(abs_devs), 0.05f * med_power[p]);
-            }
-        }
+        // Snapshot frame metadata so finalize_frame() evaluates host telemetry after the GPU
+        // event completes without stalling the pipeline or holding CUDA stream locks.
+        _last_frame_cfg = current_cfg;
+        _last_inspected_spectra = inspected_spectra;
+        _last_frame_authoritative = is_authoritative_subband;
+        _last_frame_ran_coherence = run_coherence;
+        _last_frame_inspected = true;
+    }
 
-        std::lock_guard<std::mutex> lk(_global_mutex);
-        bool mask_changed = false;
-        std::vector<std::uint8_t> candidate_mask(_num_elements, 1);
-
-        for (int a = 0; a < _num_elements; ++a) {
-            const std::size_t pol = current_cfg.raw_elem_to_pol(a) & 1U;
-            const float z_score = (pol_powers[pol].size() >= 4)
-                                      ? (std::abs(elem_power[a] - med_power[pol]) / mad_sigma[pol])
-                                      : 0.0f;
-
-            auto& m = _shared_metrics[a];
-            m.power = elem_power[a];
-            m.ac_variance = elem_ac_var[a];
-            m.dc_fraction = elem_dc_frac[a];
-            m.clipping_fraction = elem_clip_frac[a];
-            m.kurtosis = elem_kurtosis[a];
-            m.iq_imbalance = elem_iq_imb[a];
-            m.robust_z_score = z_score;
-            m.clipped_count = _h_raw_stats[a].clips;
-
-            const std::uint8_t old_mask_val = _shared_mask[a];
-            std::uint8_t new_mask_val = 1;
-
-            if (_shared_config.manual_mask[a] == 0) {
-                m.status = AntennaHealthStatus::MANUAL_MASK;
-                m.consecutive_healthy = 0;
-                new_mask_val = 0;
-            } else if (m.ac_variance <= _shared_config.dead_power_threshold
-                       || m.power <= _shared_config.dead_power_threshold) {
-                m.status = AntennaHealthStatus::DEAD;
-                m.consecutive_healthy = 0;
-                new_mask_val = 0;
-            } else if (m.clipping_fraction >= _shared_config.clip_fraction_threshold
-                       || m.power >= _shared_config.sat_power_threshold) {
-                m.status = AntennaHealthStatus::SATURATED;
-                m.consecutive_healthy = 0;
-                new_mask_val = 0;
-            } else if (_shared_config.enable_dc_lock_check
-                       && m.dc_fraction >= _shared_config.max_dc_fraction) {
-                m.status = AntennaHealthStatus::DC_LOCKED;
-                m.consecutive_healthy = 0;
-                new_mask_val = 0;
-            } else if (_shared_config.enable_iq_imbalance_check
-                       && m.iq_imbalance >= _shared_config.max_iq_imbalance) {
-                m.status = AntennaHealthStatus::IQ_IMBALANCE;
-                m.consecutive_healthy = 0;
-                new_mask_val = 0;
-            } else if (_shared_config.enable_kurtosis_check
-                       && (m.kurtosis >= _shared_config.max_kurtosis_threshold
-                           || m.kurtosis <= _shared_config.min_kurtosis_threshold)) {
-                m.status = AntennaHealthStatus::RFI_KURTOSIS;
-                m.consecutive_healthy = 0;
-                new_mask_val = 0;
-            } else if (_shared_config.enable_mad_outlier_check
-                       && z_score >= _shared_config.mad_sigma_threshold) {
-                m.status = AntennaHealthStatus::OUTLIER_POWER;
-                m.consecutive_healthy = 0;
-                new_mask_val = 0;
-            } else {
-                m.consecutive_healthy++;
-                if (old_mask_val == 0) {
-                    if (m.consecutive_healthy >= _shared_config.revival_frames) {
-                        m.status = AntennaHealthStatus::HEALTHY;
-                        new_mask_val = 1;
-                    } else {
-                        new_mask_val = 0;
-                    }
-                } else {
-                    m.status = AntennaHealthStatus::HEALTHY;
-                    new_mask_val = 1;
-                }
-            }
-            candidate_mask[a] = new_mask_val;
-        }
-
-        // Optional dual-pol coupling: if one polarization of a physical antenna is bad, mask both
-        if (_shared_config.couple_pol_masks && _num_pols > 1) {
-            for (int a = 0; a < _num_elements; ++a) {
-                if (candidate_mask[a] == 0) {
-                    const std::size_t phys_id = _shared_config.raw_elem_to_physical_ant(a);
-                    for (int b = 0; b < _num_elements; ++b) {
-                        if (_shared_config.raw_elem_to_physical_ant(b) == phys_id) {
-                            candidate_mask[b] = 0;
-                        }
-                    }
-                }
-            }
-        }
-
-        _current_bad_indices.clear();
-        _current_alive_indices.clear();
-        for (int a = 0; a < _num_elements; ++a) {
-            if (_shared_mask[a] != candidate_mask[a]) {
-                _shared_mask[a] = candidate_mask[a];
-                mask_changed = true;
-            }
-            if (_shared_mask[a] == 0) {
-                _current_bad_indices.push_back(a);
-            } else {
-                _current_alive_indices.push_back(a);
-            }
-        }
-
-        if (mask_changed || _applied_mask_generation != _shared_config.mask_generation) {
-            if (mask_changed) {
-                _shared_config.mask_generation++;
-            }
-            _applied_mask_generation = _shared_config.mask_generation;
-            const int n_active = static_cast<int>(_current_alive_indices.size());
-            cudaDirectBeamTrackerCommand::set_shared_antenna_mask(_shared_mask, n_active);
-        }
-
-        {
-            std::lock_guard<std::mutex> mlk(_metric_mutex);
-            _last_power_rms.resize(_num_elements);
-            _last_clip_fraction.resize(_num_elements);
-            _last_active_mask.resize(_num_elements);
-            for (int a = 0; a < _num_elements; ++a) {
-                _last_power_rms[a] = elem_power[a];
-                _last_clip_fraction[a] = elem_clip_frac[a];
-                _last_active_mask[a] = candidate_mask[a];
-            }
-        }
-    } else {
+    // Apply latest mask before in-place blanking / alive extraction
+    {
         std::lock_guard<std::mutex> lk(_global_mutex);
         _current_bad_indices.clear();
         _current_alive_indices.clear();
@@ -901,16 +955,6 @@ cudaEvent_t cudaAntennaMaskCommand::execute(cudaPipelineState& /*pipestate*/,
             const int n_active = static_cast<int>(_current_alive_indices.size());
             cudaDirectBeamTrackerCommand::set_shared_antenna_mask(_shared_mask, n_active);
         }
-
-        {
-            std::lock_guard<std::mutex> mlk(_metric_mutex);
-            _last_power_rms.assign(_num_elements, 0.0f);
-            _last_clip_fraction.assign(_num_elements, 0.0f);
-            _last_active_mask.resize(_num_elements);
-            for (int a = 0; a < _num_elements; ++a) {
-                _last_active_mask[a] = _shared_mask[a];
-            }
-        }
     }
 
     // 2. Coalesced in-place voltage blanking for bad elements
@@ -921,7 +965,7 @@ cudaEvent_t cudaAntennaMaskCommand::execute(cudaPipelineState& /*pipestate*/,
 
         launch_zero_bad_antennas(d_voltages, _d_bad_antennas,
                                  static_cast<int>(_current_bad_indices.size()), total_spectra,
-                                 _num_elements, stream);
+                                 _num_elements, stream, is_swapped_withoffset);
     }
 
     // 3. Coalesced warp-per-spectrum alive antenna baseband extraction
@@ -944,17 +988,321 @@ cudaEvent_t cudaAntennaMaskCommand::execute(cudaPipelineState& /*pipestate*/,
             int4x2_t* d_alive_voltages = reinterpret_cast<int4x2_t*>(alive_memory);
             launch_extract_alive_antennas(d_voltages, d_alive_voltages, _d_alive_antennas,
                                           num_to_extract, _max_alive_antennas, total_spectra,
-                                          _num_elements, stream);
+                                          _num_elements, stream, is_swapped_withoffset);
 
-            std::shared_ptr<metadataObject> meta =
+            std::shared_ptr<metadataObject> meta_alive =
                 device.get_gpu_memory_array_metadata(_gpu_mem_voltage, gpu_frame_id);
-            if (meta) {
-                device.claim_gpu_memory_array_metadata(_gpu_mem_alive_voltages, gpu_frame_id, meta);
+            if (meta_alive) {
+                device.claim_gpu_memory_array_metadata(_gpu_mem_alive_voltages, gpu_frame_id,
+                                                       meta_alive);
             }
         }
     }
 
     return record_end_event();
+}
+
+void cudaAntennaMaskCommand::finalize_frame() {
+    cudaCommand::finalize_frame();
+    if (!_last_frame_executed) {
+        return;
+    }
+
+    if (!_last_frame_inspected || _last_inspected_spectra == 0 || !_h_raw_stats) {
+        std::lock_guard<std::mutex> lk(_global_mutex);
+        std::lock_guard<std::mutex> mlk(_metric_mutex);
+        _last_power_rms.assign(_num_elements, 0.0f);
+        _last_clip_fraction.assign(_num_elements, 0.0f);
+        _last_active_mask.resize(_num_elements);
+        for (int a = 0; a < _num_elements; ++a) {
+            _last_active_mask[a] = _shared_mask[a];
+        }
+        return;
+    }
+
+    const AntennaMaskConfig& current_cfg = _last_frame_cfg;
+    const bool run_coherence = _last_frame_ran_coherence && _h_chan_power && _h_chan_coh;
+    const bool is_authoritative_subband = _last_frame_authoritative;
+    const std::size_t inspected_spectra = _last_inspected_spectra;
+
+    std::vector<float> elem_passband_p(_num_elements, 0.0f);
+    std::vector<float> elem_coh(_num_elements, 0.0f);
+    int num_valid_freqs = 0;
+
+    if (run_coherence) {
+        std::vector<int> valid_freqs;
+        valid_freqs.reserve(_num_local_freq);
+        for (int f = 0; f < _num_local_freq; ++f) {
+            float max_f_p = 0.0f;
+            for (int a = 0; a < _num_elements; ++a) {
+                max_f_p = std::max(max_f_p, _h_chan_power[f * _num_elements + a]);
+            }
+            if (max_f_p > 1e-3f) {
+                valid_freqs.push_back(f);
+            }
+        }
+        num_valid_freqs = static_cast<int>(valid_freqs.size());
+        if (num_valid_freqs >= 4) {
+            std::vector<float> f_powers(num_valid_freqs);
+            for (int a = 0; a < _num_elements; ++a) {
+                double sum_c = 0.0;
+                for (int idx = 0; idx < num_valid_freqs; ++idx) {
+                    const int f = valid_freqs[idx];
+                    f_powers[idx] = _h_chan_power[f * _num_elements + a];
+                    sum_c += _h_chan_coh[f * _num_elements + a];
+                }
+                std::sort(f_powers.begin(), f_powers.end());
+                elem_passband_p[a] = f_powers[(3 * num_valid_freqs) / 4];
+                elem_coh[a] = static_cast<float>(sum_c / static_cast<double>(num_valid_freqs));
+            }
+        }
+    }
+
+    bool has_coherent_sky = false;
+    float coh_thresh = 0.0f;
+    float effective_dead_th = current_cfg.dead_power_threshold;
+
+    if (num_valid_freqs >= 4) {
+        std::vector<float> all_coh;
+        std::vector<float> all_pb;
+        all_coh.reserve(_num_elements);
+        all_pb.reserve(_num_elements);
+        float max_coh = 0.0f;
+        for (int a = 0; a < _num_elements; ++a) {
+            if (current_cfg.manual_mask[a] != 0 && elem_passband_p[a] > 1e-3f) {
+                all_coh.push_back(elem_coh[a]);
+                all_pb.push_back(elem_passband_p[a]);
+                max_coh = std::max(max_coh, elem_coh[a]);
+            }
+        }
+        if (all_coh.size() >= 4) {
+            const float med_coh = compute_median(all_coh);
+            if (all_coh.size() < 8) {
+                if (med_coh > 0.02f) {
+                    has_coherent_sky = true;
+                    coh_thresh = 0.70f * med_coh;
+                    const float med_pb = compute_median(all_pb);
+                    effective_dead_th =
+                        std::max(current_cfg.dead_power_threshold, 0.80f * med_pb);
+                }
+            } else if (med_coh > 0.02f && max_coh > 1.25f * med_coh) {
+                has_coherent_sky = true;
+                if (max_coh > 2.0f * med_coh) {
+                    coh_thresh = std::max(1.15f * med_coh, 0.50f * (med_coh + max_coh));
+                } else {
+                    coh_thresh = 1.15f * med_coh;
+                }
+
+                std::vector<float> coh_pb;
+                coh_pb.reserve(all_pb.size());
+                for (std::size_t idx = 0; idx < all_coh.size(); ++idx) {
+                    if (all_coh[idx] >= coh_thresh) {
+                        coh_pb.push_back(all_pb[idx]);
+                    }
+                }
+                const float ref_pb =
+                    coh_pb.empty() ? compute_median(all_pb) : compute_median(coh_pb);
+                effective_dead_th = std::max(current_cfg.dead_power_threshold, 0.80f * ref_pb);
+            }
+        }
+    }
+
+    const double valid_freq_frac =
+        (run_coherence && num_valid_freqs > 0)
+            ? (static_cast<double>(num_valid_freqs) / static_cast<double>(_num_local_freq))
+            : 1.0;
+    const double inv_n = 1.0 / (static_cast<double>(inspected_spectra) * valid_freq_frac);
+
+    std::vector<float> pol_powers[2];
+    pol_powers[0].reserve(_num_elements);
+    pol_powers[1].reserve(_num_elements);
+
+    std::vector<float> elem_power(_num_elements, 0.0f);
+    std::vector<float> elem_ac_var(_num_elements, 0.0f);
+    std::vector<float> elem_dc_frac(_num_elements, 0.0f);
+    std::vector<float> elem_clip_frac(_num_elements, 0.0f);
+    std::vector<float> elem_kurtosis(_num_elements, 2.0f);
+    std::vector<float> elem_iq_imb(_num_elements, 0.0f);
+
+    for (int a = 0; a < _num_elements; ++a) {
+        const auto& st = _h_raw_stats[a];
+        const double p_re = static_cast<double>(st.sum_re2) * inv_n;
+        const double p_im = static_cast<double>(st.sum_im2) * inv_n;
+        const double p_tot = p_re + p_im;
+
+        const double mu_re = static_cast<double>(st.sum_re) * inv_n;
+        const double mu_im = static_cast<double>(st.sum_im) * inv_n;
+        const double dc_p = mu_re * mu_re + mu_im * mu_im;
+        const double ac_v = std::max(0.0, p_tot - dc_p);
+        const double m4 = static_cast<double>(st.sum_p2) * inv_n;
+
+        elem_power[a] = static_cast<float>(p_tot);
+        elem_ac_var[a] = static_cast<float>(ac_v);
+        elem_dc_frac[a] = (p_tot > 1e-6) ? static_cast<float>(dc_p / p_tot) : 0.0f;
+        elem_clip_frac[a] = static_cast<float>(static_cast<double>(st.clips) * (0.5 * inv_n));
+        elem_kurtosis[a] = (p_tot > 1e-3) ? static_cast<float>(m4 / (p_tot * p_tot)) : 0.0f;
+        elem_iq_imb[a] =
+            (p_tot > 1e-6) ? static_cast<float>(std::abs(p_re - p_im) / p_tot) : 0.0f;
+
+        const float ref_p = (elem_passband_p[a] > 0.0f) ? elem_passband_p[a] : elem_power[a];
+        const bool coh_ok = (!has_coherent_sky) || (elem_coh[a] >= coh_thresh);
+
+        if (current_cfg.manual_mask[a] != 0 && coh_ok && ref_p > effective_dead_th
+            && p_tot < current_cfg.sat_power_threshold) {
+            const std::size_t pol = current_cfg.raw_elem_to_pol(a) & 1U;
+            pol_powers[pol].push_back(ref_p);
+        }
+    }
+
+    float med_power[2] = {0.0f, 0.0f};
+    float mad_sigma[2] = {1.0f, 1.0f};
+    for (int p = 0; p < std::min(2, _num_pols); ++p) {
+        if (pol_powers[p].size() >= 4) {
+            med_power[p] = compute_median(pol_powers[p]);
+            std::vector<float> abs_devs(pol_powers[p].size());
+            for (std::size_t i = 0; i < pol_powers[p].size(); ++i) {
+                abs_devs[i] = std::abs(pol_powers[p][i] - med_power[p]);
+            }
+            mad_sigma[p] = std::max(1.4826f * compute_median(abs_devs), 0.15f * med_power[p]);
+        }
+    }
+
+    std::lock_guard<std::mutex> lk(_global_mutex);
+    bool mask_changed = false;
+    std::vector<std::uint8_t> candidate_mask(_num_elements, 1);
+
+    if (is_authoritative_subband && (!run_coherence || num_valid_freqs > 0)) {
+        const bool rfi_mitigation_active = cudaRfiMitigationCommand::get_config().enabled;
+        for (int a = 0; a < _num_elements; ++a) {
+            const std::size_t pol = current_cfg.raw_elem_to_pol(a) & 1U;
+            const float ref_p =
+                (elem_passband_p[a] > 0.0f) ? elem_passband_p[a] : elem_power[a];
+            const float ref_ac =
+                (elem_passband_p[a] > 0.0f)
+                    ? std::max(0.0f, elem_passband_p[a] * (1.0f - elem_dc_frac[a]))
+                    : elem_ac_var[a];
+            const float z_score = (pol_powers[pol].size() >= 4)
+                                      ? (std::abs(ref_p - med_power[pol]) / mad_sigma[pol])
+                                      : 0.0f;
+
+            auto& m = _shared_metrics[a];
+            m.power = elem_power[a];
+            m.ac_variance = elem_ac_var[a];
+            m.dc_fraction = elem_dc_frac[a];
+            m.clipping_fraction = elem_clip_frac[a];
+            m.kurtosis = elem_kurtosis[a];
+            m.iq_imbalance = elem_iq_imb[a];
+            m.coherence = elem_coh[a];
+            m.passband_power = elem_passband_p[a];
+            m.robust_z_score = z_score;
+            m.clipped_count = _h_raw_stats[a].clips;
+
+            const std::uint8_t old_mask_val = _shared_mask[a];
+            std::uint8_t new_mask_val = 1;
+
+            if (_shared_config.manual_mask[a] == 0) {
+                m.status = AntennaHealthStatus::MANUAL_MASK;
+                m.consecutive_healthy = 0;
+                new_mask_val = 0;
+            } else if (ref_ac <= effective_dead_th || ref_p <= effective_dead_th
+                       || (has_coherent_sky && elem_coh[a] < coh_thresh)) {
+                m.status = AntennaHealthStatus::DEAD;
+                m.consecutive_healthy = 0;
+                new_mask_val = 0;
+            } else if (m.clipping_fraction >= _shared_config.clip_fraction_threshold
+                       || m.power >= _shared_config.sat_power_threshold) {
+                m.status = AntennaHealthStatus::SATURATED;
+                m.consecutive_healthy = 0;
+                new_mask_val = 0;
+            } else if (_shared_config.enable_dc_lock_check
+                       && m.dc_fraction >= _shared_config.max_dc_fraction) {
+                m.status = AntennaHealthStatus::DC_LOCKED;
+                m.consecutive_healthy = 0;
+                new_mask_val = 0;
+            } else if (_shared_config.enable_iq_imbalance_check
+                       && m.iq_imbalance >= _shared_config.max_iq_imbalance) {
+                m.status = AntennaHealthStatus::IQ_IMBALANCE;
+                m.consecutive_healthy = 0;
+                new_mask_val = 0;
+            } else if (_shared_config.enable_kurtosis_check
+                       && (m.kurtosis >= _shared_config.max_kurtosis_threshold
+                           || m.kurtosis <= _shared_config.min_kurtosis_threshold)) {
+                m.status = AntennaHealthStatus::RFI_KURTOSIS;
+                if (!rfi_mitigation_active) {
+                    m.consecutive_healthy = 0;
+                    new_mask_val = 0;
+                }
+            } else if (_shared_config.enable_mad_outlier_check
+                       && z_score >= _shared_config.mad_sigma_threshold) {
+                m.status = AntennaHealthStatus::OUTLIER_POWER;
+                m.consecutive_healthy = 0;
+                new_mask_val = 0;
+            } else {
+                m.consecutive_healthy++;
+                if (old_mask_val == 0) {
+                    if (m.consecutive_healthy >= _shared_config.revival_frames) {
+                        m.status = AntennaHealthStatus::HEALTHY;
+                        new_mask_val = 1;
+                    } else {
+                        new_mask_val = 0;
+                    }
+                } else {
+                    m.status = AntennaHealthStatus::HEALTHY;
+                    new_mask_val = 1;
+                }
+            }
+            candidate_mask[a] = new_mask_val;
+        }
+
+        if (_shared_config.couple_pol_masks && _num_pols > 1) {
+            for (int a = 0; a < _num_elements; ++a) {
+                if (candidate_mask[a] == 0) {
+                    const std::size_t phys_id = _shared_config.raw_elem_to_physical_ant(a);
+                    for (int b = 0; b < _num_elements; ++b) {
+                        if (_shared_config.raw_elem_to_physical_ant(b) == phys_id) {
+                            candidate_mask[b] = 0;
+                        }
+                    }
+                }
+            }
+        }
+
+        for (int a = 0; a < _num_elements; ++a) {
+            if (_shared_mask[a] != candidate_mask[a]) {
+                _shared_mask[a] = candidate_mask[a];
+                mask_changed = true;
+            }
+        }
+    }
+
+    if (mask_changed) {
+        _shared_config.mask_generation++;
+        int n_active = 0;
+        for (int a = 0; a < _num_elements; ++a) {
+            if (_shared_mask[a] != 0)
+                n_active++;
+        }
+        cudaDirectBeamTrackerCommand::set_shared_antenna_mask(_shared_mask, n_active);
+    }
+
+    {
+        std::lock_guard<std::mutex> mlk(_metric_mutex);
+        _last_power_rms.resize(_num_elements);
+        _last_clip_fraction.resize(_num_elements);
+        _last_active_mask.resize(_num_elements);
+        for (int a = 0; a < _num_elements; ++a) {
+            _last_power_rms[a] = elem_power[a];
+            _last_clip_fraction[a] = elem_clip_frac[a];
+            _last_active_mask[a] = _shared_mask[a];
+        }
+        if (run_coherence) {
+            const std::size_t chan_elems =
+                static_cast<std::size_t>(_num_local_freq) * static_cast<std::size_t>(_num_elements);
+            _last_chan_power.assign(_h_chan_power, _h_chan_power + chan_elems);
+        } else {
+            _last_chan_power.clear();
+        }
+    }
 }
 
 } // namespace kotekan

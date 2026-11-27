@@ -1,0 +1,334 @@
+########################
+#### Global options ####
+########################
+type: config
+# Logging level can be one of:
+# OFF, ERROR, WARN, INFO, DEBUG, DEBUG2 (case insensitive)
+# Note DEBUG and DEBUG2 require a build with (-DCMAKE_BUILD_TYPE=Debug)
+log_level: info
+cpu_affinity: [6, 7, 8, 9]
+
+num_elements: 64
+element_order: charts_logical
+n_channels_per_packet: 168
+local_subbands_per_packet: 2
+
+buffer_depth: 30
+
+spectra_per_second: 300000.0
+samples_per_data_set: 153600 # Input spectra/frame; must also satisfy GPU kernel constraints.
+
+output_dir: &output_dir /data/corr/corr_1026
+
+# Baseband chunks are independent of input frames.
+baseband_spectra_per_frame: 15360
+baseband_staging_frames: 100
+baseband_history_frames: buffer_depth - 10
+num_saved_antennas: 4 # Must match the number of entries in baseband_capture.selected_antennas.
+max_capture_seconds: 5.0
+correlation_output_frames: 8438 # 24 h + 5.12 s at the default frame size.
+bytes_per_dataset: n_channels_per_packet * local_subbands_per_packet * samples_per_data_set # One packed complex byte per frequency and element.
+
+# For Astron Correlator
+num_data_sets: 1 # Number of independent integrations within a single dataset
+block_size: 2
+num_blocks: 528 #(num_elements / block_size) * (num_elements / block_size + 1) / 2 #This is a kernel tuning parameter for a global work space dimension that sets data sizes fo  GPU work items.
+sizeof_int: 4
+data_format: "cuda_wmma"
+frame_arrival_period: samples_per_data_set / spectra_per_second # Time between frame arrivals in seconds using sampling rate of 10/3 microsec
+num_local_freq: 336
+
+integration_frames: 20 # 10.24 s per accumulated output frame
+capture_n_frames: 0 # Keep ingest alive while accepted captures drain at run end.
+
+# Save metadata for the run, including antenna positions and signal antennas
+run_metadata:
+  kotekan_stage: runMetadataWriter
+  base_dir: *output_dir
+  num_antennas: num_elements
+  signal_antennas: [0, 4, 5, 6]
+  # Antennas 4, 5, and 6 have moved; their current coordinates are not specified here.
+  position_outliers: [4, 5, 6]
+  position_notes:
+    - antenna: 4
+      note: "In the position of antenna 1"
+    - antenna: 5
+      note: "In the positon of antenna 6"
+    - antenna: 6
+      note: "In the positon of antenna 7"
+  # position_overrides:
+  #   - antenna: 32
+  #     position_m: [-33.421117, -70.863486, 460.0]
+  #     note: "CHORD antenna next to the container"
+
+# Main CHARTS Metadata Pool
+main_pool:
+  kotekan_metadata_pool: chartsMetadata
+  num_metadata_objects: buffer_depth*15
+
+
+# Input data buffers from the DPDK stage
+# Buffer to hold captured network packets
+network_capture_buf_0:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: bytes_per_dataset * num_elements
+  numa_node: 0
+  metadata_pool: main_pool
+  zero_new_frames: true
+
+mask_buffer_zeros_0:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: samples_per_data_set
+  numa_node: 0
+  metadata_pool: main_pool
+
+# Additional buffers for the second NIC
+network_capture_buf_1:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: bytes_per_dataset * num_elements
+  numa_node: 0
+  metadata_pool: main_pool
+  zero_new_frames: true
+
+mask_buffer_zeros_1:
+  kotekan_buffer: standard
+  num_frames: buffer_depth
+  frame_size: samples_per_data_set
+  numa_node: 0
+  metadata_pool: main_pool
+
+host_correlation_buffer_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: num_local_freq * num_blocks * (block_size*block_size) * 2 * num_data_sets * sizeof_int
+    metadata_pool: main_pool
+
+host_correlation_buffer_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: num_local_freq * num_blocks * (block_size*block_size) * 2 * num_data_sets * sizeof_int
+    metadata_pool: main_pool
+
+# Selected antenna staging; each per-stream buffer can hold a full accepted event.
+baseband_pool:
+  kotekan_metadata_pool: BasebandMetadata
+  num_metadata_objects: baseband_staging_frames * 4 + 32
+
+baseband_output_buffer_0:
+  kotekan_buffer: standard
+  num_frames: baseband_staging_frames
+  frame_size: baseband_spectra_per_frame * num_local_freq * num_saved_antennas
+  metadata_pool: baseband_pool
+
+baseband_output_buffer_1:
+  kotekan_buffer: standard
+  num_frames: baseband_staging_frames
+  frame_size: baseband_spectra_per_frame * num_local_freq * num_saved_antennas
+  metadata_pool: baseband_pool
+
+baseband_output_buffer_merged:
+  kotekan_buffer: standard
+  num_frames: 8
+  frame_size: baseband_spectra_per_frame * num_local_freq * num_saved_antennas
+  metadata_pool: baseband_pool
+
+##########################
+#### Pipeline Stages #####
+##########################
+
+# DPDK Stage to capture network packets
+dpdk:
+  kotekan_stage: dpdkCore
+  lcore_cpu_map: [3, 5] # Use lcores 3 and 5 for DPDK processing
+  main_lcore_cpu: 4 # Use lcore 4 for the main DPDK thread
+  lcore_port_map: # Map lcores to network ports
+    - [0] # lcore 3 handles port 0
+    - [1] # lcore 5 handles port 1
+  max_rx_pkt_len: 9000
+  num_mbufs: 9600
+  mbuf_data_size: 9216
+
+  handlers:
+    - dpdk_handler: rfsocHandlerShuffle
+      out_buffer: network_capture_buf_0
+      alignment: samples_per_data_set
+      mask_buf: mask_buffer_zeros_0
+      first_subband: 0
+      coarse_freq_start: 0
+      num_local_freq: 336
+
+    - dpdk_handler: rfsocHandlerShuffle
+      out_buffer: network_capture_buf_1
+      alignment: samples_per_data_set
+      mask_buf: mask_buffer_zeros_1
+      first_subband: 2
+      coarse_freq_start: 336
+      num_local_freq: 336
+
+zero_samples:
+  kotekan_stage: zeroSamples
+  out_buf: network_capture_buf_0
+  lost_samples_buf: mask_buffer_zeros_0
+  zero_value: 0
+  sample_size: num_local_freq * num_elements
+
+zero_samples_1:
+  kotekan_stage: zeroSamples
+  out_buf: network_capture_buf_1
+  lost_samples_buf: mask_buffer_zeros_1
+  zero_value: 0
+  sample_size: num_local_freq * num_elements
+
+integrated_correlation_buffer_0:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: num_local_freq * num_blocks * (block_size*block_size) * 2 * num_data_sets * sizeof_int
+    metadata_pool: main_pool
+
+integrated_correlation_buffer_1:
+    kotekan_buffer: standard
+    num_frames: buffer_depth
+    frame_size: num_local_freq * num_blocks * (block_size*block_size) * 2 * num_data_sets * sizeof_int
+    metadata_pool: main_pool
+
+gpu:
+    profiling: true
+    kernel_path: "lib/cuda/kernels"
+    commands_0: &command_list_0
+    - name: cudaInputData
+      in_buf: host_voltage
+      gpu_mem: voltage_0
+    - name: cudaSyncInput
+    - name: cudaShuffleAstron
+      gpu_mem_voltage: voltage_0
+      gpu_mem_ordered_voltage: ordered_voltage_0
+    - name: cudaCorrelatorAstron
+      gpu_mem_voltage: ordered_voltage_0
+      gpu_mem_correlation_matrix: correlation_matrix_0
+    - name: cudaVisibilityCalibrator
+      gpu_mem_correlation_matrix: correlation_matrix_0
+      freq_offset: 0 # first channel of this shard in the full-band table
+      calibration_file: /data/calibration/vis_cal_64.npy # from charts-utils scripts/kotekan_vis_calibrator.py; omit for pass-through
+    - name: cudaSyncOutput
+    - name: cudaOutputData
+      in_buf: host_voltage
+      gpu_mem: correlation_matrix_0
+      out_buf: host_correlation
+    commands_1: &command_list_1
+    - name: cudaInputData
+      in_buf: host_voltage
+      gpu_mem: voltage_1
+    - name: cudaSyncInput
+    - name: cudaShuffleAstron
+      gpu_mem_voltage: voltage_1
+      gpu_mem_ordered_voltage: ordered_voltage_1
+    - name: cudaCorrelatorAstron
+      gpu_mem_voltage: ordered_voltage_1
+      gpu_mem_correlation_matrix: correlation_matrix_1
+    - name: cudaVisibilityCalibrator
+      gpu_mem_correlation_matrix: correlation_matrix_1
+      freq_offset: 336 # first channel of this shard in the full-band table
+      calibration_file: /data/calibration/vis_cal_64.npy # from charts-utils scripts/kotekan_vis_calibrator.py; omit for pass-through
+    - name: cudaSyncOutput
+    - name: cudaOutputData
+      in_buf: host_voltage
+      gpu_mem: correlation_matrix_1
+      out_buf: host_correlation
+    gpu_0:
+      kotekan_stage: cudaProcess
+      gpu_id: 0
+      buffer_depth: 3
+      commands: *command_list_0
+      in_buffers:
+        host_voltage: network_capture_buf_0
+      out_buffers:
+        host_correlation: host_correlation_buffer_0
+
+    gpu_1:
+      kotekan_stage: cudaProcess
+      gpu_id: 0
+      buffer_depth: 3
+      commands: *command_list_1
+      in_buffers:
+        host_voltage: network_capture_buf_1
+      out_buffers:
+        host_correlation: host_correlation_buffer_1
+
+charts_accumulate_0:
+  kotekan_stage: chartsAccumulate
+  in_buf: host_correlation_buffer_0
+  out_buf: integrated_correlation_buffer_0
+  num_frames_to_accumulate: integration_frames
+
+charts_accumulate_1:
+  kotekan_stage: chartsAccumulate
+  in_buf: host_correlation_buffer_1
+  out_buf: integrated_correlation_buffer_1
+  num_frames_to_accumulate: integration_frames
+
+
+# Monitoring stages
+inspect_frame_0:
+  kotekan_stage: restInspectFrame
+  in_buf: host_correlation_buffer_0
+
+inspect_frame_1:
+  kotekan_stage: restInspectFrame
+  in_buf: host_correlation_buffer_1
+
+# File writing stages
+raw_file_write_0:
+  kotekan_stage: rawFileWrite
+  in_buf: integrated_correlation_buffer_0
+  file_name: corr_freq_0
+  base_dir: *output_dir
+  file_ext: bin
+  num_frames_per_file: 1
+  exit_after_n_files: correlation_output_frames
+  drain_baseband_status: charts_triggered_capture
+  baseband_drain_timeout: 120
+
+raw_file_write_1:
+  kotekan_stage: rawFileWrite
+  in_buf: integrated_correlation_buffer_1
+  file_name: corr_freq_1
+  base_dir: *output_dir
+  file_ext: bin
+  num_frames_per_file: 1
+  exit_after_n_files: correlation_output_frames
+  drain_baseband_status: charts_triggered_capture
+  baseband_drain_timeout: 120
+
+# No startup capture: POST /charts/baseband to request an interval during correlation.
+baseband_capture:
+  kotekan_stage: chartsTriggeredBasebandReadout
+  in_bufs: [network_capture_buf_0, network_capture_buf_1]
+  out_bufs: [baseband_output_buffer_0, baseband_output_buffer_1]
+  freq_ids: [0, 336]
+  selected_antennas: &saved_antennas [0, 4, 5, 6]
+  num_frames_buffer: baseband_history_frames
+  output_spectra_per_frame: baseband_spectra_per_frame
+  max_dump_samples: max_capture_seconds * spectra_per_second
+  capture_timeout: 30
+  endpoint: /charts/baseband
+  readout_status: charts_triggered_capture
+
+baseband_merge:
+  kotekan_stage: bufferMerge
+  timeout: 0.1
+  in_bufs: [baseband_output_buffer_0, baseband_output_buffer_1]
+  out_buf: baseband_output_buffer_merged
+
+baseband_save:
+  kotekan_stage: BasebandWriter
+  in_buf: baseband_output_buffer_merged
+  num_elements: num_saved_antennas
+  selected_antennas: *saved_antennas
+  antenna_index_convention: charts_logical
+  root_path: *output_dir
+  spectra_per_frame: baseband_spectra_per_frame
+  readout_status: charts_triggered_capture
+  dump_timeout: 60

@@ -19,6 +19,7 @@ Commands:
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import shutil
@@ -44,6 +45,8 @@ from sim.sky import (
     resolve_window_start,
 )
 from sim.benchmark import run_direct_tracker_benchmark
+from sim.benchmark_vis_calibrator import format_markdown as format_vis_cal_markdown
+from sim.benchmark_vis_calibrator import run_benchmark as run_vis_cal_benchmark
 from sim.constants import (
     CHARTS_CHANNEL_WIDTH_MHZ,
     CHARTS_LATITUDE_DEG,
@@ -521,8 +524,19 @@ def main():
     add_scenario_arguments(gen_parser)
 
     # Catalog subcommand
-    subparsers.add_parser(
+    cat_parser = subparsers.add_parser(
         "catalog", help="List confirmed targets and transit ephemeris"
+    )
+    cat_parser.add_argument(
+        "--visible-now",
+        action="store_true",
+        help="List only sources currently visible above elevation threshold",
+    )
+    cat_parser.add_argument(
+        "--min-alt",
+        type=float,
+        default=10.0,
+        help="Minimum elevation angle in degrees for visibility (default: 10.0)",
     )
 
     # 3. Reference Library subcommand
@@ -626,6 +640,15 @@ def main():
     bench_parser.add_argument(
         "--out-md", type=str, default=None, help="Save Markdown report"
     )
+
+    # 6b. Visibility calibrator benchmark
+    vc_parser = subparsers.add_parser("bench-vis-cal", help="Benchmark the Astron correlator chain with and without cudaVisibilityCalibrator (Kotekan trackers + nvidia-smi)")
+    vc_parser.add_argument("--frames", type=int, default=3000, help="Frames replayed per run (5.12 ms each at real time)")
+    vc_parser.add_argument("--repetitions", type=int, default=3, help="Runs per variant, alternating order")
+    vc_parser.add_argument("--calibration-file", type=str, default=None, help="complex64 (n_freq, 528, 2, 2) table (default: random)")
+    vc_parser.add_argument("--work-dir", type=str, default=None, help="Scratch directory (default: temporary)")
+    vc_parser.add_argument("--output-dir", type=str, default=None, help="Write vis_calibrator_benchmark.{json,md} here")
+    vc_parser.add_argument("--kotekan-bin", type=str, default=None, help="Path to kotekan executable")
 
     # 7. Inspect subcommand
     insp_parser = subparsers.add_parser(
@@ -766,23 +789,42 @@ def main():
                 )
 
     elif args.command == "catalog":
-        summary = catalog_transit_summary()
-        print("=" * 105)
-        print(
-            " CHARTS CONFIRMED CELESTIAL TARGETS & TRANSIT EPHEMERIS (SIMBAD-VERIFIED)"
-        )
-        print("=" * 105)
-        print(
-            f" {'Target Label':<28} {'RA (deg)':>9} {'Dec (deg)':>10} {'Transit UTC':>20} {'Transit Loc':>13} {'Max Alt':>8} {'Vis (h)':>8}"
-        )
-        print("-" * 105)
-        for t in summary:
-            utc_str = t["transit_utc"].replace("T", " ")[:19]
+        if getattr(args, "visible_now", False):
+            now_dt = datetime.now(timezone.utc)
+            visible = find_visible_sources(now_dt, min_elevation_deg=args.min_alt)
+            print("=" * 105)
             print(
-                f" {t['label']:<28} {t['ra_deg']:>9.4f} {t['dec_deg']:>10.4f} "
-                f"{utc_str:>20} {t['transit_local']:>13} {t['max_alt_deg']:>6.1f} deg {t['hours_above_mask']:>7.2f}h"
+                f" CHARTS CURRENTLY VISIBLE TARGETS (UTC: {now_dt.strftime('%Y-%m-%d %H:%M:%S')}, Min Alt >= {args.min_alt:.1f}°)"
             )
-        print("=" * 105)
+            print("=" * 105)
+            print(
+                f" {'Target Name':<32} {'RA (deg)':>9} {'Dec (deg)':>10} {'Azimuth':>9} {'Altitude':>10} {'Flux @ 400M':>12}"
+            )
+            print("-" * 105)
+            for s in visible:
+                print(
+                    f" {s['name']:<32} {s['ra_deg']:>9.4f} {s['dec_deg']:>10.4f} "
+                    f"{s['azimuth_deg']:>8.1f}° {s['elevation_deg']:>9.1f}° {s['flux_jy']:>10.1f} Jy"
+                )
+            print("=" * 105)
+        else:
+            summary = catalog_transit_summary()
+            print("=" * 105)
+            print(
+                " CHARTS CONFIRMED CELESTIAL TARGETS & TRANSIT EPHEMERIS (SIMBAD-VERIFIED)"
+            )
+            print("=" * 105)
+            print(
+                f" {'Target Label':<28} {'RA (deg)':>9} {'Dec (deg)':>10} {'Transit UTC':>20} {'Transit Loc':>13} {'Max Alt':>8} {'Vis (h)':>8}"
+            )
+            print("-" * 105)
+            for t in summary:
+                utc_str = t["transit_utc"].replace("T", " ")[:19]
+                print(
+                    f" {t['label']:<28} {t['ra_deg']:>9.4f} {t['dec_deg']:>10.4f} "
+                    f"{utc_str:>20} {t['transit_local']:>13} {t['max_alt_deg']:>6.1f} deg {t['hours_above_mask']:>7.2f}h"
+                )
+            print("=" * 105)
 
     elif args.command == "reference":
         if args.action == "list":
@@ -893,6 +935,17 @@ def main():
             output_json=Path(args.out_json) if args.out_json else None,
             output_md=Path(args.out_md) if args.out_md else None,
         )
+
+    elif args.command == "bench-vis-cal":
+        report = run_vis_cal_benchmark(
+            num_frames=args.frames,
+            repetitions=args.repetitions,
+            calibration_file=Path(args.calibration_file) if args.calibration_file else None,
+            work_dir=Path(args.work_dir) if args.work_dir else None,
+            output_dir=Path(args.output_dir) if args.output_dir else None,
+            kotekan_bin=Path(args.kotekan_bin) if args.kotekan_bin else None,
+        )
+        print(format_vis_cal_markdown(report))
 
     elif args.command == "inspect":
         fpath = Path(args.file)

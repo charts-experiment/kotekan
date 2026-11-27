@@ -29,6 +29,23 @@ struct TransientTriggerConfig {
     uint32_t cooldown_frames = 200; ///< Refractory cooldown period in frames (~10.2s) between dumps
     uint32_t min_free_disk_gb = 20; ///< Minimum free disk space in GB required to write dumps
     uint32_t max_auto_dumps = 20;   ///< Maximum automated candidate dumps per session
+    bool enable_multibeam_veto = true; ///< Reject common-mode transients across multiple beams
+    float min_sidelobe_confidence = 0.5f; ///< Minimum SPOTLIGHT C = SNR * (1 - P_side/P_peak)
+    float max_sidelobe_ratio = 0.70f;     ///< Maximum allowed non-peak/peak excess power ratio
+    uint32_t subframe_chunk_samples = 256; ///< Sub-frame integration chunk size in samples
+};
+
+/**
+ * @struct TransientSubframeMetrics
+ * @brief Sub-frame multi-beam coincidence & sidelobe discrimination summary.
+ */
+struct TransientSubframeMetrics {
+    float max_sidelobe_confidence = 0.0f;
+    float min_sidelobe_ratio = 1.0f;
+    float mean_sidelobe_ratio = 1.0f;
+    uint32_t peak_beam_id = 0;
+    uint32_t peak_chunk_id = 0;
+    uint32_t valid_chunks = 0;
 };
 
 /**
@@ -44,6 +61,9 @@ struct TransientFrameMetrics {
     float max_sk = 1.0f;
     float median_sk = 1.0f;
     float mean_r01 = 0.0f;
+    float max_sidelobe_confidence = 0.0f;
+    float sidelobe_ratio = 0.0f;
+    uint32_t peak_beam_id = 0;
     bool trigger_fired = false;
 };
 
@@ -64,25 +84,31 @@ struct TransientFrameMetrics {
 void launch_transient_detection_metrics(const float2* d_voltages, float2* d_metrics,
                                         std::size_t n_time, std::size_t n_freq,
                                         std::size_t num_beams, std::size_t max_beams_stride,
-                                        cudaStream_t stream = 0);
+                                        cudaStream_t stream = 0,
+                                        const std::uint8_t* d_rfi_mask = nullptr,
+                                        std::size_t chunk_size = 256);
+
+/**
+ * @brief Evaluate sub-frame multi-beam peak-to-sidelobe ratio and SPOTLIGHT confidence C.
+ */
+void launch_transient_subframe_coincidence(
+    const float2* d_voltages, TransientSubframeMetrics* d_out, std::size_t n_time,
+    std::size_t n_freq, std::size_t num_beams, std::size_t max_beams_stride,
+    std::size_t chunk_samples = 256, cudaStream_t stream = 0,
+    const std::uint8_t* d_rfi_mask = nullptr, std::size_t rfi_chunk_size = 256,
+    float* d_scratch_chunk_power = nullptr);
 
 /**
  * @brief Host evaluation of the combined detection logic over channel metrics.
  *
  * Condition:
  * Trigger Fire = (Sum II[|SK(f) - 1.0| > theta_SK] >= N_min) AND (mean(R01) < theta_RFI)
- *
- * @param h_metrics     Host pinned pointer to float2 metrics [freq]
- * @param n_freq        Number of frequency channels
- * @param config        Trigger configuration thresholds
- * @param frame_id      Sequence index of current frame
- * @param timestamp_ns  Frame arrival timestamp in nanoseconds
- * @return TransientFrameMetrics Summary of frame metrics and trigger decision
+ *                AND (multi-beam sidelobe veto when subframe != nullptr && num_beams >= 2)
  */
-inline TransientFrameMetrics evaluate_transient_decision(const float2* h_metrics,
-                                                         std::size_t n_freq,
-                                                         const TransientTriggerConfig& config,
-                                                         uint32_t frame_id, uint64_t timestamp_ns) {
+inline TransientFrameMetrics evaluate_transient_decision(
+    const float2* h_metrics, std::size_t n_freq, const TransientTriggerConfig& config,
+    uint32_t frame_id, uint64_t timestamp_ns,
+    const TransientSubframeMetrics* subframe = nullptr) {
 
     TransientFrameMetrics out;
     out.frame_id = frame_id;
@@ -134,7 +160,16 @@ inline TransientFrameMetrics evaluate_transient_decision(const float2* h_metrics
     const bool sk_condition = (flagged >= config.min_flagged_channels);
     const bool rfi_condition = (out.mean_r01 < config.rfi_threshold);
 
-    out.trigger_fired = sk_condition && rfi_condition;
+    bool multibeam_ok = true;
+    if (subframe != nullptr && config.enable_multibeam_veto && subframe->valid_chunks > 0) {
+        out.max_sidelobe_confidence = subframe->max_sidelobe_confidence;
+        out.sidelobe_ratio = subframe->min_sidelobe_ratio;
+        out.peak_beam_id = subframe->peak_beam_id;
+        multibeam_ok = (subframe->min_sidelobe_ratio <= config.max_sidelobe_ratio)
+                       && (subframe->max_sidelobe_confidence >= config.min_sidelobe_confidence);
+    }
+
+    out.trigger_fired = sk_condition && rfi_condition && multibeam_ok;
     return out;
 }
 

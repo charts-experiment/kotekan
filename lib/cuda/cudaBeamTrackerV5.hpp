@@ -64,20 +64,23 @@ struct BeamTrackerConfig {
     SiteLocation site;
     BeamTrackerConfig() {
         antenna_mask.fill(1);
-        for (std::size_t i = 0; i < MAX_TRACKER_ANTENNAS; ++i) {
-            const unsigned int col = (i < 64) ? (i & 7U) : (i & 15U);
-            const unsigned int row = (i < 64) ? (i >> 3U) : (i >> 4U);
-            antenna_positions[i] = make_float3(static_cast<float>(col) * spacing_m,
-                                               static_cast<float>(row) * spacing_m, 0.0f);
-        }
+        set_antenna_grid(64, spacing_m);
     }
     void set_antenna_grid(std::size_t n_ant, float spacing) {
         spacing_m = spacing;
+        const std::size_t n_elem = std::min(n_ant, MAX_TRACKER_ANTENNAS);
+        const std::size_t grid_cols = (n_ant <= 64) ? 8U : 16U;
         for (std::size_t i = 0; i < MAX_TRACKER_ANTENNAS; ++i) {
-            const unsigned int col = (n_ant <= 64) ? (i & 7U) : (i & 15U);
-            const unsigned int row = (n_ant <= 64) ? (i >> 3U) : (i >> 4U);
-            antenna_positions[i] = make_float3(static_cast<float>(col) * spacing_m,
-                                               static_cast<float>(row) * spacing_m, 0.0f);
+            if (i < n_elem) {
+                // Descending raw order & CHARTS physical ENU: East = -col * d, North = +row * d.
+                const std::size_t phys_ant = (n_elem - 1U) - i;
+                const std::size_t col = phys_ant % grid_cols;
+                const std::size_t row = phys_ant / grid_cols;
+                antenna_positions[i] = make_float3(-static_cast<float>(col) * spacing_m,
+                                                   static_cast<float>(row) * spacing_m, 0.0f);
+            } else {
+                antenna_positions[i] = make_float3(0.0f, 0.0f, 0.0f);
+            }
         }
     }
 };
@@ -96,20 +99,22 @@ struct MultiBeamTrackerConfig {
     SiteLocation site;
     MultiBeamTrackerConfig() {
         antenna_mask.fill(1);
-        for (std::size_t i = 0; i < MAX_TRACKER_ANTENNAS; ++i) {
-            const unsigned int col = (i < 64) ? (i & 7U) : (i & 15U);
-            const unsigned int row = (i < 64) ? (i >> 3U) : (i >> 4U);
-            antenna_positions[i] = make_float3(static_cast<float>(col) * spacing_m,
-                                               static_cast<float>(row) * spacing_m, 0.0f);
-        }
+        set_antenna_grid(64, spacing_m);
     }
     void set_antenna_grid(std::size_t n_ant, float spacing) {
         spacing_m = spacing;
+        const std::size_t n_elem = std::min(n_ant, MAX_TRACKER_ANTENNAS);
+        const std::size_t grid_cols = (n_ant <= 64) ? 8U : 16U;
         for (std::size_t i = 0; i < MAX_TRACKER_ANTENNAS; ++i) {
-            const unsigned int col = (n_ant <= 64) ? (i & 7U) : (i & 15U);
-            const unsigned int row = (n_ant <= 64) ? (i >> 3U) : (i >> 4U);
-            antenna_positions[i] = make_float3(static_cast<float>(col) * spacing_m,
-                                               static_cast<float>(row) * spacing_m, 0.0f);
+            if (i < n_elem) {
+                const std::size_t phys_ant = (n_elem - 1U) - i;
+                const std::size_t col = phys_ant % grid_cols;
+                const std::size_t row = phys_ant / grid_cols;
+                antenna_positions[i] = make_float3(-static_cast<float>(col) * spacing_m,
+                                                   static_cast<float>(row) * spacing_m, 0.0f);
+            } else {
+                antenna_positions[i] = make_float3(0.0f, 0.0f, 0.0f);
+            }
         }
     }
 };
@@ -131,7 +136,8 @@ inline void compute_celestial_trajectory(double ra_deg, double dec_deg, double l
 
     constexpr double DEG_TO_RAD = M_PI / 180.0;
     constexpr double HOURS_TO_RAD = M_PI / 12.0;
-    constexpr double EARTH_ROT_RATE_RAD_S = 7.292115e-5; // rad / s
+    constexpr double EARTH_ROT_RATE_RAD_S =
+        charts::constants::earth_rotation_rate_rad_per_s; // rad / s
 
     const double ha_rad = lst_hours * HOURS_TO_RAD - ra_deg * DEG_TO_RAD;
     const double dec_rad = dec_deg * DEG_TO_RAD;

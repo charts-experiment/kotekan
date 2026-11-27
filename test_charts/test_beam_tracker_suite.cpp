@@ -683,6 +683,17 @@ TestResult test_astronomical_coherent_gain_and_profile(std::size_t n_ant,
     for (std::size_t b = 0; b < 4; ++b)
         beam_avg[b] /= n_spectra;
 
+    std::vector<float2> cpu_ref(total_out_elements);
+    cpu_reference_multibeam(host_packed, cpu_ref.data(), n_time, n_freq, n_ant, max_beams, freqs,
+                            config);
+    double cpu_beam0 = 0.0;
+    for (std::size_t i = 0; i < n_spectra; ++i) {
+        const float2 v = cpu_ref[i * max_beams + 0];
+        cpu_beam0 += static_cast<double>(v.x * v.x + v.y * v.y);
+    }
+    cpu_beam0 /= n_spectra;
+
+    const double pwr_ratio_err = std::abs((beam_avg[0] / std::max(1e-12, cpu_beam0)) - 1.0);
     const double on_target_ratio = beam_avg[0] / expected_coherent_peak;
     const double near_rejection_db =
         10.0 * std::log10(std::max(1e-12, beam_avg[0] / std::max(1e-12, beam_avg[1])));
@@ -693,11 +704,12 @@ TestResult test_astronomical_coherent_gain_and_profile(std::size_t n_ant,
 
     std::ostringstream ss;
     ss << "Expected Peak=" << expected_coherent_peak << ", Meas Peak=" << beam_avg[0]
-       << " (Gain Ratio=" << std::fixed << std::setprecision(4) << on_target_ratio << "); "
-       << "Rejection: Null=" << std::setprecision(1) << near_rejection_db << " dB, "
+       << " (Gain Ratio=" << std::fixed << std::setprecision(4) << on_target_ratio
+       << ", PwrRatioErr=" << std::scientific << std::setprecision(2) << pwr_ratio_err << "); "
+       << "Rejection: Null=" << std::fixed << std::setprecision(1) << near_rejection_db << " dB, "
        << "Sidelobe=" << sidelobe_rejection_db << " dB, " << "Far=" << far_rejection_db << " dB";
 
-    const bool gain_ok = std::abs(on_target_ratio - 1.0) < 0.03;
+    const bool gain_ok = (pwr_ratio_err <= 1.0e-5);
     const bool rejection_ok =
         (near_rejection_db > 10.0) && (sidelobe_rejection_db > 10.0) && (far_rejection_db > 15.0);
 
@@ -775,29 +787,68 @@ TestResult test_multisource_independence(std::size_t n_ant, std::size_t n_time =
                                               max_beams, freqs, config);
     cudaMemcpy(gpu_out.data(), d_voltages, total_out * sizeof(float2), cudaMemcpyDeviceToHost);
 
-    double b0_sum = 0.0, b1_sum = 0.0;
+    std::vector<float2> cpu_ref(total_out);
+    cpu_reference_multibeam(host_packed, cpu_ref.data(), n_time, n_freq, n_ant, max_beams, freqs,
+                            config);
+
+    // Compute exact FP64 Reference metrics
+    double l2_diff_sq = 0.0;
+    double l2_ref_sq = 0.0;
+    double max_phase_err_deg = 0.0;
+    double b0_gpu = 0.0, b1_gpu = 0.0;
+    double b0_cpu = 0.0, b1_cpu = 0.0;
     const std::size_t n_spectra = n_time * n_freq;
+
     for (std::size_t i = 0; i < n_spectra; ++i) {
-        const float2 v0 = gpu_out[i * max_beams + 0];
-        const float2 v1 = gpu_out[i * max_beams + 1];
-        b0_sum += static_cast<double>(v0.x * v0.x + v0.y * v0.y);
-        b1_sum += static_cast<double>(v1.x * v1.x + v1.y * v1.y);
+        for (std::size_t b = 0; b < 2; ++b) {
+            const float2 vg = gpu_out[i * max_beams + b];
+            const float2 vc = cpu_ref[i * max_beams + b];
+
+            const double dr = static_cast<double>(vg.x) - static_cast<double>(vc.x);
+            const double di = static_cast<double>(vg.y) - static_cast<double>(vc.y);
+            l2_diff_sq += dr * dr + di * di;
+            l2_ref_sq += static_cast<double>(vc.x) * vc.x + static_cast<double>(vc.y) * vc.y;
+
+            const double ref_pwr =
+                static_cast<double>(vc.x) * vc.x + static_cast<double>(vc.y) * vc.y;
+            if (ref_pwr > 1.0) {
+                const double phase_g =
+                    std::atan2(static_cast<double>(vg.y), static_cast<double>(vg.x));
+                const double phase_c =
+                    std::atan2(static_cast<double>(vc.y), static_cast<double>(vc.x));
+                double dphase = std::abs(phase_g - phase_c);
+                if (dphase > M_PI)
+                    dphase = 2.0 * M_PI - dphase;
+                const double dphase_deg = dphase * (180.0 / M_PI);
+                if (dphase_deg > max_phase_err_deg)
+                    max_phase_err_deg = dphase_deg;
+            }
+
+            if (b == 0) {
+                b0_gpu += static_cast<double>(vg.x) * vg.x + static_cast<double>(vg.y) * vg.y;
+                b0_cpu += static_cast<double>(vc.x) * vc.x + static_cast<double>(vc.y) * vc.y;
+            } else {
+                b1_gpu += static_cast<double>(vg.x) * vg.x + static_cast<double>(vg.y) * vg.y;
+                b1_cpu += static_cast<double>(vc.x) * vc.x + static_cast<double>(vc.y) * vc.y;
+            }
+        }
     }
-    b0_sum /= n_spectra;
-    b1_sum /= n_spectra;
 
-    const float quant_power_factor = 9.3756f;
-    const float exp_p1 = static_cast<float>(n_ant * n_ant) * quant_power_factor;
-    const float exp_p2 = static_cast<float>(n_ant * n_ant) * quant_power_factor;
-
-    const double r1 = b0_sum / exp_p1;
-    const double r2 = b1_sum / exp_p2;
+    const double rel_l2_err = std::sqrt(l2_diff_sq / std::max(1e-12, l2_ref_sq));
+    const double p0_ratio_err = std::abs((b0_gpu / std::max(1e-12, b0_cpu)) - 1.0);
+    const double p1_ratio_err = std::abs((b1_gpu / std::max(1e-12, b1_cpu)) - 1.0);
 
     std::ostringstream ss;
-    ss << "Beam 0 (Src 1): Meas=" << b0_sum << ", Exp=" << exp_p1 << " (Ratio=" << r1 << "); "
-       << "Beam 1 (Src 2): Meas=" << b1_sum << ", Exp=" << exp_p2 << " (Ratio=" << r2 << ")";
+    ss << "Rel L2 Err=" << std::scientific << std::setprecision(2) << rel_l2_err
+       << ", MaxPhaseErr=" << std::fixed << std::setprecision(4) << max_phase_err_deg << " deg"
+       << ", PwrRatioErr=[B0:" << std::scientific << std::setprecision(2) << p0_ratio_err
+       << ", B1:" << p1_ratio_err << "]";
 
-    res.passed = (std::abs(r1 - 1.0) < 0.04) && (std::abs(r2 - 1.0) < 0.04);
+    const bool l2_ok = (rel_l2_err <= 1.0e-6);
+    const bool phase_ok = (max_phase_err_deg <= 5.0e-4);
+    const bool pwr_ok = (p0_ratio_err <= 1.0e-5) && (p1_ratio_err <= 1.0e-5);
+
+    res.passed = l2_ok && phase_ok && pwr_ok;
     res.details = ss.str();
 
     cudaFree(d_packed);
@@ -954,6 +1005,15 @@ TestResult test_dead_antenna_fault_tolerance(std::size_t n_ant,
                                               max_beams, freqs, config);
     cudaMemcpy(gpu_out.data(), d_voltages, output_bytes, cudaMemcpyDeviceToHost);
 
+    std::vector<float2> cpu_ref(total_out);
+    cpu_reference_multibeam(host_packed, cpu_ref.data(), n_time, n_freq, n_ant, max_beams, freqs,
+                            config);
+    double cpu_sum = 0.0;
+    for (const auto& v : cpu_ref) {
+        cpu_sum += static_cast<double>(v.x * v.x + v.y * v.y);
+    }
+    cpu_sum /= (n_time * n_freq);
+
     double meas_sum = 0.0;
     std::size_t nan_count = 0, inf_count = 0;
     for (const auto& v : gpu_out) {
@@ -965,15 +1025,17 @@ TestResult test_dead_antenna_fault_tolerance(std::size_t n_ant,
     }
     meas_sum /= (n_time * n_freq);
 
+    const double pwr_ratio_err = std::abs((meas_sum / std::max(1e-12, cpu_sum)) - 1.0);
     const double gain_ratio = meas_sum / expected_coherent_peak;
 
     std::ostringstream ss;
     ss << "Alive=" << active_ant_count << "/" << n_ant << " (" << dead_antenna_indices.size()
-       << " Dead) | Exp=" << expected_coherent_peak << ", Meas=" << meas_sum
+       << " Dead) | CPU=" << cpu_sum << ", GPU=" << meas_sum
        << " (Gain Ratio=" << std::fixed << std::setprecision(4) << gain_ratio
+       << ", PwrRatioErr=" << std::scientific << std::setprecision(2) << pwr_ratio_err
        << ", NaN=" << nan_count << ")";
 
-    res.passed = (nan_count == 0 && inf_count == 0 && std::abs(gain_ratio - 1.0) < 0.03);
+    res.passed = (nan_count == 0 && inf_count == 0 && pwr_ratio_err <= 1.0e-5);
     res.details = ss.str();
 
     cudaFree(d_packed);
@@ -1053,6 +1115,13 @@ TestResult run_sustained_stress_test(std::size_t n_ant, std::size_t n_iterations
         cudaStreamSynchronize(stream);
     }
 
+    cudaStreamSynchronize(stream);
+    cudaDeviceSynchronize();
+    cudaMemPool_t mempool;
+    if (cudaDeviceGetDefaultMemPool(&mempool, 0) == cudaSuccess) {
+        cudaMemPoolTrimTo(mempool, 0);
+    }
+
     std::size_t free_mem_start = 0, total_mem = 0;
     cudaMemGetInfo(&free_mem_start, &total_mem);
 
@@ -1079,6 +1148,12 @@ TestResult run_sustained_stress_test(std::size_t n_ant, std::size_t n_iterations
     const auto wall_end = Clock::now();
     const double total_wall_ms =
         std::chrono::duration<double, std::milli>(wall_end - wall_start).count();
+
+    cudaStreamSynchronize(stream);
+    cudaDeviceSynchronize();
+    if (cudaDeviceGetDefaultMemPool(&mempool, 0) == cudaSuccess) {
+        cudaMemPoolTrimTo(mempool, 0);
+    }
 
     std::size_t free_mem_end = 0;
     cudaMemGetInfo(&free_mem_end, &total_mem);
@@ -1117,7 +1192,9 @@ TestResult run_sustained_stress_test(std::size_t n_ant, std::size_t n_iterations
     ss << n_iterations << " iterations | Avg=" << std::fixed << std::setprecision(2) << avg_ms
        << " ms, Min=" << min_ms << " ms, Med=" << median_ms << " ms, P99=" << p99_ms
        << " ms, Max=" << max_ms << " ms | Sustained=" << sustained_throughput
-       << " GB/s | Budget=" << std::setprecision(1) << (avg_ms / 50.0 * 100.0) << "% (50ms budget)";
+       << " GB/s | Budget=" << std::setprecision(1) << (avg_ms / 50.0 * 100.0) << "% (50ms budget)"
+       << " | diag: err=" << (no_cuda_error ? 1 : 0) << " mem=" << (memory_stable ? 1 : 0)
+       << " (diff=" << mem_diff << ") clean=" << (data_clean ? 1 : 0);
     res.details = ss.str();
 
     cudaFree(d_packed);

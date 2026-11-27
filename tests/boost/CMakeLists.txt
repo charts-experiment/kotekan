@@ -33,6 +33,27 @@ target_link_libraries(test_synchronized_queue PRIVATE pthread kotekan_libs kotek
 add_executable(test_modulo test_modulo.cpp)
 target_link_libraries(test_modulo PRIVATE libexternal kotekan_libs kotekan_utils kotekan_core)
 
+# test_cuda_stream_assignment - stream-by-role and the pipeline's lock order. The functions under
+# test are header-only and call no CUDA, so this runs in the CPU-only builds; lib/gpu is named
+# explicitly because gpuCommand.hpp (for gpuCommandType) is only on an include path via kotekan_gpu,
+# and lib/ builds that target solely when a GPU backend is found.
+add_executable(test_cuda_stream_assignment test_cuda_stream_assignment.cpp)
+target_include_directories(test_cuda_stream_assignment PRIVATE ${KOTEKAN_SOURCE_DIR}/lib/cuda
+                                                               ${KOTEKAN_SOURCE_DIR}/lib/gpu)
+target_link_libraries(test_cuda_stream_assignment PRIVATE pthread libexternal kotekan_libs
+                                                          kotekan_utils kotekan_core)
+
+# test_gpu_memory_claims - the one-owner-per-region rule for named GPU memory: the policy function
+# AND its wiring in gpuDeviceInterface (owner scopes, thread attribution, arrays, views, the
+# declared-share exemption). lib/gpu is built only when a GPU backend is found and the CI boost jobs
+# are CPU-only, so gpuDeviceInterface.cpp is compiled into the test directly -- it depends on no
+# backend, only on kotekan_core.
+add_executable(test_gpu_memory_claims test_gpu_memory_claims.cpp
+                                      ${KOTEKAN_SOURCE_DIR}/lib/gpu/gpuDeviceInterface.cpp)
+target_include_directories(test_gpu_memory_claims PRIVATE ${KOTEKAN_SOURCE_DIR}/lib/gpu)
+target_link_libraries(test_gpu_memory_claims PRIVATE pthread libexternal kotekan_libs kotekan_utils
+                                                     kotekan_core)
+
 add_executable(test_stat_tracker test_stat_tracker.cpp)
 target_link_libraries(test_stat_tracker PRIVATE libexternal kotekan_libs kotekan_utils kotekan_core)
 
@@ -120,6 +141,20 @@ add_executable(test_buffer_swap test_buffer_swap.cpp)
 target_link_libraries(test_buffer_swap PRIVATE pthread libexternal kotekan_libs kotekan_utils
                                                kotekan_core kotekan_metadata)
 
+# test_bufferSend - tests for bufferSend stage
+add_executable(test_bufferSend test_bufferSend.cpp)
+target_link_libraries(test_bufferSend PRIVATE libexternal kotekan_stages kotekan_libs kotekan_utils
+                                              kotekan_core)
+target_include_directories(test_bufferSend PRIVATE ${KOTEKAN_SOURCE_DIR}/lib/stages)
+
+# test_pirateNetworkSend - tests for the pirateNetworkSend stage
+add_executable(test_pirateNetworkSend test_pirateNetworkSend.cpp)
+target_link_libraries(test_pirateNetworkSend PRIVATE libexternal kotekan_stages kotekan_libs
+                                                     kotekan_utils kotekan_core)
+target_include_directories(test_pirateNetworkSend PRIVATE ${KOTEKAN_SOURCE_DIR}/lib/stages)
+target_compile_definitions(test_pirateNetworkSend
+                           PRIVATE TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/testdata")
+
 # test_prometheus_metrics needs fmt and prometheusMetrics
 add_executable(test_prometheus_metrics test_prometheus_metrics.cpp)
 target_link_libraries(test_prometheus_metrics PRIVATE libexternal kotekan_libs kotekan_core)
@@ -138,6 +173,12 @@ add_executable(test_chime_stacking test_chime_stacking.cpp)
 target_link_libraries(test_chime_stacking PRIVATE libexternal kotekan_utils kotekan_stages
                                                   kotekan_core)
 target_include_directories(test_chime_stacking PRIVATE ${KOTEKAN_SOURCE_DIR}/lib/stages)
+
+# test_rawFileWrite - tests for the rawFileWrite stage
+add_executable(test_rawFileWrite test_rawFileWrite.cpp)
+target_link_libraries(test_rawFileWrite PRIVATE libexternal kotekan_stages kotekan_libs
+                                                kotekan_utils kotekan_core)
+target_include_directories(test_rawFileWrite PRIVATE ${KOTEKAN_SOURCE_DIR}/lib/stages)
 
 # source files for broker test
 add_executable(dataset_broker_producer dataset_broker_producer.cpp)
@@ -241,7 +282,9 @@ add_custom_target(
     COMMENT "Generating timeUtil.py script")
 
 # visFileData unit test + end-to-end writer test (HDF5 backend)
-if(HDF5_FOUND AND HighFive_FOUND)
+if(HDF5_FOUND
+   AND HighFive_FOUND
+   AND HDF5Plugin_PLUGIN_DIR)
     add_executable(test_hdf5N2Write test_hdf5N2Write.cpp)
     target_link_libraries(
         test_hdf5N2Write
@@ -408,9 +451,51 @@ endif()
 target_include_directories(test_bufferBadInputs PRIVATE ${KOTEKAN_SOURCE_DIR}/lib/stages
                                                         ${KOTEKAN_SOURCE_DIR}/lib/utils)
 
+# test_bufferRecv - tests for bufferRecv stage
+add_executable(test_bufferRecv test_bufferRecv.cpp)
+if(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+    target_link_libraries(
+        test_bufferRecv
+        PRIVATE libexternal
+                kotekan_stages
+                kotekan_libs
+                kotekan_utils
+                kotekan_core
+                -Wl,-all_load
+                kotekan_metadata)
+else()
+    target_link_libraries(
+        test_bufferRecv
+        PRIVATE libexternal
+                kotekan_stages
+                kotekan_libs
+                kotekan_utils
+                kotekan_core
+                -Wl,--whole-archive
+                kotekan_metadata
+                -Wl,--no-whole-archive)
+endif()
+target_include_directories(test_bufferRecv PRIVATE ${KOTEKAN_SOURCE_DIR}/lib/stages)
+
 # test_upchannelizeReference - the serial float32 upchannelization reference. The reference lives in
 # lib/cuda, next to its only caller, but has no CUDA dependency of its own. Compile it directly
 # rather than linking kotekan_cuda, so these tests still build and run on a machine without CUDA.
 add_executable(test_upchannelizeReference test_upchannelizeReference.cpp
                                           ${KOTEKAN_SOURCE_DIR}/lib/cuda/upchannelizeReference.cpp)
 target_include_directories(test_upchannelizeReference PRIVATE ${KOTEKAN_SOURCE_DIR}/lib/cuda)
+
+add_executable(test_DtvRfiMask test_DtvRfiMask.cpp ${KOTEKAN_SOURCE_DIR}/lib/stages/DtvRfiMask.cpp)
+target_link_libraries(test_DtvRfiMask PRIVATE kotekan_core kotekan_metadata kotekan_utils
+                                              libexternal)
+
+add_executable(test_ProcessPacketMask test_ProcessPacketMask.cpp
+                                      ${KOTEKAN_SOURCE_DIR}/lib/stages/ProcessPacketMask.cpp)
+target_link_libraries(test_ProcessPacketMask PRIVATE kotekan_core kotekan_metadata kotekan_utils
+                                                     libexternal)
+
+add_executable(test_chartsAccumulate test_chartsAccumulate.cpp
+                                     ${KOTEKAN_SOURCE_DIR}/lib/stages/chartsAccumulate.cpp)
+target_link_libraries(test_chartsAccumulate PRIVATE kotekan_core kotekan_metadata kotekan_utils
+                                                    libexternal)
+target_include_directories(test_chartsAccumulate PRIVATE ${KOTEKAN_SOURCE_DIR}/lib/stages
+                                                         ${KOTEKAN_SOURCE_DIR}/lib/metadata)

@@ -35,15 +35,10 @@ from constants import (
 # ============================================================================
 
 
-def unpack_4bit_complex_numpy(u8_array: np.ndarray) -> np.ndarray:
-    """
-    Unpacks int4x2_t (4-bit real in bits 0-3, 4-bit imag in bits 4-7) to complex64.
-    """
-    real = (u8_array & 0x0F).astype(np.int8)
-    imag = (u8_array >> 4).astype(np.int8)
-    real[real >= 8] -= 16
-    imag[imag >= 8] -= 16
-    return real.astype(np.float32) + 1j * imag.astype(np.float32)
+from sim.writer import unpack_int4x2
+
+# Alias for backward compatibility
+unpack_4bit_complex_numpy = unpack_int4x2
 
 
 # ============================================================================

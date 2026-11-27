@@ -13,11 +13,11 @@ Group=kotekan
 LimitMEMLOCK=infinity
 Restart=always
 RestartSec=10
+StateDirectory=kotekan
 WorkingDirectory=/var/lib/kotekan
 TimeoutStopSec=60
 KillSignal=SIGTERM
 ExecStart=/usr/local/bin/kotekan
-PIDFile=/var/run/kotekan.pid
 UMask=002
 
 [Install]

@@ -3,6 +3,7 @@
 #include "kotekanLoggingFixture.hpp" // for kotekan_logging_fixture
 
 #include <boost/test/included/unit_test.hpp>
+#include <chartsMetadata.hpp>
 #include <chordMetadata.hpp>
 #include <cmath>
 #include <cstring>
@@ -343,4 +344,49 @@ BOOST_AUTO_TEST_CASE(test_timeval_json_range_check) {
     bad[jsonMetadata::TV_SEC] = 1;
     bad[jsonMetadata::TV_USEC] = 1000000; // not a valid microsecond count
     BOOST_CHECK_THROW(bad.template get<timeval>(), std::out_of_range);
+}
+
+BOOST_AUTO_TEST_CASE(test_chartsMetadata_roundtrip_and_unset_dims) {
+    // A default-constructed object has dims == -1; to_json must not read an invalid range.
+    chartsMetadata empty_meta;
+    BOOST_TEST(empty_meta.dims == -1);
+    const nlohmann::json empty_json = empty_meta.to_json();
+    BOOST_TEST(empty_json.at("dim").empty());
+    BOOST_TEST(empty_json.at("stride").empty());
+    BOOST_TEST(!empty_json.contains("time_downsampling_fpga"));
+    BOOST_TEST(!empty_json.contains("first_packet_recv_time"));
+
+    chartsMetadata meta;
+    meta.set_name("T");
+    meta.type = kotekan::DataType::int8;
+    meta.dims = 2;
+    meta.set_array_dimension(0, 336, "F");
+    meta.set_array_dimension(1, 64, "A");
+    meta.set_strides_simple();
+    meta.set_fpga_seq_num(424242);
+    meta.set_frame_counter(77);
+    meta.set_coarse_freq({10, 11, 12});
+    meta.set_lost_timesamples(5);
+    meta.set_time_downsampling_fpga(125);
+    meta.set_first_packet_recv_time(timeval{1700000000, 123456});
+    meta.set_time0_fpga(9876543210LL);
+
+    std::vector<char> bytes(meta.get_serialized_size());
+    BOOST_TEST(meta.serialize(bytes.data()) == bytes.size());
+
+    chartsMetadata restored;
+    BOOST_TEST(restored.set_from_bytes(bytes.data(), bytes.size()) == bytes.size());
+    BOOST_CHECK(restored.get_coarse_freq() == std::vector<int>({10, 11, 12}));
+    BOOST_TEST(restored.get_lost_timesamples() == 5);
+    BOOST_TEST(restored.has_time_downsampling_fpga());
+    BOOST_TEST(restored.get_time_downsampling_fpga() == 125);
+    BOOST_TEST(restored.has_first_packet_recv_time());
+    BOOST_TEST(restored.get_first_packet_recv_time().tv_sec == 1700000000);
+    BOOST_TEST(restored.get_first_packet_recv_time().tv_usec == 123456);
+    BOOST_TEST(restored.get_time0_fpga() == 9876543210LL);
+
+    const nlohmann::json j = restored.to_json();
+    BOOST_TEST(j.at("time_downsampling_fpga").get<int>() == 125);
+    BOOST_TEST(j.at("first_packet_recv_time").at(jsonMetadata::TV_SEC).get<long>() == 1700000000L);
+    BOOST_TEST(j.at("first_packet_recv_time").at(jsonMetadata::TV_USEC).get<long>() == 123456L);
 }

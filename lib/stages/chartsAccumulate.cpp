@@ -4,6 +4,7 @@
 #include "chartsMetadata.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <functional>
 #include <limits>
@@ -38,7 +39,19 @@ chartsAccumulate::chartsAccumulate(Config& config, const std::string& unique_nam
     Stage(config, unique_name, buffer_container, std::bind(&chartsAccumulate::main_thread, this)),
     in_buf(get_buffer("in_buf")), out_buf(get_buffer("out_buf")),
     _num_frames_to_accumulate(config.get<int32_t>(unique_name, "num_frames_to_accumulate")),
+    _is_float32(false), _average(config.get_default<bool>(unique_name, "average", false)),
     _num_values(0) {
+
+    const std::string data_type = config.get_default<std::string>(unique_name, "data_type", "int32");
+    if (data_type == "int32") {
+        _is_float32 = false;
+        if (_average)
+            throw std::invalid_argument("chartsAccumulate average is only supported for float32");
+    } else if (data_type == "float32") {
+        _is_float32 = true;
+    } else {
+        throw std::invalid_argument("chartsAccumulate data_type must be 'int32' or 'float32'");
+    }
 
     if (!in_buf || !out_buf)
         throw std::runtime_error("chartsAccumulate requires in_buf and out_buf");
@@ -54,9 +67,10 @@ chartsAccumulate::chartsAccumulate(Config& config, const std::string& unique_nam
     }
     if (in_buf->frame_size != out_buf->frame_size)
         throw std::invalid_argument("chartsAccumulate input and output frame sizes must match");
+    static_assert(sizeof(int32_t) == sizeof(float), "Expected 32-bit int and float");
     if (in_buf->frame_size == 0 || in_buf->frame_size % sizeof(int32_t) != 0)
         throw std::invalid_argument(
-            "chartsAccumulate frame size must be a non-zero multiple of int32_t");
+            "chartsAccumulate frame size must be a non-zero multiple of 4 bytes");
 
     _num_values = in_buf->frame_size / sizeof(int32_t);
 
@@ -93,7 +107,9 @@ void chartsAccumulate::main_thread() {
     int out_frame_id = 0;
     int frames_in_group = 0;
     int64_t lost_samples = 0;
-    std::vector<int64_t> accumulation(_num_values, 0);
+    std::vector<int64_t> accumulation(_is_float32 ? 0 : _num_values, 0);
+    std::vector<double> float_accumulation(_is_float32 ? _num_values : 0, 0.0);
+    std::vector<int32_t> valid_counts((_is_float32 && _average) ? _num_values : 0, 0);
 
     while (!stop_thread) {
         uint8_t* in_frame = in_buf->wait_for_full_frame(unique_name, in_frame_id);
@@ -118,7 +134,13 @@ void chartsAccumulate::main_thread() {
                 throw std::runtime_error("chartsAccumulate could not create output chartsMetadata");
 
             validate_metadata(*output_metadata, *input_metadata);
-            std::fill(accumulation.begin(), accumulation.end(), 0);
+            if (_is_float32) {
+                std::fill(float_accumulation.begin(), float_accumulation.end(), 0.0);
+                if (_average)
+                    std::fill(valid_counts.begin(), valid_counts.end(), 0);
+            } else {
+                std::fill(accumulation.begin(), accumulation.end(), 0);
+            }
             lost_samples = 0;
         } else {
             output_metadata = get_charts_metadata(out_buf, out_frame_id);
@@ -129,9 +151,27 @@ void chartsAccumulate::main_thread() {
             out_frame = out_buf->frames[out_frame_id];
         }
 
-        const auto* input = reinterpret_cast<const int32_t*>(in_frame);
-        for (std::size_t i = 0; i < _num_values; ++i)
-            add_checked(accumulation[i], input[i]);
+        if (_is_float32) {
+            const auto* input = reinterpret_cast<const float*>(in_frame);
+            if (_average) {
+                // Exclude zero-blanked (RFI-excised) or non-finite values so partial
+                // sub-frame blanking does not bias the accumulated power downward by k/N.
+                for (std::size_t i = 0; i < _num_values; ++i) {
+                    const float val = input[i];
+                    if (std::isfinite(val) && val != 0.0f) {
+                        float_accumulation[i] += static_cast<double>(val);
+                        valid_counts[i] += 1;
+                    }
+                }
+            } else {
+                for (std::size_t i = 0; i < _num_values; ++i)
+                    float_accumulation[i] += static_cast<double>(input[i]);
+            }
+        } else {
+            const auto* input = reinterpret_cast<const int32_t*>(in_frame);
+            for (std::size_t i = 0; i < _num_values; ++i)
+                add_checked(accumulation[i], input[i]);
+        }
 
         if (input_metadata->has_lost_timesamples())
             add_checked(lost_samples, input_metadata->get_lost_timesamples());
@@ -141,12 +181,28 @@ void chartsAccumulate::main_thread() {
         ++frames_in_group;
 
         if (frames_in_group == _num_frames_to_accumulate) {
-            auto* output = reinterpret_cast<int32_t*>(out_frame);
-            for (std::size_t i = 0; i < _num_values; ++i) {
-                if (accumulation[i] < std::numeric_limits<int32_t>::min()
-                    || accumulation[i] > std::numeric_limits<int32_t>::max())
-                    throw std::overflow_error("chartsAccumulate result does not fit in int32_t");
-                output[i] = static_cast<int32_t>(accumulation[i]);
+            if (_is_float32) {
+                auto* output = reinterpret_cast<float*>(out_frame);
+                if (_average) {
+                    for (std::size_t i = 0; i < _num_values; ++i) {
+                        output[i] = (valid_counts[i] > 0)
+                                        ? static_cast<float>(float_accumulation[i]
+                                                             / static_cast<double>(valid_counts[i]))
+                                        : 0.0f;
+                    }
+                } else {
+                    for (std::size_t i = 0; i < _num_values; ++i)
+                        output[i] = static_cast<float>(float_accumulation[i]);
+                }
+            } else {
+                auto* output = reinterpret_cast<int32_t*>(out_frame);
+                for (std::size_t i = 0; i < _num_values; ++i) {
+                    if (accumulation[i] < std::numeric_limits<int32_t>::min()
+                        || accumulation[i] > std::numeric_limits<int32_t>::max())
+                        throw std::overflow_error(
+                            "chartsAccumulate result does not fit in int32_t");
+                    output[i] = static_cast<int32_t>(accumulation[i]);
+                }
             }
 
             if (output_metadata->has_lost_timesamples()) {

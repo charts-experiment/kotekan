@@ -83,7 +83,7 @@ spec_noise = np.abs(db_noise[:, :, 0])**2    # [time, freq]
 spec_nonoise = np.abs(db_nonoise[:, :, 0])**2
 
 # Theoretical dispersive track
-K_DM = 4148.808 # MHz^2 pc^-1 cm^3 s
+from sim.constants import K_DM
 dm = 2.0        # pc cm^-3
 f_ref_mhz = freq_coarse_mhz[-1] # 400.5 MHz
 t_arr_ref_s = 0.005 # 5.0 ms

@@ -43,8 +43,6 @@ void generate_test_frame(std::vector<kotekan::int4x2_t>& data, std::size_t n_tim
     std::normal_distribution<float> noise_dist(0.0f, 1.8f);
     std::uniform_real_distribution<float> uni(0.0f, 1.0f);
 
-    const std::size_t total_spectra = n_time * n_freq;
-
     for (std::size_t t = 0; t < n_time; ++t) {
         for (std::size_t f = 0; f < n_freq; ++f) {
             const std::size_t s = t * n_freq + f;

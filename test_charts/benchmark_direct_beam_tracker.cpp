@@ -9,9 +9,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cuda_runtime.h>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <numeric>
+#include <sstream>
+#include <string>
 #include <vector>
 
 namespace {
@@ -88,16 +91,55 @@ void cpu_reference_direct_beamformer(const std::vector<kotekan::int4x2_t>& packe
 } // namespace
 
 int main(int argc, char** argv) {
-    std::size_t n_time = 3840; // Default: 3,840 samples (~12.8 ms)
+    std::size_t n_time = 3840;      // Default: 3,840 samples (~12.8 ms)
+    std::size_t n_freq = 336;       // Default: 336 channels
+    std::size_t n_ant = 64;         // Default: 64 antennas
+    std::size_t max_beams = 16;     // Default stride
+    std::size_t n_iterations = 25;  // Default iterations
+    std::vector<std::size_t> test_beam_counts;
+    std::string json_output = "";
+
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "--n-time" && i + 1 < argc) {
+        if ((arg == "--n-time" || arg == "-t") && i + 1 < argc) {
             n_time = std::stoul(argv[++i]);
         } else if (arg == "--15360" || arg == "--full") {
             n_time = 15360;
         } else if (arg == "--3840" || arg == "--low-vram") {
             n_time = 3840;
+        } else if ((arg == "--n-ant" || arg == "-a") && i + 1 < argc) {
+            n_ant = std::stoul(argv[++i]);
+        } else if ((arg == "--n-freq" || arg == "-f") && i + 1 < argc) {
+            n_freq = std::stoul(argv[++i]);
+        } else if (arg == "--max-beams" && i + 1 < argc) {
+            max_beams = std::stoul(argv[++i]);
+        } else if ((arg == "--beams" || arg == "-b") && i + 1 < argc) {
+            std::string beams_str = argv[++i];
+            std::stringstream ss(beams_str);
+            std::string item;
+            while (std::getline(ss, item, ',')) {
+                if (!item.empty()) {
+                    test_beam_counts.push_back(std::stoul(item));
+                }
+            }
+        } else if (arg == "--iterations" && i + 1 < argc) {
+            n_iterations = std::stoul(argv[++i]);
+        } else if (arg == "--json-output" && i + 1 < argc) {
+            json_output = argv[++i];
         }
+    }
+
+    if (test_beam_counts.empty()) {
+        for (std::size_t b : {1, 2, 4, 10, 16, 64}) {
+            if (b <= max_beams) test_beam_counts.push_back(b);
+        }
+        if (test_beam_counts.empty()) test_beam_counts.push_back(max_beams);
+    } else {
+        std::size_t highest = 0;
+        for (std::size_t b : test_beam_counts) {
+            if (b > highest) highest = b;
+        }
+        if (highest > max_beams) max_beams = highest;
     }
 
     std::cout << "================================================================================="
@@ -107,10 +149,6 @@ int main(int argc, char** argv) {
     std::cout << "================================================================================="
                  "==================\n\n";
 
-    const std::size_t n_freq = 672; // Full 672 CHARTS local channels
-    const std::size_t n_ant = 32;   // 32 Antennas
-    const std::size_t max_beams = 16;
-    const std::size_t n_iterations = 25;
     const double real_time_budget_ms = (static_cast<double>(n_time) * 3.333333333333) / 1000.0;
 
     const std::size_t input_bytes = n_time * n_freq * n_ant * sizeof(kotekan::int4x2_t);
@@ -135,6 +173,17 @@ int main(int argc, char** argv) {
     cudaGetDeviceProperties(&prop, 0);
     std::cout << "Device: " << prop.name << " (" << (prop.totalGlobalMem / (1024 * 1024))
               << " MB VRAM)\n\n";
+
+    // VRAM Safety Check before allocation
+    std::size_t vram_free_before = 0, vram_total = 0;
+    cudaMemGetInfo(&vram_free_before, &vram_total);
+    const std::size_t required_bytes = input_bytes + output_bytes + weights_bytes;
+    if (required_bytes > static_cast<std::size_t>(vram_free_before * 0.95)) {
+        std::cerr << "OUT_OF_VRAM: Required allocations (" << (required_bytes / (1024.0 * 1024.0))
+                  << " MB) exceed physical GPU headroom (" << (vram_free_before / (1024.0 * 1024.0))
+                  << " MB free).\n";
+        return 2;
+    }
 
     // Prepare synthetic input data
     std::cout << "[1/4] Generating synthetic test data..." << std::flush;
@@ -181,6 +230,10 @@ int main(int argc, char** argv) {
     cudaMalloc(&d_wavenumbers, n_freq * sizeof(double));
     cudaMalloc(&d_positions, n_ant * sizeof(float3));
 
+    std::size_t vram_free_after = 0;
+    cudaMemGetInfo(&vram_free_after, &vram_total);
+    const double vram_allocated_mb = static_cast<double>(vram_free_before - vram_free_after) / (1024.0 * 1024.0);
+
     cudaMemcpy(d_packed, h_packed.data(), input_bytes, cudaMemcpyHostToDevice);
     cudaMemcpy(d_dirs, h_dirs.data(), max_beams * sizeof(kotekan::DirectDirection3D),
                cudaMemcpyHostToDevice);
@@ -196,9 +249,6 @@ int main(int argc, char** argv) {
                                               nullptr, nullptr, max_beams, n_freq, n_ant, stream);
     cudaStreamSynchronize(stream);
 
-    // Apply L2 persisting cache policy window for weights on Blackwell SM120 if supported
-    // kotekan::set_l2_persisting_weights_policy(stream, d_weights, weights_bytes);
-
     // Read back weights for CPU reference validation
     std::vector<float2> h_weights(max_beams * n_freq * n_ant);
     cudaMemcpy(h_weights.data(), d_weights, weights_bytes, cudaMemcpyDeviceToHost);
@@ -207,7 +257,7 @@ int main(int argc, char** argv) {
     std::cout
         << "[3/4] Validating numerical equivalence against CPU reference (first 512 samples)..."
         << std::flush;
-    const std::size_t test_samples = 512;
+    const std::size_t test_samples = std::min(n_time, std::size_t(512));
     std::vector<kotekan::int4x2_t> h_test_packed(h_packed.begin(),
                                                  h_packed.begin() + test_samples * n_freq * n_ant);
     std::vector<float2> cpu_test_voltages;
@@ -223,34 +273,63 @@ int main(int argc, char** argv) {
     cudaMemcpy(gpu_test_voltages.data(), d_voltages,
                test_samples * n_freq * max_beams * sizeof(float2), cudaMemcpyDeviceToHost);
 
-    float max_err = 0.0f;
+    double sum_diff_sq = 0.0;
+    double sum_ref_sq = 0.0;
+    double max_phase_err_deg = 0.0;
     for (std::size_t i = 0; i < gpu_test_voltages.size(); ++i) {
-        const float diff_r = std::abs(gpu_test_voltages[i].x - cpu_test_voltages[i].x);
-        const float diff_i = std::abs(gpu_test_voltages[i].y - cpu_test_voltages[i].y);
-        max_err = std::max(max_err, std::max(diff_r, diff_i));
+        const double dr = static_cast<double>(gpu_test_voltages[i].x) - static_cast<double>(cpu_test_voltages[i].x);
+        const double di = static_cast<double>(gpu_test_voltages[i].y) - static_cast<double>(cpu_test_voltages[i].y);
+        sum_diff_sq += dr * dr + di * di;
+        const double r_sq = static_cast<double>(cpu_test_voltages[i].x) * cpu_test_voltages[i].x +
+                            static_cast<double>(cpu_test_voltages[i].y) * cpu_test_voltages[i].y;
+        sum_ref_sq += r_sq;
+        if (r_sq > 1.0) {
+            double pg = std::atan2(static_cast<double>(gpu_test_voltages[i].y), static_cast<double>(gpu_test_voltages[i].x));
+            double pc = std::atan2(static_cast<double>(cpu_test_voltages[i].y), static_cast<double>(cpu_test_voltages[i].x));
+            double dp = std::abs(pg - pc);
+            if (dp > M_PI) dp = 2.0 * M_PI - dp;
+            max_phase_err_deg = std::max(max_phase_err_deg, dp * (180.0 / M_PI));
+        }
     }
+    const double rel_l2_err = std::sqrt(sum_diff_sq / std::max(1e-12, sum_ref_sq));
+    const double snr_db = 10.0 * std::log10(sum_ref_sq / std::max(1e-12, sum_diff_sq));
 
-    if (max_err < 1e-4f) {
-        std::cout << " PASSED! (Max absolute error: " << max_err << ")\n\n";
+    if (rel_l2_err < 1.0e-4 && max_phase_err_deg < 0.01) {
+        std::cout << " PASSED! (Rel L2: " << std::scientific << rel_l2_err
+                  << ", MaxPhase: " << std::fixed << std::setprecision(4) << max_phase_err_deg << " deg, SNR: "
+                  << std::setprecision(1) << snr_db << " dB)\n\n";
     } else {
-        std::cout << " FAILED! (Max error: " << max_err << " exceeds tolerance 1e-4)\n\n";
+        std::cout << " FAILED! (Rel L2: " << rel_l2_err << ", MaxPhase: " << max_phase_err_deg << " deg)\n\n";
     }
 
     // Benchmark across beam counts
     std::cout << "[4/4] Benchmarking Direct Beam Tracker throughput (Blackwell SM120 Fused "
                  "Multi-Beam)...\n\n";
-    std::vector<std::size_t> test_beam_counts = {1, 2, 4, 8, 12, 16};
 
     cudaEvent_t start_evt, stop_evt;
     cudaEventCreate(&start_evt);
     cudaEventCreate(&stop_evt);
 
     std::cout << "---------------------------------------------------------------------------------"
-                 "-------------------------------------\n";
-    std::cout << "| Active Beams |  Min (ms)  |  Avg (ms)  |  Med (ms)  |  Max (ms)  | Budget % "
-                 "(512ms) | Realtime Speedup | Eff. GB/s |\n";
+                 "----------------------------------------------------\n";
+    std::cout << "| Active Beams |  Min (ms)  |  Avg (ms)  |  Med (ms)  |  P99 (ms)  |  Max (ms)  | Budget % "
+                 "| Realtime Speedup | Eff. GB/s | GFLOPS   |\n";
     std::cout << "---------------------------------------------------------------------------------"
-                 "-------------------------------------\n";
+                 "----------------------------------------------------\n";
+
+    struct BeamBenchmarkRecord {
+        std::size_t active_beams = 0;
+        double min_ms = 0.0;
+        double avg_ms = 0.0;
+        double med_ms = 0.0;
+        double p99_ms = 0.0;
+        double max_ms = 0.0;
+        double eff_bandwidth_gb_s = 0.0;
+        double compute_gflops = 0.0;
+        double budget_utilization_pct = 0.0;
+        double realtime_speedup = 0.0;
+    };
+    std::vector<BeamBenchmarkRecord> beam_records;
 
     for (std::size_t b_count : test_beam_counts) {
         // Warmup
@@ -277,28 +356,82 @@ int main(int argc, char** argv) {
         double min_ms = runs.front();
         double max_ms = runs.back();
         double med_ms = runs[runs.size() / 2];
+        std::size_t p99_idx = std::min(runs.size() - 1, static_cast<std::size_t>(runs.size() * 0.99));
+        double p99_ms = runs[p99_idx];
         double sum = std::accumulate(runs.begin(), runs.end(), 0.0);
         double avg_ms = sum / runs.size();
 
-        // Effective memory traffic:
-        // Input read: 3.303 GB (read ONCE due to multi-beam register tiling!)
-        // Output write: n_time * n_freq * b_count * 8 bytes
         const double read_bytes = static_cast<double>(input_bytes);
         const double write_bytes = static_cast<double>(n_time * n_freq * b_count * sizeof(float2));
         const double total_effective_bytes = read_bytes + write_bytes;
         const double eff_bandwidth_gb_s = (total_effective_bytes / (avg_ms * 1e-3)) / 1e9;
         const double realtime_factor = real_time_budget_ms / avg_ms;
+        const double total_mac_ops = static_cast<double>(n_time) * n_freq * n_ant * b_count;
+        const double compute_gflops = (total_mac_ops * 8.0) / (avg_ms * 1e-3) / 1e9;
+        const double budget_pct = (avg_ms / real_time_budget_ms) * 100.0;
+
+        BeamBenchmarkRecord rec;
+        rec.active_beams = b_count;
+        rec.min_ms = min_ms;
+        rec.avg_ms = avg_ms;
+        rec.med_ms = med_ms;
+        rec.p99_ms = p99_ms;
+        rec.max_ms = max_ms;
+        rec.eff_bandwidth_gb_s = eff_bandwidth_gb_s;
+        rec.compute_gflops = compute_gflops;
+        rec.budget_utilization_pct = budget_pct;
+        rec.realtime_speedup = realtime_factor;
+        beam_records.push_back(rec);
 
         std::string label = std::to_string(b_count) + " Beam" + (b_count > 1 ? "s" : "");
         std::cout << "| " << std::left << std::setw(12) << label << " | " << std::right
                   << std::fixed << std::setprecision(3) << std::setw(10) << min_ms << " | "
                   << std::setw(10) << avg_ms << " | " << std::setw(10) << med_ms << " | "
-                  << std::setw(10) << max_ms << " | " << std::setw(15)
-                  << (avg_ms / real_time_budget_ms * 100.0) << "% | " << std::setw(14)
-                  << realtime_factor << "x | " << std::setw(9) << eff_bandwidth_gb_s << " |\n";
+                  << std::setw(10) << p99_ms << " | " << std::setw(10) << max_ms << " | "
+                  << std::setw(7) << budget_pct << "% | " << std::setw(15)
+                  << realtime_factor << "x | " << std::setw(9) << eff_bandwidth_gb_s << " | "
+                  << std::setw(8) << compute_gflops << " |\n";
     }
     std::cout << "---------------------------------------------------------------------------------"
-                 "-------------------------------------\n\n";
+                 "----------------------------------------------------\n\n";
+
+    if (!json_output.empty()) {
+        std::ofstream jf(json_output);
+        if (jf.is_open()) {
+            jf << "{\n";
+            jf << "  \"device\": \"" << prop.name << "\",\n";
+            jf << "  \"vram_total_mb\": " << (prop.totalGlobalMem / (1024 * 1024)) << ",\n";
+            jf << "  \"vram_allocated_mb\": " << vram_allocated_mb << ",\n";
+            jf << "  \"n_ant\": " << n_ant << ",\n";
+            jf << "  \"n_freq\": " << n_freq << ",\n";
+            jf << "  \"n_time\": " << n_time << ",\n";
+            jf << "  \"max_beams\": " << max_beams << ",\n";
+            jf << "  \"frame_budget_ms\": " << real_time_budget_ms << ",\n";
+            jf << "  \"rel_l2_error\": " << rel_l2_err << ",\n";
+            jf << "  \"max_phase_err_deg\": " << max_phase_err_deg << ",\n";
+            jf << "  \"snr_db\": " << snr_db << ",\n";
+            jf << "  \"benchmarks\": [\n";
+            for (std::size_t i = 0; i < beam_records.size(); ++i) {
+                const auto& b = beam_records[i];
+                jf << "    {\n";
+                jf << "      \"active_beams\": " << b.active_beams << ",\n";
+                jf << "      \"min_ms\": " << b.min_ms << ",\n";
+                jf << "      \"avg_ms\": " << b.avg_ms << ",\n";
+                jf << "      \"med_ms\": " << b.med_ms << ",\n";
+                jf << "      \"p99_ms\": " << b.p99_ms << ",\n";
+                jf << "      \"max_ms\": " << b.max_ms << ",\n";
+                jf << "      \"eff_bandwidth_gb_s\": " << b.eff_bandwidth_gb_s << ",\n";
+                jf << "      \"compute_gflops\": " << b.compute_gflops << ",\n";
+                jf << "      \"budget_utilization_pct\": " << b.budget_utilization_pct << ",\n";
+                jf << "      \"realtime_speedup\": " << b.realtime_speedup << "\n";
+                jf << "    }" << (i + 1 < beam_records.size() ? "," : "") << "\n";
+            }
+            jf << "  ]\n";
+            jf << "}\n";
+            jf.close();
+            std::cout << "[JSON] Successfully wrote benchmark metrics to: " << json_output << "\n";
+        }
+    }
 
     // Clean up
     cudaFree(d_packed);

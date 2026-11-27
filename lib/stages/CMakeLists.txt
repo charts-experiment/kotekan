@@ -38,6 +38,7 @@ add_library(
     streamSingleDishVDIF.cpp
     accumulate.cpp
     chartsAccumulate.cpp
+    chartsMVDRBeams.cpp
     chartsFEngineSim.cpp
     bufferStatus.cpp
     bufferSend.cpp
@@ -45,7 +46,6 @@ add_library(
     simpleAutocorr.cpp
     SampleAutocorr.cpp
     SimpleCrosscorr.cpp
-    $<$<STREQUAL:${WITH_SPAWN_PROCESS},ON>:SpawnProcess.cpp>
     freqSplit.cpp
     FreqSubset.cpp
     prodSubset.cpp
@@ -55,7 +55,6 @@ add_library(
     visAccumulate.cpp
     visCompression.cpp
     timeDownsample.cpp
-    frbPostProcess.cpp
     basebandReadout.cpp
     chartsBasebandReadout.cpp
     chartsTriggeredBasebandReadout.cpp
@@ -69,7 +68,8 @@ add_library(
     VisWriter.cpp
     HFBRawReader.cpp
     restInspectFrame.cpp
-    frbNetworkProcess.cpp
+    frbNetworkSend.cpp
+    pirateNetworkSend.cpp
     pulsarNetworkProcess.cpp
     bufferMerge.cpp
     bufferCopy.cpp
@@ -124,6 +124,7 @@ add_library(
     dropAllFrames.cpp
     N2FrameToVisFrame.cpp
     RfiMaskSum.cpp
+    DtvRfiMask.cpp
     RfiFrameMask.cpp
     RfiSKMetrics.cpp
     CountLostPLSamplesScalar.cpp

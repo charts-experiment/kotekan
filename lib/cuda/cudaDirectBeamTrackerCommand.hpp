@@ -17,6 +17,8 @@
 #include <string>
 #include <vector>
 
+class StatTracker;
+
 namespace kotekan {
 
 class cudaDirectBeamTrackerCommand;
@@ -27,6 +29,9 @@ struct TrackerGroup {
     DirectBeamTrackerConfig config;
     std::vector<cudaDirectBeamTrackerCommand*> instances;
     bool endpoints_registered = false;
+    std::string gains_file;
+    std::string sefd_weights_file;
+    std::uint64_t gains_generation = 1;
 };
 
 class cudaDirectBeamTrackerCommand : public cudaCommand {
@@ -38,6 +43,8 @@ public:
 
     cudaEvent_t execute(cudaPipelineState& pipestate,
                         const std::vector<cudaEvent_t>& pre_events) override;
+
+    void finalize_frame() override;
 
     static void set_shared_antenna_mask(const std::array<std::uint8_t, MAX_DIRECT_ANTENNAS>& mask,
                                         int n_active = -1);
@@ -66,18 +73,40 @@ public:
     const float* get_host_beam_power() const {
         return _h_beam_power;
     }
+    std::vector<float> get_last_beam_power() const {
+        std::lock_guard<std::mutex> lk(_beam_power_mutex);
+        return _last_beam_power;
+    }
     std::uint64_t get_last_frame_id() const {
         return _last_frame_id.load(std::memory_order_relaxed);
     }
     double get_last_timestamp_utc() const {
         return _last_timestamp_utc.load(std::memory_order_relaxed);
     }
+    int32_t get_gains_first_channel() const {
+        return _gains_first_channel;
+    }
+    int32_t get_num_antennas() const {
+        return _num_antennas;
+    }
+    const std::vector<int>& get_gains_antennas() const {
+        return _gains_antennas;
+    }
+    bool get_conjugate_gains() const {
+        return _conjugate_gains;
+    }
 
 private:
     void allocate_device_buffers();
     void free_device_buffers();
     void invalidate_cuda_graphs();
-    void update_weights_if_needed(const DirectBeamTrackerConfig& cfg, cudaStream_t stream);
+    void update_weights_if_needed(const DirectBeamTrackerConfig& cfg, cudaStream_t stream,
+                                   double frame_timestamp_utc = -1.0,
+                                   bool* out_has_motion = nullptr);
+    void upload_calibration_gains(const DirectBeamTrackerConfig& cfg,
+                                  cudaStream_t stream = nullptr,
+                                  std::uint64_t gains_gen = 1);
+    void upload_wavenumbers(cudaStream_t stream = nullptr);
 
     std::string _rest_prefix = "/direct_tracker";
     double _freq_start_hz = 300.0e6;
@@ -106,9 +135,17 @@ private:
     double _sample_period_s = charts::constants::fpga_time_resolution_s;
     std::uint64_t _frame_counter = 0;
 
+    // Kotekan StatTrackers for live REST telemetry (/trackers)
+    std::shared_ptr<StatTracker> _tracker_kernel_time;
+    std::shared_ptr<StatTracker> _tracker_realtime_budget;
+    std::shared_ptr<StatTracker> _tracker_active_beams;
+    std::shared_ptr<StatTracker> _tracker_vram_mb;
+
     // Per-instance generation trackers for multi-stream synchronization
     std::uint64_t _applied_config_generation = 0;
     std::uint64_t _applied_mask_generation = 0;
+    std::uint64_t _applied_gains_generation = 0;
+    std::uint64_t _applied_beam_calibration_mask = ~0ULL;
 
     // CUDA Graph state
     bool _enable_cuda_graph = false;
@@ -119,8 +156,12 @@ private:
 
     std::string _gpu_mem_voltage;
     std::string _gpu_mem_formed_beams;
+    std::string _gpu_mem_beam_power;
+    std::string _gpu_mem_rfi_mask;
 
     std::vector<double> _frequencies_hz;
+    std::vector<double> _h_wavenumbers;
+    double _loaded_freq_start_hz = -1.0;
 
     // Persistent GPU buffers
     float2* _d_weights = nullptr;
@@ -132,15 +173,34 @@ private:
     float* _d_norm_taper = nullptr;
     float2* _d_calibration_gains = nullptr;
 
+    // Complex antenna gains (charts-utils .npy, x_obs = g x; conjugated on load when enabled); empty: none
+    std::string _gains_file;
+    std::string _sefd_weights_file;
+    int32_t _gains_first_channel = 0;
+    int32_t _loaded_gains_first_channel = -1;
+    std::vector<int> _gains_antennas;
+    std::vector<float2> _h_calibration_gains;
+    bool _conjugate_gains = true;
+
     // Power reduction buffers
     float* _d_beam_power = nullptr;
     float* _h_beam_power = nullptr;
+    mutable std::mutex _beam_power_mutex;
+    std::vector<float> _last_beam_power;
+    bool _last_frame_copied_power = false;
 
     // Sky grid support
     bool _grid_mode_enabled = false;
+    bool _compute_power_inline_only = false;
+    bool _enable_tensor_core = true;
+    DirectBeamformerMode _beamformer_mode = DirectBeamformerMode::DIRECT;
+    std::size_t _fft_2d_size = 16;
+    bool _applied_grid_apply_cal = true;
     float _grid_step = 0.02f;
     std::size_t _num_grid_points = 0;
+    SkyGridIndex _sky_grid_index;
     std::vector<float2> _h_grid_lms;
+    std::vector<DirectDirection3D> _h_directions_scratch;
     float2* _d_grid_weights = nullptr;
     float2* _d_grid_lms = nullptr;
 
